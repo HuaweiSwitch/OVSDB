@@ -1,0 +1,8079 @@
+/*
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <config.h>
+
+#include <ctype.h>
+#include <errno.h>
+#include <getopt.h>
+#include <limits.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "command-line.h"
+#include "column.h"
+#include "compiler.h"
+#include "daemon.h"
+#include "dirs.h"
+#include "dynamic-string.h"
+#include "fatal-signal.h"
+#include "json.h"
+#include "jsonrpc.h"
+#include "lib/table.h"
+#include "ovsdb.h"
+#include "ovsdb-data.h"
+#include "ovsdb-error.h"
+#include "poll-loop.h"
+#include "sort.h"
+#include "svec.h"
+#include "stream.h"
+#include "stream-ssl.h"
+#include "table.h"
+#include "timeval.h"
+#include "unixctl.h"
+#include "util.h"
+#include "vlog.h"
+#include "netconf/libnetconf.h"
+#include "ovsdb-client.h"
+
+
+struct table_callbacks table_func_map[] = {
+    {GLOBAL_TABLE_NAME, global_table_process},
+    {PHYSICAL_SWITCH_TABLE_NAME, physical_switch_table_process},
+    {LOGICAL_SWITCH_TABLE_NAME, logical_switch_table_process},
+    {PHYSICAL_PORT_TABLE_NAME, physical_port_table_process},
+    {UCAST_MACS_LOCAL_TABLE_NAME, ucast_macs_local_table_process},
+    {UCAST_MACS_REMOTE_TABLE_NAME, ucast_macs_remote_table_process},
+    {MCAST_MACS_LOCAL_TABLE_NAME, mcast_macs_local_table_process},
+    {MCAST_MACS_REMOTE_TABLE_NAME, mcast_macs_remote_table_process},
+    {PHYSICAL_LOCATOR_SET_TABLE_NAME, physical_locator_set_table_process},
+    {PHYSICAL_LOCATOR_TABLE_NAME, physical_locator_table_process},
+    /*below ones are not used*/
+    {LOGICAL_BINDING_STATS_TABLE_NAME, logical_binding_stats_table_process},
+    {LOGICAL_ROUTER_TABLE_NAME, logical_router_table_process},
+    {MANAGER_TABLE_NAME, manager_table_process},
+    {ARP_SOURCES_LOCAL_TABLE_NAME, arp_sources_local_table_process},
+    {ARP_SOURCES_REMOTE_TABLE_NAME, arp_sources_remote_table_process},
+};
+
+struct table_callbacks table_func_map_2[] = {
+    {GLOBAL_TABLE_NAME, global_table_process_2},
+    {PHYSICAL_SWITCH_TABLE_NAME, physical_switch_table_process_2},
+    {LOGICAL_SWITCH_TABLE_NAME, logical_switch_table_process_2},
+    {PHYSICAL_PORT_TABLE_NAME, physical_port_table_process_2},
+
+    {PHYSICAL_LOCATOR_TABLE_NAME, physical_locator_table_process_2},
+
+    {UCAST_MACS_LOCAL_TABLE_NAME, ucast_macs_local_table_process_2},
+    {UCAST_MACS_REMOTE_TABLE_NAME, ucast_macs_remote_table_process_2},
+    {MCAST_MACS_LOCAL_TABLE_NAME, mcast_macs_local_table_process_2},
+    {MCAST_MACS_REMOTE_TABLE_NAME, mcast_macs_remote_table_process_2},
+    {PHYSICAL_LOCATOR_SET_TABLE_NAME, physical_locator_set_table_process_2},
+    //{PHYSICAL_LOCATOR_TABLE_NAME, physical_locator_table_process},
+    /*below ones are not used*/
+    {LOGICAL_BINDING_STATS_TABLE_NAME, logical_binding_stats_table_process_2},
+    {LOGICAL_ROUTER_TABLE_NAME, logical_router_table_process_2},
+    {MANAGER_TABLE_NAME, manager_table_process_2},
+    {ARP_SOURCES_LOCAL_TABLE_NAME, arp_sources_local_table_process_2},
+    {ARP_SOURCES_REMOTE_TABLE_NAME, arp_sources_remote_table_process_2},
+};
+
+
+/*global used for vtep monitor*/
+struct ovsdb_vtep_db_tables ovsdb_vtep_db_table = {0};
+/*switch_vxlan_tunnel全局变量在pyhsical_locator表的变化中操作*/
+struct hw_vtep_vxlan_tunnel switch_vxlan_tunnel[VXLAN_TUNNEL_NUM_MAX] = {0};
+
+struct hw_vtep_vxlan_tunnel service_node_vxlan_tunnel_to_be_created[SERVICE_NODE_MAX]= {0};
+struct hw_vtep_vxlan_tunnel hypervisor_vxlan_tunnel_to_be_created[HYPERVISOR_MAX]= {0};
+int vxlan_tunnel_to_be_create_flag = 0; /*是否有隧道需要创建的标识位，用于locator表处理一阶段与二阶段的联系*/
+
+struct vxlan_tunnel_static_mac switch_vxlan_static_mac[VXLAN_TUNNEL_MAC_MAX] = {0};
+struct port_vlan_to_vni_map switch_vxlan_map[TABLE_PHYSICAL_PORT_NUM] = {0};
+int nve1_source_ip_configured = 0;
+
+/*global used for vtep transact*/
+struct logical_switch_uuid_and_vni logical_switch_info[TABLE_LOGICAL_SWITCH_NUM] = {0};
+
+/*device description*/
+char dev_desc[] = "CloudEngine series TOR";
+
+
+/*用于判断字符串内容是否相等,如果相等,返回1,否则返回0*/
+int string_equals(char *stringA, char *stringB)
+{
+    if((!stringA)||(!stringB))
+    {
+        return 0;
+    }
+
+    if(strlen(stringA) != strlen(stringB))
+    {
+        return 0;
+    }
+
+    if(!memcmp(stringA, stringB, strlen(stringA)))
+    {
+        return 1;
+    }
+
+    return 0;
+}
+
+
+/*MAC_ovsdb: 01:02:33:44:55:66  MAC_CE: 0102-3344-5566*/
+/*调用者必须保证mac_ce申请的内存大小为strlen("0102-3344-5566")+1*/
+/*用于配置vxlan静态mac的命令行暂时不支持，所以该函数暂时用不到*/
+void mac_translate_ovsdb_to_ce(char* mac_ovsdb, char* mac_ce)
+{
+
+    if((NULL==mac_ovsdb) || (NULL==mac_ce))
+    {
+        OVSDB_PRINTF_DEBUG("mac_ovsdb or mac_ce is null, return.");
+        return;
+    }
+
+    /*根据vtep的dump,ovsdb的mac格式如上面那种格式*/
+    if((strlen(mac_ovsdb))!=(strlen("11:22:33:44:55:66")))
+    {
+        OVSDB_PRINTF_DEBUG("wrong ovsdb-mac format,return.");
+        return;
+    }
+
+    /*转换*/
+    mac_ce[0] = mac_ovsdb[0];
+    mac_ce[1] = mac_ovsdb[1];
+    mac_ce[2] = mac_ovsdb[3];
+    mac_ce[3] = mac_ovsdb[4];
+    mac_ce[4] = '-';
+    mac_ce[5] = mac_ovsdb[6];
+    mac_ce[6] = mac_ovsdb[7];
+    mac_ce[7] = mac_ovsdb[9];
+    mac_ce[8] = mac_ovsdb[10];
+    mac_ce[9] = '-';
+    mac_ce[10] = mac_ovsdb[12];
+    mac_ce[11] = mac_ovsdb[13];
+    mac_ce[12] = mac_ovsdb[15];
+    mac_ce[13] = mac_ovsdb[16];
+    mac_ce[14] = 0;
+}
+
+void ce_config_nve1_source()
+{
+    OVSDB_PRINTF_DEBUG("ce_config_nve1_source.");
+
+    FILE *fp;
+    char buf[1000];
+
+    if(nve1_source_ip_configured)
+    {
+        OVSDB_PRINTF_DEBUG("Nve 1 source ip is configured,return.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a tunnel ip address.");
+        return;
+    }
+
+    snprintf(buf, 1000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2; echo interface Nve 1 ; sleep 2;echo undo source; sleep2;echo source %s; sleep 2; echo commit; sleep 2; )|"
+    "telnet %s",ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    if(fp=fopen("config_nve_source.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 config_nve_source.sh");
+    system("./config_nve_source.sh");
+
+    nve1_source_ip_configured = 1;
+
+}
+
+void ce_undo_config_nve1_source()
+{
+    OVSDB_PRINTF_DEBUG("ce_undo_config_nve1_source");
+
+    FILE *fp;
+    char buf[1000];
+
+    if(!nve1_source_ip_configured)
+    {
+        OVSDB_PRINTF_DEBUG("Nve 1 source ip is not configured, return.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a tunnel ip address.");
+        return;
+    }
+
+    snprintf(buf, 1000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2; echo interface Nve 1 ; sleep 2;echo undo source; sleep 2;echo commit;sleep 2)|"
+    "telnet %s", ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    if(fp=fopen("undo_config_nve_source.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 undo_config_nve_source.sh");
+    system("./undo_config_nve_source.sh");
+
+    nve1_source_ip_configured = 0;
+}
+
+
+void ce_config_bd(int vni)
+{
+
+    int vni_temp = vni;
+    FILE *fp;
+    char buf[2000];
+
+    OVSDB_PRINTF_DEBUG("ce_config_bd, vni = %d.", vni_temp);
+
+    /*调试，先注释掉*/
+
+    if((vni_temp > 32768)||(vni_temp < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("vni is not valid, which is %d.", vni_temp);
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    snprintf(buf, 2000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2;echo bridge-domain %d;sleep 2;echo vxlan vni %d; sleep 2;echo commit;sleep 2)|""telnet %s",
+        vni_temp,  vni_temp, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    OVSDB_PRINTF_DEBUG("buf = %s.", buf);
+
+    if(fp=fopen("config_bd.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 config_bd.sh");
+    system("./config_bd.sh");
+
+
+}
+
+
+void ce_undo_config_bd(int vni)
+{
+
+    int vni_temp = vni;
+    FILE *fp;
+    char buf[2000];
+
+    OVSDB_PRINTF_DEBUG("ce_undo_config_bd");
+    OVSDB_PRINTF_DEBUG("vni = %d", vni_temp );
+
+/*调试，先注释掉*/
+
+    if((vni_temp > 32768)||(vni_temp < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("vni is not valid, which is %d.", vni_temp);
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    snprintf(buf, 2000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2;echo undo bridge-domain %d;sleep 2;echo commit;sleep 2)|""telnet %s",
+        vni_temp, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    OVSDB_PRINTF_DEBUG("buf = %s.", buf);
+
+    if(fp=fopen("undo_config_bd.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 undo_config_bd.sh");
+    system("./undo_config_bd.sh");
+
+
+}
+
+
+/*physical port表变化时，配置bridge-domain和二层子接口*/
+/*暂时采用AC的实现方案，让BD=VNI*/
+/*后续管理网口ip从physical_switch中获取*/
+
+/*需要重新写，子接口号等于vlanid +1*/
+void ce_config_port(int vlan_id, int vni, char* port_name)
+{
+
+    OVSDB_PRINTF_DEBUG("ce_config_port");
+    int vlan_id_temp = vlan_id;
+    int vni_temp = vni;
+    int sub_interface_num=1;
+    FILE *fp;
+    char buf[2000];
+
+    if((vlan_id_temp > 4093)||(vlan_id_temp<0))
+    {
+        OVSDB_PRINTF_DEBUG("vlan id in invalid, which is %d\n", vlan_id_temp);
+        return;
+    }
+
+    if((vni_temp > 32768)||(vni_temp < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("vni is not valid, which is %d\n", vni_temp);
+        return;
+    }
+
+    if(!port_name)
+    {
+        OVSDB_PRINTF_DEBUG("port name is NULL\n");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address\n");
+        return;
+    }
+
+    OVSDB_PRINTF_DEBUG("vlan id = %d, vni = %d", vlan_id_temp, vni_temp );
+    OVSDB_PRINTF_DEBUG("port name = %s", port_name);
+
+    sub_interface_num = vlan_id_temp+1;
+
+    /*必须将int转换为int型，不然会有问题*/
+
+    if(0 == vlan_id_temp)
+    {
+        snprintf(buf, 2000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2;echo interface %s.%d mode l2;sleep 2;echo encapsulation untag;sleep 2;echo bridge-domain %d;sleep 2;echo commit;sleep 2)|""telnet %s",
+            port_name, sub_interface_num, vni_temp, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+    }
+    else
+    {
+        snprintf(buf, 2000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2;echo interface %s.%d mode l2;sleep 2;echo encapsulation dot1q vid %d;sleep 2;echo bridge-domain %d;sleep 2;echo commit;sleep 2)|""telnet %s",
+            port_name, sub_interface_num, vlan_id_temp,vni_temp, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    }
+
+    OVSDB_PRINTF_DEBUG("buf = %s", buf);
+
+    if(fp=fopen("config_bd_and_port.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 config_bd_and_port.sh");
+    system("./config_bd_and_port.sh");
+
+}
+
+void ce_undo_config_port(int vlan_id, int vni, char* port_name)
+{
+    int vlan_id_temp = vlan_id;
+    int vni_temp = vni;
+    int sub_interface_num=1;
+    FILE *fp;
+    char buf[2000];
+
+    OVSDB_PRINTF_DEBUG("ce_undo_config_port");
+    OVSDB_PRINTF_DEBUG("vlan id = %d, vni = %d", vlan_id_temp, vni_temp);
+
+    if((vlan_id_temp > 4093)||(vlan_id_temp<0))
+    {
+        OVSDB_PRINTF_DEBUG("vlan id in invalid, which is %d.", vlan_id_temp);
+        return;
+    }
+
+    if((vni_temp > 32768)||(vni_temp < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("vni is not valid, which is %d.", vni_temp);
+        return;
+    }
+
+    if(!port_name)
+    {
+        OVSDB_PRINTF_DEBUG("port name is NULL.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    sub_interface_num = vlan_id_temp+1;
+
+    snprintf(buf, 2000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2;echo undo interface %s.%d;sleep 2; echo commit;sleep 2)|""telnet %s",
+        port_name, sub_interface_num, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    OVSDB_PRINTF_DEBUG("buf = %s", buf);
+
+    if(fp=fopen("undo_config_bd_and_port.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 undo_config_bd_and_port.sh");
+    system("./undo_config_bd_and_port.sh");
+
+}
+
+
+/*后续管理网口ip从physical_switch中获取*/
+void ce_config_vxlan_tunnel(int vni, char* source_ip, char* dst_ip)
+{
+
+    int vni_temp = vni;
+    FILE *fp;
+    char buf[1000];
+    int k =0 ;
+
+    OVSDB_PRINTF_DEBUG("ce_config_vxlan_tunnel");
+    OVSDB_PRINTF_DEBUG("vni=%d, source ip=%s, dst ip=%s", vni_temp, source_ip, dst_ip);
+
+    if((vni_temp > 32768)||(vni_temp < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("vni is not valid, which is %d.", vni_temp);
+        return;
+    }
+
+    if(!source_ip)
+    {
+        OVSDB_PRINTF_DEBUG("source_ip is NULL.");
+        return;
+    }
+
+    if(!dst_ip)
+    {
+        OVSDB_PRINTF_DEBUG("dst_ip is NULL.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    snprintf(buf, 1000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2;echo interface Nve1; sleep 2; echo vni %d head-end peer-list %s;sleep 2;echo  commit; sleep 2)|"
+        "telnet %s", vni_temp, dst_ip, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    if(fp=fopen("config_vxlan_tunnel.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 config_vxlan_tunnel.sh");
+    system("./config_vxlan_tunnel.sh");
+
+    for(k=0; k<VXLAN_TUNNEL_NUM_MAX; k++)
+    {
+        if(switch_vxlan_tunnel[k].used_bit)
+        {
+            continue;
+        }
+        else
+        {
+            switch_vxlan_tunnel[k].vni = vni;
+
+            /*dst_ip*/
+            switch_vxlan_tunnel[k].dst_ip = malloc(strlen(dst_ip)+1);
+            memcpy(switch_vxlan_tunnel[k].dst_ip, dst_ip,
+                strlen(dst_ip)+1);
+            /*source_ip*/
+            switch_vxlan_tunnel[k].source_ip = malloc(strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+            memcpy(switch_vxlan_tunnel[k].source_ip, ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+
+            switch_vxlan_tunnel[k].used_bit = 1;
+
+            OVSDB_PRINTF_DEBUG("insert entry to switch_vxlan_tunnel.k = %d, vni=%d. ", k, switch_vxlan_tunnel[k].vni);
+            OVSDB_PRINTF_DEBUG("source_ip = %s, dst_ip = %s.\n", switch_vxlan_tunnel[k].source_ip, switch_vxlan_tunnel[k].dst_ip);
+
+            break;
+        }
+    }
+
+}
+
+
+void ce_undo_config_vxlan_tunnel(int vni, char* source_ip, char* dst_ip)
+{
+
+    int vni_temp = vni;
+    FILE *fp;
+    char buf[1000];
+
+    OVSDB_PRINTF_DEBUG("ce_undo_config_vxlan_tunnel");
+    OVSDB_PRINTF_DEBUG("vni=%d, source ip=%s, dst ip=%s", vni_temp, source_ip, dst_ip);
+
+    if((vni_temp > 32768)||(vni_temp < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("vni is not valid, which is %d.", vni_temp);
+        return;
+    }
+
+    if(!source_ip)
+    {
+        OVSDB_PRINTF_DEBUG("source_ip is NULL.");
+        return;
+    }
+
+    if(!dst_ip)
+    {
+        OVSDB_PRINTF_DEBUG("dst_ip is NULL.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    snprintf(buf, 1000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 2;echo interface Nve1; sleep 2; echo undo vni %d head-end peer-list %s;sleep 2;echo  commit; sleep 2)|"
+        "telnet %s", vni_temp, dst_ip, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    if(fp=fopen("undo_config_vxlan_tunnel.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 undo_config_vxlan_tunnel.sh");
+    system("./undo_config_vxlan_tunnel.sh");
+
+}
+
+
+void ce_config_vxlan_tunnel_static_mac(char* ce_mac, char* source_ip, char* dst_ip, int vni)
+{
+
+    int vni_temp = vni;
+    FILE *fp;
+    char buf[1000];
+    int k = 0;
+
+    OVSDB_PRINTF_DEBUG("ce_config_vxlan_tunnel_static_mac");
+    OVSDB_PRINTF_DEBUG("ce_mac=%s, source_ip=%s, dst_ip=%s,", ce_mac, source_ip, dst_ip);
+    OVSDB_PRINTF_DEBUG("vni = %d", vni_temp);
+
+    if(!source_ip)
+    {
+        OVSDB_PRINTF_DEBUG("source_ip is NULL.");
+        return;
+    }
+
+    if(!dst_ip)
+    {
+        OVSDB_PRINTF_DEBUG("dst_ip is NULL.");
+        return;
+    }
+
+    if(!ce_mac)
+    {
+        OVSDB_PRINTF_DEBUG("ce_mac is NULL.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    snprintf(buf, 1000, "(sleep 3;echo huawei123;sleep 3; echo system; echo mac-address static %s bridge-domain %d source %s peer %s vni %d;sleep 1 ;echo  commit; sleep 1)|"
+     "telnet %s", ce_mac, vni_temp, source_ip, dst_ip, vni_temp, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    if(fp=fopen("config_static_mac.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 config_static_mac.sh");
+    system("./config_static_mac.sh");
+
+    /*需要往全局变量里写*/
+    for(k=0; k<VXLAN_TUNNEL_MAC_MAX; k++)
+    {
+        if(switch_vxlan_static_mac[k].used_bit)
+        {
+            continue;
+        }
+        else
+        {
+            /*source ip*/
+            switch_vxlan_static_mac[k].source_ip = malloc(strlen(source_ip)+1);
+            memcpy(switch_vxlan_static_mac[k].source_ip, source_ip, strlen(source_ip)+1);
+
+            /*dst_ip*/
+            switch_vxlan_static_mac[k].dst_ip= malloc(strlen(dst_ip)+1);
+            memcpy(switch_vxlan_static_mac[k].dst_ip, dst_ip, strlen(dst_ip)+1);
+
+            /*mac*/
+            switch_vxlan_static_mac[k].ce_mac= malloc(strlen(ce_mac)+1);
+            memcpy(switch_vxlan_static_mac[k].ce_mac, ce_mac, strlen(ce_mac)+1);
+
+            /*vni*/
+            switch_vxlan_static_mac[k].vni = vni;
+
+            /*used_bit*/
+            switch_vxlan_static_mac[k].used_bit = 1;
+
+            break;
+        }
+    }
+
+}
+
+void ce_undo_config_vxlan_tunnel_static_mac(char* ce_mac, char* source_ip, char* dst_ip, int vni)
+{
+    int vni_temp = vni;
+    FILE *fp;
+    char buf[1000];
+
+    OVSDB_PRINTF_DEBUG("ce_undo_config_vxlan_tunnel_static_mac");
+    OVSDB_PRINTF_DEBUG("ce_mac=%s, source_ip=%s, dst_ip=%s,", ce_mac, source_ip, dst_ip);
+    OVSDB_PRINTF_DEBUG("vni = %d", vni_temp);
+
+    if(!source_ip)
+    {
+        OVSDB_PRINTF_DEBUG("source_ip is NULL.");
+        return;
+    }
+
+    if(!dst_ip)
+    {
+        OVSDB_PRINTF_DEBUG("dst_ip is NULL.");
+        return;
+    }
+
+    if(!ce_mac)
+    {
+        OVSDB_PRINTF_DEBUG("ce_mac is NULL.");
+        return;
+    }
+
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("TOR does not have a management ip address.");
+        return;
+    }
+
+    snprintf(buf, 1000, "(sleep 3;echo huawei123;sleep 3; echo system; sleep 3 ;echo undo mac-address static %s bridge-domain %d source %s peer %s vni %d;sleep 3 ;echo  commit; sleep 2)|"
+     "telnet %s", ce_mac, vni_temp, source_ip, dst_ip, vni_temp, ovsdb_vtep_db_table.table_physical_switch[0].management_ips[0]);
+
+    if(fp=fopen("undo_config_static_mac.sh", "w+"))
+    {
+        puts("succeed to open file");
+        fputs(buf,fp);
+    }
+    else
+    {
+        puts("failed to open file");
+    }
+
+    fclose(fp);
+
+    system("chmod 777 undo_config_static_mac.sh");
+    system("./undo_config_static_mac.sh");
+
+}
+
+#if 1
+/*netconf session id*/
+struct nc_session* gst_netconf_session = NULL;
+struct nc_cpblts*  gst_cpblts          = NULL;
+
+int netconf_ce_config_init()
+{
+    netconf_connect    stNetCon        = {0};
+
+    /* 1.用户输入netconf管理ip */
+    printf("connect ip: ");
+    scanf("%s",stNetCon.ip);
+
+    /* 2.用户输入netconf用户名 */
+    printf("username: ");
+    scanf("%s",stNetCon.username);
+
+    OVSDB_PRINTF_DEBUG("netconf ip: %s, username: %s\r\n", stNetCon.ip, stNetCon.username);
+
+    gst_cpblts = nc_cpblts_new(NULL);
+    if (gst_cpblts == NULL)
+    {
+        return -1;
+    }
+
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:base:1.0");
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:writable-running:1.0");
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:candidate:1.0");
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:confirmed-commit:1.0");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/discard-commit/1.0");
+
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:startup:1.0");
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:rollback-on-error:1.0");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/sync/1.1");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/sync/1.0");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/exchange/1.0");
+
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/active/1.0");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/action/1.0");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/execute-cli/1.0");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/update/1.0");
+    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/commit-description/1.0");
+
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:notification:1.0");
+    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:interleave:1.0");
+
+    gst_netconf_session = nc_session_connect(stNetCon.ip, NETCONF_PORT, stNetCon.username, gst_cpblts);
+    if (NULL == gst_netconf_session)
+    {
+        nc_cpblts_free(gst_cpblts);
+        gst_cpblts = NULL;
+        printf("\r\n[ERROR]Session connect failed when trying to connect to netconf.");
+        return -1;
+    }
+
+    return 0;
+}
+
+void netconf_ce_config_destory()
+{
+    if (NULL != gst_netconf_session)
+    {
+        nc_session_free(gst_netconf_session);
+        gst_netconf_session = NULL;
+    }
+
+    if (NULL != gst_cpblts)
+    {
+        nc_cpblts_free(gst_cpblts);
+        gst_cpblts = NULL;
+    }
+
+    return;
+}
+
+void netconf_get_confbit(unsigned int uiVlanId, unsigned char *netconfBit)
+{
+    //int    i           = 0;
+    unsigned int    uiVlanValue = 0;
+
+    uiVlanValue = uiVlanId;
+    netconfBit[(uiVlanValue >> 3)] |= (1 << (uiVlanValue & 0x07));
+}
+
+void netconf_vlanbit2netvlanbit(unsigned char aucVlanBit[], unsigned char aucNetVlanBitStr[])
+{
+    unsigned int uiLoopi     = 0;
+    unsigned int uiLoopj     = 0;
+    unsigned int uiLoopk     = 0;
+    unsigned int ucVlanValue = 0;
+
+    for (uiLoopi = 0; (uiLoopi < NETCONF_VLANBIT_LEN) && (uiLoopk < NETCONF_VLANBIT_LEN_STR); uiLoopi++)
+    {
+        ucVlanValue = 0;
+        for (uiLoopj = 0; uiLoopj < 8; uiLoopj++)
+        {
+            ucVlanValue += NETCONF_BIT_REVERSE(aucVlanBit[uiLoopi], uiLoopj);
+        }
+
+        NETCONF_NUM_TO_STR((ucVlanValue & 0xf), aucNetVlanBitStr[uiLoopk+1]);
+        NETCONF_NUM_TO_STR(((ucVlanValue & 0xf0)>>4), aucNetVlanBitStr[uiLoopk]);
+        uiLoopk += 2;
+    }
+}
+
+
+unsigned int netconf_ce_set_config(char* send_data)
+{
+    unsigned int    uiRet  = 0;
+    nc_rpc          *rpc   = NULL;
+    nc_reply        *reply = NULL;
+
+    OVSDB_NULL_RETURN(send_data);
+
+    rpc = nc_rpc_generic(send_data);
+
+    /* netconf下发配置*/
+    nc_session_send_recv(gst_netconf_session, rpc, &reply);
+
+    nc_rpc_free(rpc);
+    rpc = NULL;
+
+    uiRet = nc_reply_get_type(reply);
+    if (uiRet != NC_REPLY_OK)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to set vxlan configuration, error message is %s.",
+                           nc_reply_get_errormsg(reply));
+        nc_reply_free(reply);
+        return OVSDB_ERR;
+    }
+
+    nc_reply_free(reply);
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_query_config_data(char* send_data, char ** ppcReplyData)
+{
+    NC_MSG_TYPE     sessionRet   = NC_MSG_REPLY;
+    NC_REPLY_TYPE   replyRet     = NC_REPLY_DATA;
+    unsigned int    uiLen        = 0;
+    nc_rpc          *rpc         = NULL;
+    nc_reply        *reply       = NULL;
+    char            *paReplyData = NULL;
+
+    OVSDB_NULL_RETURN(send_data);
+
+    rpc = nc_rpc_generic(send_data);
+
+    if (NULL == rpc)
+        return OVSDB_ERR;
+
+    /* netconf下发配置*/
+    sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
+
+    nc_rpc_free(rpc);
+    rpc = NULL;
+
+    if (sessionRet != NC_MSG_REPLY){
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query configuration, error message is %s.",
+            nc_reply_get_errormsg(reply));
+    }
+
+    replyRet = nc_reply_get_type(reply);
+    if (replyRet != NC_REPLY_DATA)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to get reply configuration, error message is %s.",
+            nc_reply_get_errormsg(reply));
+        nc_reply_free(reply);
+        return OVSDB_ERR;
+    }
+
+    /* 获取reply中的数据部分 */
+    paReplyData = nc_reply_get_data(reply);
+
+    uiLen = strlen(paReplyData);
+
+    *ppcReplyData = xmalloc(uiLen + 1);
+    if (NULL == *ppcReplyData)
+    {
+        nc_reply_free(reply);
+        return OVSDB_ERR;
+    }
+
+    snprintf(*ppcReplyData, uiLen+1, paReplyData);
+
+    nc_reply_free(reply);
+    return OVSDB_OK;
+
+}
+
+unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
+{
+    NC_MSG_TYPE     sessionRet   = NC_MSG_REPLY;
+    NC_REPLY_TYPE   replyRet     = NC_REPLY_DATA;
+    unsigned int    uiLen        = 0;
+    nc_rpc          *rpc         = NULL;
+    nc_reply        *reply       = NULL;
+    char            *paReplyData = NULL;
+
+    OVSDB_NULL_RETURN(send_data);
+
+    rpc = nc_rpc_generic(send_data);
+
+    if (NULL == rpc)
+        return OVSDB_ERR;
+
+    /* netconf下发配置*/
+    sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
+
+    nc_rpc_free(rpc);
+    rpc = NULL;
+
+    if (sessionRet != NC_MSG_REPLY){
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query configuration, error message is %s.",
+            nc_reply_get_errormsg(reply));
+    }
+
+    replyRet = nc_reply_get_type(reply);
+    if (replyRet != NC_REPLY_DATA)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to get reply configuration, error message is %s.",
+            nc_reply_get_errormsg(reply));
+        nc_reply_free(reply);
+        return OVSDB_ERR;
+    }
+
+    /* 获取reply的所有数据 */
+    paReplyData = nc_reply_dump(reply);
+
+    uiLen = strlen(paReplyData);
+
+    *ppcReplyData = xmalloc(uiLen + 1);
+    if (NULL == *ppcReplyData)
+    {
+        nc_reply_free(reply);
+        return OVSDB_ERR;
+    }
+
+    snprintf(*ppcReplyData, uiLen+1, paReplyData);
+
+    nc_reply_free(reply);
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_config_bd(unsigned int uiVniId)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_bd********************");
+    unsigned int    uiRet                             = 0;
+    char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
+    char            *paReplyData                      = NULL;
+
+    if (uiVniId > MAX_VNI_ID || uiVniId < MIN_VNI_ID)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]The VNI id %d is illegal.", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    /* 1.check before config [bridge-domain uiBdId] */
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
+              "<bds>"\
+                "<bd>"\
+                  "<bdId></bdId>"\
+                "</bd>"\
+              "</bds>"\
+            "</evc>"\
+          "</filter>"\
+        "</get>");
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    //printf("data out is %s\n", aReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query VNI before config [bridge-domain %d]", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    if ('\0' == paReplyData[0])
+    {
+        /* 1.config [bridge-domain uiBdId] */
+        snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
+                  "<bds>"\
+                    "<bd operation=\"create\">"\
+                      "<bdId>%d</bdId>"\
+                    "</bd>"\
+                  "</bds>"\
+                "</evc>"\
+              "</config>"\
+            "</edit-config>", uiVniId);
+
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
+            return OVSDB_ERR;
+        }
+    }
+
+    /* 2.config [vxlan vni uiVniId] */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Vni2Bds>"\
+                "<nvo3Vni2Bd operation=\"create\">"\
+                  "<vniId>%d</vniId>"\
+                  "<bdId>%d</bdId>"\
+                "</nvo3Vni2Bd>"\
+              "</nvo3Vni2Bds>"\
+            "</nvo3>"\
+          "</config>"\
+        "</edit-config>", uiVniId, uiVniId);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [vxlan vni %d]", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+
+/*
+   undo bridge-domain xxxx
+*/
+unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_bd********************");
+    unsigned int    uiRet                             = 0;
+    char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
+    char            *paReplyData                      = NULL;
+
+    if (uiVniId > MAX_VNI_ID || uiVniId < MIN_VNI_ID)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]The VNI id %d is illegal.", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    /* 1.check before config [bridge-domain uiBdId] */
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
+              "<bds>"\
+                "<bd>"\
+                  "<bdId></bdId>"\
+                "</bd>"\
+              "</bds>"\
+            "</evc>"\
+          "</filter>"\
+        "</get>");
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    //printf("data out is %s\n", aReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query VNI before config [undo bridge-domain %d].", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    if ('\0' != paReplyData[0])
+    {
+        /* 2.config [undo bridge-domain uiVniId] */
+        snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
+                  "<bds>"\
+                    "<bd operation=\"delete\">"\
+                      "<bdId>%d</bdId>"\
+                    "</bd>"\
+                  "</bds>"\
+                "</evc>"\
+              "</config>"\
+            "</edit-config>", uiVniId);
+
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo bridge-domain %d].", uiVniId);
+            return OVSDB_ERR;
+        }
+    }
+    else
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR][bridge-domain %d] doesn't exist.", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_nve1_source********************");
+    unsigned int uiRet                             = 0;
+    char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
+    char         *paReplyData                      = NULL;
+
+    /* 1.判断nve1的source ip是否已配置 */
+    if(nve1_source_ip_configured)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Nve 1 source ip is configured");
+        return OVSDB_ERR;
+    }
+
+    /* 2.查询interface nve 1 是否存在*/
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface>"\
+                  "<ifName>Nve1</ifName>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</filter>"\
+        "</get>");
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    //printf("data out is %s\n", aReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query nve1 before config [interface nve 1].");
+        return OVSDB_ERR;
+    }
+
+    if ('\0' == paReplyData[0])
+    {
+        /* 3.配置interface nve 1 */
+        snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<interfaces>"\
+                    "<interface operation=\"create\">"\
+                      "<ifName>Nve1</ifName>"\
+                    "</interface>"\
+                  "</interfaces>"\
+                "</ifm>"\
+              "</config>"\
+            "</edit-config>");
+
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [interface Nve1].");
+            return OVSDB_ERR;
+        }
+    }
+
+    /* 4.配置source 1.1.1.1 */
+    /* 4.1先删除source配置 */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Nves>"\
+                "<nvo3Nve operation=\"merge\">"\
+                  "<ifName>Nve1</ifName>"\
+                  "<srcAddr>0.0.0.0</srcAddr>"\
+                "</nvo3Nve>"\
+              "</nvo3Nves>"\
+            "</nvo3>"\
+          "</config>"\
+        "</edit-config>");
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo source].");
+        return OVSDB_ERR;
+    }
+
+    /* 4.2再配置source 1.1.1.1 */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Nves>"\
+                "<nvo3Nve operation=\"merge\">"\
+                  "<ifName>Nve1</ifName>"\
+                  "<srcAddr>%s</srcAddr>"\
+                "</nvo3Nve>"\
+              "</nvo3Nves>"\
+            "</nvo3>"\
+          "</config>"\
+        "</edit-config>", paVtepIp);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [source %s].", paVtepIp);
+        return OVSDB_ERR;
+    }
+
+    /* 5.将nve1_source_ip_configured标记位置为1 */
+    nve1_source_ip_configured = 1;
+
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_nve1_source********************");
+    unsigned int uiRet                             = 0;
+    char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
+    char         *paReplyData                      = NULL;
+
+    /* 1.判断nve1的source ip是否已配置 */
+    if(!nve1_source_ip_configured)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Nve 1 source ip is not configured.");
+        return OVSDB_ERR;
+    }
+
+    /* 2.查询interface nve 1 是否存在*/
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface>"\
+                  "<ifName>Nve1</ifName>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</filter>"\
+        "</get>");
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    //printf("data out is %s\n", aReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query nve1 before config [undo interface nve 1].");
+        return OVSDB_ERR;
+    }
+
+    if ('\0' != paReplyData[0])
+    {
+        /* 3.删除interface nve 1 */
+        snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<interfaces>"\
+                    "<interface operation=\"delete\">"\
+                      "<ifName>Nve1</ifName>"\
+                    "</interface>"\
+                  "</interfaces>"\
+                "</ifm>"\
+              "</config>"\
+            "</edit-config>");
+
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo interface Nve1].");
+            return OVSDB_ERR;
+        }
+
+        /* 4.将nve1_source_ip_configured标记位置为0 */
+        nve1_source_ip_configured = 0;
+    }
+    else
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR][interface Nve 1] doesn't exist.");
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId, char* paIfname)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_port********************");
+    unsigned int  uiRet                                   = 0;
+    unsigned int  uiSubInterNum                           = 0;
+    char          send_data[NETCONF_SEND_DATA_LEN]        = {0};
+    unsigned char vlanBit[NETCONF_VLANBIT_LEN]            = {0};
+    unsigned char netconfBit[NETCONF_VLANBIT_LEN_STR + 1] = {0};
+    char          *paReplyData                            = NULL;
+
+    if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Vlan id %d id invalid", uiVlanId);
+        return OVSDB_ERR;
+    }
+
+    if((uiVniId > MAX_VNI_ID)||(uiVniId < MIN_VNI_ID))
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Vni %d is invalid", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    if(!paIfname)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Port ifname name %s is NULL", paIfname);
+        return;
+    }
+
+    OVSDB_PRINTF_DEBUG("[Info]Vlan id = %d, Vni = %d", uiVlanId, uiVniId );
+    OVSDB_PRINTF_DEBUG("[Info]Port name = %s", paIfname);
+
+    /* 为子接口号赋值 */
+    uiSubInterNum = uiVlanId + 1;
+
+    /* 查询interface paIfname.uiSubInterNum mode l2是否存在 */
+    snprintf(send_data, sizeof(send_data),
+    "<get>"\
+      "<filter type=\"subtree\">"\
+        "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+          "<interfaces>"\
+            "<interface>"\
+              "<ifName>%s.%d</ifName>"\
+              "<l2SubIfFlag>true</l2SubIfFlag>"\
+            "</interface>"\
+          "</interfaces>"\
+        "</ifm>"\
+      "</filter>"\
+    "</get>", paIfname, uiSubInterNum);
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    //printf("data out is %s\n", aReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
+            paIfname, uiSubInterNum, paIfname, uiSubInterNum);
+        return OVSDB_ERR;
+    }
+
+    if ('\0' == paReplyData[0])
+    {
+        /* 配置interface paIfname.uiSubInterNum mode l2 */
+        snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface operation=\"create\">"\
+                  "<ifName>%s.%d</ifName>"\
+                  "<l2SubIfFlag>true</l2SubIfFlag>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</config>"\
+        "</edit-config>", paIfname, uiSubInterNum);
+
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [interface %s.%d mode l2]",
+                paIfname, uiSubInterNum);
+            return OVSDB_ERR;
+        }
+
+        /* 配置bridge-domain uiVniId */
+        snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<bds>"\
+                "<bd operation=\"merge\">"\
+                  "<bdId>%d</bdId>"\
+                    "<servicePoints>"\
+                      "<servicePoint operation=\"create\">"\
+                        "<ifName>%s.%d</ifName>"\
+                      "</servicePoint>"\
+                  "</servicePoints>"\
+                "</bd>"\
+              "</bds>"\
+            "</evc>"\
+          "</config>"\
+        "</edit-config>", uiVniId, paIfname, uiSubInterNum);
+
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
+            return OVSDB_ERR;
+        }
+
+        if(0 == uiVlanId)
+        {
+            /* 配置encapsulation untag */
+            snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<ethernet xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<servicePoints>"\
+                    "<servicePoint operation=\"merge\">"\
+                      "<ifName>%s.%d</ifName>"\
+                      "<flowType>untag</flowType>"\
+                    "</servicePoint>"\
+                  "</servicePoints>"\
+                "</ethernet>"\
+              "</config>"\
+            "</edit-config>", paIfname, uiSubInterNum);
+
+            uiRet = netconf_ce_set_config(send_data);
+            if (OVSDB_OK != uiRet)
+            {
+                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
+                return OVSDB_ERR;
+            }
+        }
+        else
+        {
+            netconf_get_confbit(uiVlanId, vlanBit);
+            netconf_vlanbit2netvlanbit(vlanBit, netconfBit);
+
+            /* 配置encapsulation dot1q vid uiVlanId */
+            snprintf(send_data, sizeof(send_data),
+                "<edit-config>"\
+                  "<target><running/></target>"\
+                  "<default-operation>merge</default-operation>"\
+                  "<error-option>rollback-on-error</error-option>"\
+                  "<config>"\
+                    "<ethernet xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                      "<servicePoints>"\
+                        "<servicePoint operation=\"merge\">"\
+                          "<ifName>%s.%d</ifName>"\
+                          "<flowType>dot1q</flowType>"\
+                          "<flowDot1qs>"\
+                            "<dot1qVids>%s:%s</dot1qVids>"\
+                          "</flowDot1qs>"\
+                        "</servicePoint>"\
+                      "</servicePoints>"\
+                    "</ethernet>"\
+                  "</config>"\
+                "</edit-config>",
+                paIfname, uiSubInterNum, netconfBit, netconfBit);
+
+            uiRet = netconf_ce_set_config(send_data);
+            if (OVSDB_OK != uiRet)
+            {
+                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
+                return OVSDB_ERR;
+            }
+        }
+    }
+    else
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Interface %s.%d has existed", paIfname, uiSubInterNum);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+
+unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_port********************");
+    unsigned int  uiRet                                   = 0;
+    unsigned int  uiSubInterNum                           = 0;
+    char          send_data[NETCONF_SEND_DATA_LEN]        = {0};
+    char          *paReplyData                            = NULL;
+
+    if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Vlan id %d id invalid", uiVlanId);
+        return OVSDB_ERR;
+    }
+
+    if(!paIfname)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Port ifname name %s is NULL", paIfname);
+        return;
+    }
+
+    OVSDB_PRINTF_DEBUG("[Info]Vlan id = %d", uiVlanId);
+    OVSDB_PRINTF_DEBUG("[Info]Port name = %s", paIfname);
+
+    /* 为子接口号赋值 */
+    uiSubInterNum = uiVlanId + 1;
+
+    /* 查询interface paIfname.uiSubInterNum mode l2是否存在 */
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface>"\
+                  "<ifName>%s.%d</ifName>"\
+                  "<l2SubIfFlag>true</l2SubIfFlag>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</filter>"\
+        "</get>", paIfname, uiSubInterNum);
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    //printf("data out is %s\n", aReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
+            paIfname, uiSubInterNum, paIfname, uiSubInterNum);
+        return OVSDB_ERR;
+    }
+
+    if ('\0' != paReplyData[0])
+    {
+        /* 删除interface paIfname.uiSubInterNum mode l2 */
+        snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<interfaces>"\
+                    "<interface operation=\"delete\">"\
+                      "<ifName>%s.%d</ifName>"\
+                      "<l2SubIfFlag>true</l2SubIfFlag>"\
+                    "</interface>"\
+                  "</interfaces>"\
+                "</ifm>"\
+              "</config>"\
+            "</edit-config>", paIfname, uiSubInterNum);
+
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
+            return OVSDB_ERR;
+        }
+    }
+    else
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Interface %s.%d doesn't exist", paIfname, uiSubInterNum);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_vxlan_tunnel********************");
+    unsigned int uiLoop                           = 0;
+    unsigned int uiRet                            = 0;
+    char         send_data[NETCONF_SEND_DATA_LEN] = {0};
+
+    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_netconf");
+    OVSDB_PRINTF_DEBUG("[Info]vni=%d, dst ip=%s", uiVni, paDstIp);
+
+    /* 1.判断VNI是否合法 */
+    if((uiVni > 32768)||(uiVni < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Vni %d is not valid.", uiVni);
+        return OVSDB_ERR;
+    }
+
+    /* 2.判断dst_ip是否为空 */
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Dst_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    /* 3.检查是否有隧道ip */
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]TOR does not have a tunnel ip address.");
+        return OVSDB_ERR;
+    }
+
+    /* 4.配置vni uiVni head-end peer-list paDstIp */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Nves>"\
+                "<nvo3Nve operation=\"merge\">"\
+                  "<ifName>nve1</ifName>"\
+                  "<vniMembers>"\
+                    "<vniMember operation=\"merge\">"\
+                      "<vniId>%d</vniId>"\
+                      "<nvo3VniPeers>"\
+                        "<nvo3VniPeer operation=\"merge\">"\
+                          "<peerAddr>%s</peerAddr>"\
+                        "</nvo3VniPeer>"\
+                      "</nvo3VniPeers>"\
+                    "</vniMember>"\
+                  "</vniMembers>"\
+                "</nvo3Nve>"\
+              "</nvo3Nves>"\
+            "</nvo3>"\
+          "</config>"\
+        "</edit-config>", uiVni, paDstIp);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [vni %d head-end peer-list %s]", uiVni, paDstIp);
+        return OVSDB_ERR;
+    }
+
+    /* 5.记录配置的vxlan隧道 */
+    for(uiLoop=0; uiLoop < VXLAN_TUNNEL_NUM_MAX; uiLoop++)
+    {
+        if(switch_vxlan_tunnel[uiLoop].used_bit)
+        {
+            continue;
+        }
+        else
+        {
+            /*为vxlan隧道的vni赋值*/
+            switch_vxlan_tunnel[uiLoop].vni = (int)uiVni;
+
+            /*为vxlan隧道的dst_ip赋值*/
+            switch_vxlan_tunnel[uiLoop].dst_ip = malloc(strlen(paDstIp)+1);
+            memcpy(switch_vxlan_tunnel[uiLoop].dst_ip, paDstIp, strlen(paDstIp) + 1);
+
+            /*为vxlan隧道的source_ip赋值*/
+            switch_vxlan_tunnel[uiLoop].source_ip = malloc(strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]) + 1);
+            memcpy(switch_vxlan_tunnel[uiLoop].source_ip, ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]) + 1);
+
+            /*为vxlan隧道的是否存在的标记位赋值*/
+            switch_vxlan_tunnel[uiLoop].used_bit = 1;
+
+            OVSDB_PRINTF_DEBUG("[Info]insert entry to switch_vxlan_tunnel.k = %d, vni=%d.",
+                               uiLoop, switch_vxlan_tunnel[uiLoop].vni);
+            OVSDB_PRINTF_DEBUG("[Info]source_ip = %s, dst_ip = %s.",
+                               switch_vxlan_tunnel[uiLoop].source_ip, switch_vxlan_tunnel[uiLoop].dst_ip);
+
+            break;
+        }
+    }
+
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_vxlan_tunnel********************");
+    unsigned int uiRet                            = 0;
+    char         send_data[NETCONF_SEND_DATA_LEN] = {0};
+
+    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_netconf.");
+    OVSDB_PRINTF_DEBUG("[Info]vni=%d, dst ip=%s", uiVni, paDstIp);
+
+    /* 1.判断VNI是否合法 */
+    if((uiVni > 32768)||(uiVni < 4096))
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Vni %d is not valid.", uiVni);
+        return OVSDB_ERR;
+    }
+
+    /* 2.判断dst_ip是否为空 */
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Dst_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    /* 3.检查是否有隧道ip */
+    if(!ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]TOR does not have a tunnel ip address.");
+        return OVSDB_ERR;
+    }
+
+    /* 4.删除vxlan隧道 */
+    /* 4.1.先删除头端复制列表*/
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Nves>"\
+                "<nvo3Nve operation=\"merge\">"\
+                  "<ifName>nve1</ifName>"\
+                  "<vniMembers>"\
+                    "<vniMember operation=\"merge\">"\
+                      "<vniId>%d</vniId>"\
+                      "<nvo3VniPeers>"\
+                        "<nvo3VniPeer operation=\"delete\">"\
+                          "<peerAddr>%s</peerAddr>"\
+                        "</nvo3VniPeer>"\
+                      "</nvo3VniPeers>"\
+                    "</vniMember>"\
+                  "</vniMembers>"\
+                "</nvo3Nve>"\
+              "</nvo3Nves>"\
+            "</nvo3>"\
+          "</config>"\
+        "</edit-config>", uiVni, paDstIp);
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
+        return OVSDB_ERR;
+    }
+
+    /* 4.2.再删除VNI*/
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Nves>"\
+                "<nvo3Nve operation=\"merge\">"\
+                  "<ifName>nve1</ifName>"\
+                  "<vniMembers>"\
+                    "<vniMember operation=\"delete\">"\
+                      "<vniId>%d</vniId>"\
+                    "</vniMember>"\
+                  "</vniMembers>"\
+                "</nvo3Nve>"\
+              "</nvo3Nves>"\
+            "</nvo3>"\
+          "</config>"\
+        "</edit-config>", uiVni);
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s]", uiVni, paDstIp);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+
+
+unsigned int netconf_ce_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_vxlan_tunnel_static_mac********************");
+    unsigned int uiLoop                           = 0;
+    unsigned int uiRet                            = 0;
+    char         send_data[NETCONF_SEND_DATA_LEN] = {0};
+
+    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_static_mac");
+    OVSDB_PRINTF_DEBUG("[Info]ce_mac=%s, source_ip=%s, dst_ip=%s,", paStaticMac, paSourceIp, paDstIp);
+    OVSDB_PRINTF_DEBUG("[Info]vni = %d", uiVniId);
+
+    if(!paSourceIp)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]source_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]dst_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    if(!paStaticMac)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]ce_mac is NULL.");
+        return OVSDB_ERR;
+    }
+
+    /* 配置mac-address static paStaticMac bridge-domain uiVniId source paSourceIp peer paDstIp vni uiVniId */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<vxlanFdbs>"\
+                "<vxlanFdb operation=\"create\">"\
+                  "<slotId>0</slotId>"\
+                  "<macAddress>%s</macAddress>"\
+                  "<bdId>%d</bdId>"\
+                  "<macType>static</macType>"\
+                  "<sourceIP>%s</sourceIP>"\
+                  "<peerIP>%s</peerIP>"\
+                  "<vnId>%d</vnId>"\
+                "</vxlanFdb>"\
+              "</vxlanFdbs>"\
+            "</mac>"\
+          "</config>"\
+        "</edit-config>", paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [mac-address static %s bridge-domain %d source %s peer %s vni %d]",
+            paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+        return OVSDB_ERR;
+    }
+
+    /*需要往全局变量里添加的mac*/
+    for(uiLoop = 0; uiLoop < VXLAN_TUNNEL_MAC_MAX; uiLoop++)
+    {
+        if(switch_vxlan_static_mac[uiLoop].used_bit)
+        {
+            continue;
+        }
+        else
+        {
+            /*source ip*/
+            switch_vxlan_static_mac[uiLoop].source_ip = malloc(strlen(paSourceIp) + 1);
+            memcpy(switch_vxlan_static_mac[uiLoop].source_ip, paSourceIp, strlen(paSourceIp) + 1);
+
+            /*dst_ip*/
+            switch_vxlan_static_mac[uiLoop].dst_ip= malloc(strlen(paDstIp) + 1);
+            memcpy(switch_vxlan_static_mac[uiLoop].dst_ip, paDstIp, strlen(paDstIp) + 1);
+
+            /*mac*/
+            switch_vxlan_static_mac[uiLoop].ce_mac= malloc(strlen(paStaticMac) + 1);
+            memcpy(switch_vxlan_static_mac[uiLoop].ce_mac, paStaticMac, strlen(paStaticMac) + 1);
+
+            /*vni*/
+            switch_vxlan_static_mac[uiLoop].vni = (int)uiVniId;
+
+            /*used_bit*/
+            switch_vxlan_static_mac[uiLoop].used_bit = 1;
+
+            break;
+        }
+    }
+
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId)
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_vxlan_tunnel_static_mac********************");
+    unsigned int uiRet                            = 0;
+    char         send_data[NETCONF_SEND_DATA_LEN] = {0};
+
+    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_static_mac");
+    OVSDB_PRINTF_DEBUG("[Info]ce_mac=%s, source_ip=%s, dst_ip=%s,", paStaticMac, paSourceIp, paDstIp);
+    OVSDB_PRINTF_DEBUG("[Info]vni = %d", uiVniId);
+
+    if(!paSourceIp)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]source_ip is NULL");
+        return OVSDB_ERR;
+    }
+
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]dst_ip is NULL");
+        return OVSDB_ERR;
+    }
+
+    if(!paStaticMac)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]ce_mac is NULL");
+        return OVSDB_ERR;
+    }
+
+    /* 删除mac-address static paStaticMac bridge-domain uiVniId source paSourceIp peer paDstIp vni uiVniId */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<vxlanFdbs>"\
+                "<vxlanFdb operation=\"delete\">"\
+                  "<slotId>0</slotId>"\
+                  "<macAddress>%s</macAddress>"\
+                  "<bdId>%d</bdId>"\
+                  "<macType>static</macType>"\
+                  "<sourceIP>%s</sourceIP>"\
+                  "<peerIP>%s</peerIP>"\
+                  "<vnId>%d</vnId>"\
+                "</vxlanFdb>"\
+              "</vxlanFdbs>"\
+            "</mac>"\
+          "</config>"\
+        "</edit-config>", paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo mac-address static %s bridge-domain %d source %s peer %s vni %d]",
+            paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+
+unsigned int netconf_ce_config_drop_conflict_packet()
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_drop_conflict_packet********************");
+    unsigned int    uiRet                            = 0;
+    char            send_data[NETCONF_SEND_DATA_LEN] = {0};
+
+    /* config [undo mac-address drop static-conflict enable] */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<ovsdbs>"\
+                "<ovsdb operation=\"merge\">"\
+                  "<enable>0</enable>"\
+                "</ovsdb>"\
+              "</ovsdbs>"\
+            "</mac>"\
+          "</config>"\
+        "</edit-config>");
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo mac-address drop static-conflict enable]");
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+unsigned int netconf_ce_undo_config_drop_conflict_packet()
+{
+    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_drop_conflict_packet********************");
+    unsigned int    uiRet                            = 0;
+    char            send_data[NETCONF_SEND_DATA_LEN] = {0};
+
+    /* config [undo mac-address drop static-conflict enable] */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<ovsdbs>"\
+                "<ovsdb operation=\"merge\">"\
+                  "<enable>1</enable>"\
+                "</ovsdb>"\
+              "</ovsdbs>"\
+            "</mac>"\
+          "</config>"\
+        "</edit-config>");
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo mac-address drop static-conflict enable]");
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+
+unsigned int ovsdb_get_interface(char *paData)
+{
+    char         aIfNameLeft[]           = "<ifName>";
+    char         aIfNameRight[]          = "</ifName>";
+    char         aIfName[MAX_IFNAME_LEN] = {0};
+    char         *pStart                 = paData;
+
+    if (NULL == paData)
+    {
+        return OVSDB_ERR;
+    }
+
+    while (NULL != strstr(pStart, aIfNameLeft))
+    {
+        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aIfName, MAX_IFNAME_LEN, aIfNameLeft, aIfNameRight, pStart);
+        if (NULL == pStart)
+            return OVSDB_ERR;
+
+        /* 添加interface至软表 */
+        (void)ovsdb_sub_table_interface_add(aIfName);
+    }
+
+    return OVSDB_OK;
+
+}
+
+unsigned int ovsdb_get_db_mac(char *paData)
+{
+    char         aMacAdrLeft[]              = "<macAddress>";
+    char         aMacAdrRight[]             = "</macAddress>";
+    char         aMacTypeLeft[]             = "<macType>";
+    char         aMacTypeRight[]            = "</macType>";
+    char         aBdIdLeft[]                = "<bdId>";
+    char         aBdIdRight[]               = "</bdId>";
+    char         aOutIfnameLeft[]           = "<outIfName>";
+    char         aOutIfnameRight[]          = "</outIfName>";
+    char         aMac[MAX_CE_MAC_LEN]       = {0};
+    char         aOutIfName[MAX_IFNAME_LEN] = {0};
+    char         aBdId[MAX_BDID_LEN]        = {0};
+    char         aMacType[MAX_MAC_TYPE_LEN] = {0};
+    unsigned int uiMacType                  = 0;
+    char         *pStart                    = paData;
+
+    if (NULL == paData)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Reply data of db mac is NULL");
+        return OVSDB_ERR;
+    }
+
+    while (NULL != strstr(pStart, aMacAdrLeft))
+    {
+        /* 获取macAddress */
+        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aMac, MAX_CE_MAC_LEN, aMacAdrLeft, aMacAdrRight, pStart);
+        if (NULL == pStart)
+            return OVSDB_ERR;
+
+        /* 获取macType */
+        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aMacType, MAX_MAC_TYPE_LEN, aMacTypeLeft, aMacTypeRight, pStart);
+        if (NULL == pStart)
+            return OVSDB_ERR;
+
+        if (0 == strcmp(aMacType, "dynamic"))
+        {
+            uiMacType = MAC_DYNAMIC;
+        }
+        else if (0 == strcmp(aMacType, "static"))
+        {
+            uiMacType = MAC_STATIC;
+        }
+
+        /* 获取bdId */
+        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aBdId, MAX_BDID_LEN, aBdIdLeft, aBdIdRight, pStart);
+        if (NULL == pStart)
+            return OVSDB_ERR;
+
+        /* 获取outIfName */
+        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aOutIfName, MAX_IFNAME_LEN, aOutIfnameLeft, aOutIfnameRight, pStart);
+        if (NULL == pStart)
+            return OVSDB_ERR;
+
+        /* 添加mac至软表 */
+        (void)ovsdb_sub_table_mac_add(aMac, aBdId, aOutIfName, (int)uiMacType);
+    }
+
+    return OVSDB_OK;
+
+}
+
+
+unsigned int netconf_ce_query_interface()
+{
+    unsigned int    uiRet                             = 0;
+    unsigned int    uiLoop                            = 0;
+    char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
+    char            *pReplyData                       = NULL;
+    char            *paReplySeg                       = NULL;
+    char            aSetId[MAX_SET_ID_LEN]            = {0};
+
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface>"\
+                  "<ifName></ifName>"\
+                  "<ifDescr/>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</filter>"\
+        "</get>");
+
+    uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query interface");
+        return OVSDB_ERR;
+    }
+
+    while(NULL != pReplyData)
+    {
+        /* 解析reply消息中的interface */
+        uiRet = ovsdb_get_interface(pReplyData);
+
+        if (uiRet != OVSDB_OK)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to get interface from reply message");
+            return OVSDB_ERR;
+        }
+
+        /* 判断reply消息是否分片 */
+        paReplySeg = strstr(pReplyData, "set-id");
+
+        free(pReplyData);
+        pReplyData = NULL;
+
+        if (NULL == paReplySeg)
+        {
+            break;
+        }
+
+        /* 获取set-id以查询下一个回复消息分片 */
+        paReplySeg = paReplySeg + strlen("set-id") + 2;
+        while ('"' != *paReplySeg)
+        {
+            aSetId[uiLoop++] = *paReplySeg;
+            paReplySeg++;
+        }
+        aSetId[uiLoop] = '\0';
+
+        snprintf(send_data, sizeof(send_data),
+            "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
+            "</get-next>", aSetId);
+
+        uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to query next interface");
+            return OVSDB_ERR;
+        }
+
+        uiLoop = 0;
+    }
+
+    (void)ovsdb_sub_table_interface_delete();
+
+    return OVSDB_OK;
+}
+
+
+unsigned int netconf_ce_query_db_mac()
+{
+    unsigned int    uiRet                             = 0;
+    unsigned int    uiLoop                            = 0;
+    char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
+    char            *pReplyData                       = NULL;
+    char            *paReplySeg                       = NULL;
+    char            aSetId[MAX_SET_ID_LEN]            = {0};
+
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<bdFdbs>"\
+                "<bdFdb>"\
+                  "<slotId>0</slotId>"\
+                  "<macAddress></macAddress>"\
+                  "<bdId></bdId>"\
+                  "<macType></macType>"\
+                  "<outIfName></outIfName>"\
+                  "<unTag></unTag>"\
+                  "<peDefault></peDefault>"\
+                  "<vid></vid>"\
+                "</bdFdb>"\
+              "</bdFdbs>"\
+            "</mac>"\
+          "</filter>"\
+        "</get>");
+
+    /*sprintf(send_data,
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<vlanFdbs>"\
+                "<vlanFdb>"\
+                  "<macAddress></macAddress>"\
+                  "<vlanId></vlanId>"\
+                  "<slotId>0</slotId>"\
+                  "<macType></macType>"\
+                  "<outIfName></outIfName>"\
+                "</vlanFdb>"\
+              "</vlanFdbs>"\
+            "</mac>"\
+          "</filter>"\
+        "</get>");*/
+
+    uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query db mac");
+        return OVSDB_ERR;
+    }
+
+    while(NULL != pReplyData)
+    {
+        /* 解析reply消息中的db mac */
+        uiRet = ovsdb_get_db_mac(pReplyData);
+
+        if (uiRet != OVSDB_OK)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to get db mac from reply message");
+            return OVSDB_ERR;
+        }
+
+        /* 判断reply消息是否分片 */
+        paReplySeg = strstr(pReplyData, "set-id");
+
+        free(pReplyData);
+        pReplyData = NULL;
+
+        if (NULL == paReplySeg)
+        {
+            break;
+        }
+
+        /* 获取set-id以查询下一个回复消息分片 */
+        paReplySeg = paReplySeg + strlen("set-id") + 2;
+        while ('"' != *paReplySeg)
+        {
+            aSetId[uiLoop++] = *paReplySeg;
+            paReplySeg++;
+        }
+        aSetId[uiLoop] = '\0';
+
+        snprintf(send_data, sizeof(send_data),
+            "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
+            "</get-next>", aSetId);
+
+        uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to query next db mac");
+            return OVSDB_ERR;
+        }
+        uiLoop = 0;
+    }
+
+    (void)ovsdb_sub_table_mac_delete();
+
+    return OVSDB_OK;
+}
+
+#endif
+
+
+void ovsdb_port_add_vlanbinding_process(struct json *new, struct json *old, char* node_name)
+{
+
+    struct json *vlan_binding;
+
+    if((!new)||(old))
+    {
+        return;
+    }
+
+    vlan_binding = shash_find_data(json_object(new), "vlan_bindings");
+
+    /*有空再补*/
+}
+
+void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, char* node_name, int* update_type)
+{
+
+    struct json *new_vlan_binding;
+    struct json *old_vlan_binding;
+    struct json *new_vlanbinding_elems;
+    struct json *old_vlanbinding_elems;
+    struct json_array *new_vlanbinding_elems_array;
+    struct json_array *old_vlanbinding_elems_array;
+    struct uuid uuid_port;
+    char* port_name =NULL;
+    int port_num=0;
+    int new_vlanbinding_elem_num = 0;
+    int old_vlanbinding_elem_num = 0;
+    int add_port_map_exist = 0;
+
+    if((!new)||(!old))
+    {
+        return;
+    }
+
+    (void)uuid_from_string(&uuid_port, node_name);
+    OVSDB_PRINTF_DEBUG("vlan_binding update port uuid = "UUID_FMT, UUID_ARGS(&uuid_port));
+
+    new_vlan_binding = shash_find_data(json_object(new), "vlan_bindings");
+    old_vlan_binding = shash_find_data(json_object(old), "vlan_bindings");
+
+    if((!new_vlan_binding)||(!old_vlan_binding))    /*说明更新和vlan_binding无关，可能是更新的description之类的*/
+    {
+        OVSDB_PRINTF_DEBUG("port tabel update has nothing to do with vlan_binding.");
+        return;
+    }
+
+    new_vlanbinding_elems = json_array(new_vlan_binding)->elems[1]; /*elems[0]* is "map" string*/
+    new_vlanbinding_elems_array = json_array(new_vlanbinding_elems);
+    new_vlanbinding_elem_num = new_vlanbinding_elems_array->n;
+
+    old_vlanbinding_elems = json_array(old_vlan_binding)->elems[1]; /*elems[0]* is "map" string*/
+    old_vlanbinding_elems_array = json_array(old_vlanbinding_elems);
+    old_vlanbinding_elem_num = old_vlanbinding_elems_array->n;
+
+    OVSDB_PRINTF_DEBUG("new_vlanbinding_elem_num = %d, old_vlanbinding_elem_num = %d.", new_vlanbinding_elem_num, old_vlanbinding_elem_num);
+
+    if(new_vlanbinding_elem_num > old_vlanbinding_elem_num)
+    {
+        *update_type = ADD_VLAN_BINGDING;
+        OVSDB_PRINTF_DEBUG("update_type = ADD_VLAN_BINGDING");
+    }
+    else if(new_vlanbinding_elem_num < old_vlanbinding_elem_num)
+    {
+        *update_type = DELETE_VLAN_BINGDING;
+        OVSDB_PRINTF_DEBUG("update_type = DELETE_VLAN_BINGDING");
+    }
+    else
+    {
+        *update_type = PORT_UPDATE_INVALID_TYPE;
+    }
+
+    /*获取port name*/
+    for(port_num=0; port_num<TABLE_PHYSICAL_PORT_NUM; port_num++)
+    {
+        if(uuid_equals(&uuid_port, &ovsdb_vtep_db_table.table_physical_port[port_num].uuid_self))
+        {
+            port_name = malloc(strlen(ovsdb_vtep_db_table.table_physical_port[port_num].name)+1);
+            memcpy(port_name, ovsdb_vtep_db_table.table_physical_port[port_num].name,
+                    strlen(ovsdb_vtep_db_table.table_physical_port[port_num].name)+1);
+
+            /*below is temp to delete*/
+            OVSDB_PRINTF_DEBUG("ovsdb_vtep_db_table.table_physical_port[port_num].name=%s",
+                    ovsdb_vtep_db_table.table_physical_port[port_num].name);
+
+            break;
+        }
+    }
+
+    if(!port_name)
+    {
+        OVSDB_PRINTF_DEBUG("do not find port name.");
+        return;
+    }
+
+    OVSDB_PRINTF_DEBUG("vlan_binding update port name = %s.", port_name);
+
+    if(*update_type == ADD_VLAN_BINGDING)
+    {
+        int i=0;
+        int j=0;
+        int k=0;
+        int vlanid = 4096;
+        int vni_temp = 0;
+        struct uuid uuid_ls;
+        unsigned int uiRet = 0;
+        /*检查switch_vxlan_map全局变量中是否已经有该该port的映射*/
+        for(i=0; i<TABLE_PHYSICAL_PORT_NUM; i++)
+        {
+            if(uuid_equals(&uuid_port, &switch_vxlan_map[i].port_uuid))
+            {
+                add_port_map_exist = 1;
+                break;
+            }
+        }
+
+        if(!add_port_map_exist)
+        {
+            for(i=0; i<TABLE_PHYSICAL_PORT_NUM; i++)
+            {
+                if(uuid_is_zero(&switch_vxlan_map[i].port_uuid))
+                {
+                    memcpy(&switch_vxlan_map[i].port_uuid, &uuid_port, sizeof(uuid_port));
+                    break;
+                }
+            }
+        }
+
+        /*找到对应的映射表项进行操作*/
+        for(i=0; i<TABLE_PHYSICAL_PORT_NUM; i++)
+        {
+            if(uuid_equals(&uuid_port, &switch_vxlan_map[i].port_uuid))
+            {
+                for(j=0; j<new_vlanbinding_elem_num; j++)
+                {
+                    vlanid = json_integer(json_array(new_vlanbinding_elems_array->elems[j])->elems[0]);
+
+                    if((vlanid > 4093)||(vlanid<0))
+                    {
+                        OVSDB_PRINTF_DEBUG("vlan_id is not valid, which is %d.", vlanid);
+                    }
+                    if(switch_vxlan_map[i].vlan_vni_map[vlanid].used_bit)
+                    {
+                        OVSDB_PRINTF_DEBUG("vlan_id %d mapping is exist, do not process.", vlanid);
+                    }
+                    else
+                    {
+                        OVSDB_PRINTF_DEBUG("vlan_id %d mapping is absent, now do process.", vlanid);
+                        uuid_from_string(&uuid_ls, json_string(json_array(json_array(new_vlanbinding_elems_array->elems[j])->elems[1])->elems[1]));
+                        for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
+                        {
+                            if(uuid_equals(&ovsdb_vtep_db_table.table_logical_switch[k].uuid_self, &uuid_ls))
+                            {
+                                vni_temp = ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key;
+                                break;
+                            }
+                        }
+
+                        if(vni_temp > 4095)
+                        {
+                            switch_vxlan_map[i].vlan_vni_map[vlanid].vni = vni_temp;
+                            switch_vxlan_map[i].vlan_vni_map[vlanid].used_bit = 1;
+
+                            /*配置子接口和vxlan映射*/
+
+                            //ce_config_port(vlanid, switch_vxlan_map[i].vlan_vni_map[vlanid].vni, port_name);
+                            uiRet = netconf_ce_config_port(vlanid, switch_vxlan_map[i].vlan_vni_map[vlanid].vni, port_name);
+                            if (OVSDB_OK != uiRet)
+                            {
+                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config subinterface when processing port vlanbinding.");
+                                return;
+                            }
+
+                            /*往ovsdb_vtep_db_table全局变量中也写一下*/
+                            ovsdb_vtep_db_table.table_physical_port[port_num].vlan_bindings.vlan_bindings[vlanid].vlan_id = vlanid; /*这里也把vlanid作为下标，好与switch_vxlan_map对应*/
+                            memcpy(&ovsdb_vtep_db_table.table_physical_port[port_num].vlan_bindings.vlan_bindings[vlanid].uuid_logical_switch ,&ovsdb_vtep_db_table.table_logical_switch[k].uuid_self,
+                                sizeof(ovsdb_vtep_db_table.table_logical_switch[k]));
+                        }
+                    }
+                }
+
+                break;
+            }
+        }
+
+    }
+
+    else if(*update_type == DELETE_VLAN_BINGDING)
+    {
+        int i=0;
+        int j=0;
+        int k=0;
+        int m=0;
+        int vlanid = 4096;
+        unsigned int uiRet = 0;
+
+        for(i=0; i<TABLE_PHYSICAL_PORT_NUM; i++)
+        {
+            if(uuid_equals(&uuid_port, &switch_vxlan_map[i].port_uuid))
+            {
+                for(j=0; j<VXLAN_PORT_MAP_MAX; j++)
+                {
+                    if(!switch_vxlan_map[i].vlan_vni_map[j].used_bit)
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        int vlan_binding_exist=0;
+
+                        for(k=0; k<new_vlanbinding_elem_num; k++)
+                        {
+                            vlanid = json_integer(json_array(new_vlanbinding_elems_array->elems[k])->elems[0]);
+                            if(vlanid == j)
+                            {
+                               vlan_binding_exist=1;
+                               OVSDB_PRINTF_DEBUG("vlan_id %d mapping is not deleted, do not process.", j);
+                            }
+                        }
+                        if(!vlan_binding_exist) /*在switch_vxlan_map中有，但是new中没有，说明在这次操作中被删除了*/
+                        {
+                            int port_mappint_exist=0;
+                            OVSDB_PRINTF_DEBUG("vlan_id %d mapping is now deleted, do process now.", j);
+
+                            //ce_undo_config_port(j, switch_vxlan_map[i].vlan_vni_map[j].vni, port_name);
+                            uiRet = netconf_ce_undo_config_port(j, port_name);
+                            if (OVSDB_OK != uiRet)
+                            {
+                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config undo subinterface when processing port vlanbinding.");
+                                return;
+                            }
+
+                            switch_vxlan_map[i].vlan_vni_map[j].vni = 0;
+                            switch_vxlan_map[i].vlan_vni_map[j].used_bit= 0;
+
+                            /*检查是否switch_vxlan_map[i]所有的vlan_mapping都没有了，如果全删除了，删除整个switch_vxlan_map[i]*/
+                            for(m=0; m<VXLAN_PORT_MAP_MAX; m++)
+                            {
+                                if(switch_vxlan_map[i].vlan_vni_map[m].used_bit)
+                                {
+                                    port_mappint_exist =1;
+                                    break;
+                                }
+                            }
+
+                            if(!port_mappint_exist)
+                            {
+                                OVSDB_PRINTF_DEBUG("clear all mapping of port %s.", port_name);
+                                memset(&switch_vxlan_map[i], 0, sizeof(struct port_vlan_to_vni_map));
+                            }
+
+                            /*往ovsdb_vtep_db_table全局变量中也写一下*/
+                            memset(&ovsdb_vtep_db_table.table_physical_port[port_num].vlan_bindings.vlan_bindings[j], 0, sizeof(struct ovsdb_vtep_vlan_binding));
+                        }
+                    }
+                }
+
+                break;
+            }
+        }
+    }
+
+    if(port_name)
+    {
+        free(port_name);
+    }
+}
+
+void ovsdb_switch_update_management_ips_process(struct json *new, struct json *old, char* node_name)
+{
+    struct json *new_management_ips;
+    struct json *old_management_ips;
+    struct uuid uuid_ps;
+    int i=0;
+    unsigned int uiRet = 0;
+
+    if((!new)||(!old))
+    {
+        return;
+    }
+
+    uuid_from_string(&uuid_ps, node_name);
+
+    new_management_ips = shash_find_data(json_object(new), "management_ips");
+    old_management_ips = shash_find_data(json_object(old), "management_ips");
+
+    if((!new_management_ips)||(!old_management_ips))    /*说明更新和managemenet ip无关，可能是更新的description之类的*/
+    {
+        OVSDB_PRINTF_DEBUG("physical switch tabel update has nothing to do with management_ips.");
+        return;
+    }
+
+    for(i=0; i<TABLE_PHYSICAL_SWITCH_NUM; i++)
+    {
+        if(uuid_equals(&uuid_ps, &ovsdb_vtep_db_table.table_physical_switch[i].uuid_self))
+        {
+            if(JSON_STRING == new_management_ips->type)
+            {
+                ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]=malloc(strlen(json_string(new_management_ips))+1);
+                memcpy(ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0],
+                    json_string(new_management_ips), strlen(json_string(new_management_ips))+1);
+                OVSDB_PRINTF_DEBUG("update management_ips of %s, which is %s.",
+                    ovsdb_vtep_db_table.table_physical_switch[i].name, ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]);
+            }
+            break;
+        }
+    }
+    //ce_config_nve1_source();
+    uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source when updating management ips.");
+        return;
+    }
+
+}
+
+void ovsdb_switch_update_tunnel_ips_process(struct json *new, struct json *old, char* node_name)
+{
+    struct json *new_tunnel_ips;
+    struct json *old_tunnel_ips;
+    struct uuid uuid_ps;
+    int i=0;
+    unsigned int uiRet = 0;
+
+    if((!new)||(!old))
+    {
+        return;
+    }
+
+    uuid_from_string(&uuid_ps, node_name);
+
+    new_tunnel_ips = shash_find_data(json_object(new), "tunnel_ips");
+    old_tunnel_ips = shash_find_data(json_object(old), "tunnel_ips");
+
+    if((!new_tunnel_ips)||(!old_tunnel_ips))    /*说明更新和tunnel ip无关，可能是更新的description之类的*/
+    {
+        OVSDB_PRINTF_DEBUG("physical switch tabel update has nothing to do with tunnel_ips.");
+        return;
+    }
+
+    for(i=0; i<TABLE_PHYSICAL_SWITCH_NUM; i++)
+    {
+        if(uuid_equals(&uuid_ps, &ovsdb_vtep_db_table.table_physical_switch[i].uuid_self))
+        {
+            if(JSON_STRING == new_tunnel_ips->type)
+            {
+                ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]=malloc(strlen(json_string(new_tunnel_ips))+1);
+                memcpy(ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0],
+                    json_string(new_tunnel_ips), strlen(json_string(new_tunnel_ips))+1);
+                OVSDB_PRINTF_DEBUG("update tunnel_ips of %s, which is %s.",
+                    ovsdb_vtep_db_table.table_physical_switch[i].name, ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]);
+            }
+            break;
+        }
+    }
+
+    //ce_config_nve1_source();
+    uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source when updating tunnel ips.");
+        return;
+    }
+
+}
+
+
+void ovsdb_mcast_remote_update_locator_set_process(struct json *new, struct json *old, char* node_name)
+{
+    struct json *new_locator_set;
+    struct json *old_locator_set;
+    struct uuid uuid_mcast_remote;
+    int i = 0;
+
+    if((!new)||(!old))
+    {
+        return;
+    }
+
+    uuid_from_string(&uuid_mcast_remote, node_name);
+
+    new_locator_set = shash_find_data(json_object(new), "locator_set");
+    old_locator_set = shash_find_data(json_object(old), "locator_set");
+
+    if((!new_locator_set)||(!old_locator_set))    /*说明更新和locator_set无关*/
+    {
+        OVSDB_PRINTF_DEBUG("mcast_remote tabel update has nothing to do with locator_set.");
+        return;
+    }
+
+    for(i=0; i<TABLE_MCAST_MACS_REMOTE_NUM; i++)
+    {
+        if(uuid_equals(&uuid_mcast_remote, &ovsdb_vtep_db_table.table_mcast_macs_remote[i].uuid_self))
+        {
+            OVSDB_PRINTF_DEBUG("updated mcast_remote uuid ="UUID_FMT, UUID_ARGS(&uuid_mcast_remote));
+            OVSDB_PRINTF_DEBUG("old locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
+
+            uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set, json_string(json_array(new_locator_set)->elems[1]));
+            OVSDB_PRINTF_DEBUG("new locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
+
+            break;
+        }
+    }
+
+}
+
+void ovsdb_mcast_local_update_locator_set_process(struct json *new, struct json *old, char* node_name)
+{
+    struct json *new_locator_set;
+    struct json *old_locator_set;
+    struct uuid uuid_mcast_local;
+    int i = 0;
+
+    if((!new)||(!old))
+    {
+        return;
+    }
+
+    uuid_from_string(&uuid_mcast_local, node_name);
+
+    new_locator_set = shash_find_data(json_object(new), "locator_set");
+    old_locator_set = shash_find_data(json_object(old), "locator_set");
+
+    if((!new_locator_set)||(!old_locator_set))    /*说明更新和locator_set无关*/
+    {
+        OVSDB_PRINTF_DEBUG("mcast_remote tabel update has nothing to do with locator_set.");
+        return;
+    }
+
+    for(i=0; i<TABLE_MCAST_MACS_LOCAL_NUM; i++)
+    {
+        if(uuid_equals(&uuid_mcast_local, &ovsdb_vtep_db_table.table_mcast_macs_local[i].uuid_self))
+        {
+            OVSDB_PRINTF_DEBUG("updated mcast_local uuid ="UUID_FMT, UUID_ARGS(&uuid_mcast_local));
+            OVSDB_PRINTF_DEBUG("old locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
+
+            uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set, json_string(json_array(new_locator_set)->elems[1]));
+            OVSDB_PRINTF_DEBUG("new locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
+
+            break;
+        }
+    }
+
+
+}
+
+
+void ovsdb_physical_locator_process(struct uuid *uuid_pl, char *pl_dst_ip)
+{
+    int id_ps = 0;
+    int id_t = 0;
+
+    if((!uuid_pl)||(!pl_dst_ip))
+    {
+        return;
+    }
+
+    /*如果physical switch[0]中的tunnel ip为空，则认为有问题，直接返回*/
+    /*此处代码不健壮，只是针对测试场景的特殊处理，须考虑改进*/
+    if(NULL == ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
+    {
+        OVSDB_PRINTF_DEBUG("No tunnel ip in physical switch[0]!!!");
+        return;
+    }
+    else
+    {
+        OVSDB_PRINTF_DEBUG("tunnel ip in physical switch[0] is %s.",
+            ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+    }
+
+    /*上面的ip是本端source ip，则不配置隧道*/
+    for(id_ps=0; id_ps<TABLE_PHYSICAL_SWITCH_NUM; id_ps++) {
+        for(id_t=0; id_t<PHYSICAL_SWITCH_TUNNEL_IP_NUM; id_t++)
+        {
+            if(NULL == ovsdb_vtep_db_table.table_physical_switch[id_ps].tunnel_ips[id_t])
+            {
+                continue;
+            }
+            else
+            {
+                if(string_equals(pl_dst_ip, ovsdb_vtep_db_table.table_physical_switch[id_ps].tunnel_ips[id_t]))
+                {
+                    OVSDB_PRINTF_DEBUG("source vtep ip, return.");
+                    return;    /*说明locator表中的dst ip是本端source ip，直接返回*/
+                }
+            }
+        }
+    }
+
+    /*两种方法配置隧道*/
+    /*(1)首先到Physical_Locator_Set的locators列找uuid,如果有相同的,通过Physical_Locator_Set*/
+    /*的uuid到Mcast_Macs_Remote中找locator_set的uuid，如果有相同的话，再到对应的logical_switch中找vni*/
+    /*通过上述方法找到的应该是service node对应隧道的的vni*/
+    /*上述方法中一个service node的ip可能对应多个ls.就有多条隧道*/
+    /*(2)如果上述方法找不到,通过Physical_Locator的uuid到Ucast_Macs_Remote的locator列找，如果有相同的，*/
+    /*查看对应的logical_switch的tunnel_key是否为0,是否大于4095，如果满足要求，则就是这个值*/
+    /*通过这种方法找到的应该是hypervisor对应的隧道的vni*/
+
+    ovsdb_physical_locator_process_hypervisor_ip(uuid_pl, pl_dst_ip);
+    ovsdb_physical_locator_process_service_node_ip(uuid_pl, pl_dst_ip);
+}
+
+
+void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *pl_dst_ip)
+{
+    int l=0;
+    int m=0;
+    int k=0;
+    struct uuid uuid_logical_switch;
+    int tunnel_key=0;
+
+    for(l=0; l<TABLE_UCAST_MACS_REMOTE_NUM; l++)
+    {
+        uuid_zero(&uuid_logical_switch);
+        if(uuid_equals(uuid_pl, &ovsdb_vtep_db_table.table_ucast_macs_remote[l].locator))
+        {
+            memcpy(&uuid_logical_switch, &ovsdb_vtep_db_table.table_ucast_macs_remote[l].logical_switch, sizeof(struct uuid));
+
+            /*below is temp to delete*/
+            OVSDB_PRINTF_DEBUG("uuid_logical_switch = "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
+
+            for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
+            {
+                if(uuid_equals(&uuid_logical_switch, &ovsdb_vtep_db_table.table_logical_switch[m].uuid_self))
+                {
+                    if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key < 4096)
+                    {
+                        OVSDB_PRINTF_DEBUG("tunnel key does not meet requirement, which is %d.",
+                            ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
+                    }
+                    else
+                    {
+                        tunnel_key = ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key;
+                        OVSDB_PRINTF_DEBUG("tunnel key when condig vxlan tunnel is %d.", tunnel_key);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+
+    if(tunnel_key < 4096)
+    {
+        return;
+    }
+    OVSDB_PRINTF_DEBUG("tunnel_key=%d.", tunnel_key);
+
+    /*将隧道信息写入待创建隧道全局变量，在第二阶段进行创建*/
+    for(k = 0; k < HYPERVISOR_MAX; k++)
+    {
+
+        if(hypervisor_vxlan_tunnel_to_be_created[k].used_bit)
+        {
+            continue;
+        }
+        else
+        {
+            /*vni*/
+            hypervisor_vxlan_tunnel_to_be_created[k].vni = tunnel_key;
+
+            /*dst_ip*/
+            hypervisor_vxlan_tunnel_to_be_created[k].dst_ip = malloc(strlen(pl_dst_ip)+1);
+            memcpy(hypervisor_vxlan_tunnel_to_be_created[k].dst_ip, pl_dst_ip,
+                strlen(pl_dst_ip)+1);
+
+            /*source_ip*/
+            hypervisor_vxlan_tunnel_to_be_created[k].source_ip = malloc(strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+            memcpy(hypervisor_vxlan_tunnel_to_be_created[k].source_ip, ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+
+            /*used_bit*/
+            hypervisor_vxlan_tunnel_to_be_created[k].used_bit = 1;
+
+            /*创建标志位，用于第二阶段*/
+            vxlan_tunnel_to_be_create_flag = 1;
+
+            break;
+        }
+    }
+
+}
+
+void  ovsdb_physical_locator_process_service_node_ip(struct uuid *uuid_pl, char *pl_dst_ip)
+{
+    int k=0;
+    int j=0;
+    int l=0;
+    int m=0;
+    int i=0;
+    struct uuid uuid_locator_set;
+    struct uuid uuid_logical_switch;
+    int tunnel_key=0;
+
+    for(j=0; j<TABLE_PHYSICAL_LOCATOR_SET_NUM; j++)
+       {
+           uuid_zero(&uuid_locator_set);
+
+           if(uuid_is_zero(&ovsdb_vtep_db_table.table_physical_locator_set[j].uuid_self))
+           {
+               continue;
+           }
+           else
+           {
+               for(k=0; k<LOCATOR_NUM_IN_LOCATION_SET; k++)
+               {
+                   if(uuid_equals(uuid_pl, &ovsdb_vtep_db_table.table_physical_locator_set[j].locators[k]))
+                   {
+                       memcpy(&uuid_locator_set, &ovsdb_vtep_db_table.table_physical_locator_set[j].uuid_self, sizeof(struct uuid));
+
+                       /*below is temp to delete*/
+                       OVSDB_PRINTF_DEBUG("uuid_locator_set = "UUID_FMT, UUID_ARGS(&uuid_locator_set));
+
+                       for(l=0; l<TABLE_MCAST_MACS_REMOTE_NUM; l++)
+                       {
+                           if(uuid_equals(&uuid_locator_set, &ovsdb_vtep_db_table.table_mcast_macs_remote[l].locator_set))
+                           {
+                                memcpy(&uuid_logical_switch, &ovsdb_vtep_db_table.table_mcast_macs_remote[l].logical_switch, sizeof(struct uuid));
+
+                               /*below is temp to delete*/
+                                OVSDB_PRINTF_DEBUG("uuid_logical_switch= "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
+
+                                for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
+                                {
+                                    if(uuid_equals(&uuid_logical_switch, &ovsdb_vtep_db_table.table_logical_switch[m].uuid_self))
+                                    {
+                                        if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key > 4095)
+                                        {
+                                            tunnel_key = ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key;
+                                            OVSDB_PRINTF_DEBUG("tunnel key when config vxlan tunnel is %d.", tunnel_key);
+
+
+                                            /*将隧道信息写入待创建隧道全局变量，在第二阶段进行创建*/
+                                            for(i=0; i<SERVICE_NODE_MAX; i++)
+                                            {
+                                                if(service_node_vxlan_tunnel_to_be_created[i].used_bit)
+                                                {
+                                                    continue;
+                                                }
+                                                else
+                                                {
+                                                    /*vni*/
+                                                    service_node_vxlan_tunnel_to_be_created[i].vni = tunnel_key;
+
+                                                    /*dst_ip*/
+                                                    service_node_vxlan_tunnel_to_be_created[i].dst_ip = malloc(strlen(pl_dst_ip)+1);
+                                                    memcpy(service_node_vxlan_tunnel_to_be_created[i].dst_ip, pl_dst_ip,
+                                                        strlen(pl_dst_ip)+1);
+
+                                                    /*source_ip*/
+                                                    service_node_vxlan_tunnel_to_be_created[i].source_ip = malloc(strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+                                                    memcpy(service_node_vxlan_tunnel_to_be_created[i].source_ip, ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                                                        strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+
+                                                    /*used_bit*/
+                                                    service_node_vxlan_tunnel_to_be_created[i].used_bit = 1;
+
+                                                    /*创建标志位，用于第二阶段*/
+                                                    vxlan_tunnel_to_be_create_flag = 1;
+
+
+
+                                                    break;
+                                                }
+                                            }
+
+
+                                            //ovsdb_physical_locator_process_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+                                        }
+                                        else
+                                        {
+                                            OVSDB_PRINTF_DEBUG("tunnel key does not meet requirement,which is %d.", ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
+                                        }
+
+                                        break;
+                                    }
+                                }
+
+                                break;
+                           }
+                       }
+
+                       break;
+                   }
+               }
+           }
+       }
+
+}
+
+
+void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char *pl_dst_ip)
+{
+    int k=0;
+    unsigned int uiRet = 0;
+
+    if(tunnel_key < 4096)
+    {
+        OVSDB_PRINTF_DEBUG("tunnel_key invalid in ovsdb_physical_locator_process_config_vxlan_tunnel.");
+        return;
+    }
+
+    /*首先检查switch_vxlan_tunnel中是否有该vni和dst_ip对应的记录，如果有了，直接返回*/
+    for(k=0; k<VXLAN_TUNNEL_NUM_MAX; k++)
+    {
+        if(!switch_vxlan_tunnel[k].used_bit)
+        {
+            continue;
+        }
+        else
+        {
+            /*temp to delete for debug*/
+            OVSDB_PRINTF_DEBUG("k=%d.", k);
+            OVSDB_PRINTF_DEBUG("tunnrl_key=%d.", tunnel_key);
+            OVSDB_PRINTF_DEBUG("switch_vxlan_tunnel[k].vni=%d.", switch_vxlan_tunnel[k].vni);
+            OVSDB_PRINTF_DEBUG("pl_dst_ip=%s.", pl_dst_ip);
+            OVSDB_PRINTF_DEBUG("switch_vxlan_tunnel[k].dst_ip=%s.", switch_vxlan_tunnel[k].dst_ip);
+            OVSDB_PRINTF_DEBUG("tunnel_key == switch_vxlan_tunnel[k].vni=%d.", (tunnel_key == switch_vxlan_tunnel[k].vni));
+            OVSDB_PRINTF_DEBUG("string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip=%d.", (string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)));
+            OVSDB_PRINTF_DEBUG("switch_vxlan_tunnel[k].source_ip=%s.", switch_vxlan_tunnel[k].source_ip);
+            OVSDB_PRINTF_DEBUG("ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]=%s.", ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+
+            if((tunnel_key == switch_vxlan_tunnel[k].vni)&&(string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)))
+            {
+                OVSDB_PRINTF_DEBUG("tunnel exist with dst_ip = %s and vni = %d.", pl_dst_ip, tunnel_key);
+                return;
+            }
+        }
+    }
+
+    //ce_config_vxlan_tunnel(tunnel_key, ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0], pl_dst_ip);
+    uiRet = netconf_ce_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config vxlan tunnel.");
+        return;
+    }
+}
+
+VLOG_DEFINE_THIS_MODULE(ovsdb_client);
+
+enum args_needed {
+    NEED_NONE,            /* No JSON-RPC connection or database name needed. */
+    NEED_RPC,             /* JSON-RPC connection needed. */
+    NEED_DATABASE         /* JSON-RPC connection and database name needed. */
+};
+
+struct ovsdb_client_command {
+    const char *name;
+    enum args_needed need;
+    int min_args;
+    int max_args;
+    void (*handler)(struct jsonrpc *rpc, const char *database,
+                    int argc, char *argv[]);
+};
+
+/* --timestamp: Print a timestamp before each update on "monitor" command? */
+static bool timestamp;
+
+/* Format for table output. */
+static struct table_style table_style = TABLE_STYLE_DEFAULT;
+
+static const struct ovsdb_client_command *get_all_commands(void);
+
+static void usage(void) NO_RETURN;
+static void parse_options(int argc, char *argv[]);
+static struct jsonrpc *open_jsonrpc(const char *server);
+static void fetch_dbs(struct jsonrpc *, struct svec *dbs);
+
+int
+main(int argc, char *argv[])
+{
+    const struct ovsdb_client_command *command;
+    const char *database;
+    struct jsonrpc *rpc;
+    unsigned int uiRet = 0;
+
+    proctitle_init(argc, argv);
+    set_program_name(argv[0]);
+    parse_options(argc, argv);
+    fatal_ignore_sigpipe();
+
+    if (optind >= argc) {
+        ovs_fatal(0, "missing command name; use --help for help");
+    }
+
+    for (command = get_all_commands(); ; command++) {
+        if (!command->name) {
+            VLOG_FATAL("unknown command '%s'; use --help for help",
+                       argv[optind]);
+        } else if (!strcmp(command->name, argv[optind])) {
+            break;
+        }
+    }
+    optind++;
+
+    if (command->need != NEED_NONE) {
+        if (argc - optind > command->min_args
+            && (isalpha((unsigned char) argv[optind][0])
+                && strchr(argv[optind], ':'))) {
+            rpc = open_jsonrpc(argv[optind++]);
+        } else {
+            char *sock = xasprintf("unix:%s/db.sock", ovs_rundir());
+            rpc = open_jsonrpc(sock);
+            free(sock);
+        }
+    } else {
+        rpc = NULL;
+    }
+
+    if (command->need == NEED_DATABASE) {
+        struct svec dbs;
+
+        svec_init(&dbs);
+        fetch_dbs(rpc, &dbs);
+        if (argc - optind > command->min_args
+            && svec_contains(&dbs, argv[optind])) {
+            database = argv[optind++];
+        } else if (dbs.n == 1) {
+            database = xstrdup(dbs.names[0]);
+        } else if (svec_contains(&dbs, "Open_vSwitch")) {
+            database = "Open_vSwitch";
+        } else {
+            ovs_fatal(0, "no default database for `%s' command, please "
+                      "specify a database name", command->name);
+        }
+        svec_destroy(&dbs);
+    } else {
+        database = NULL;
+    }
+
+    if (argc - optind < command->min_args ||
+        argc - optind > command->max_args) {
+        VLOG_FATAL("invalid syntax for '%s' (use --help for help)",
+                    command->name);
+    }
+
+    command->handler(rpc, database, argc - optind, argv + optind);
+
+    jsonrpc_close(rpc);
+
+    if (ferror(stdout)) {
+        VLOG_FATAL("write to stdout failed");
+    }
+    if (ferror(stderr)) {
+        VLOG_FATAL("write to stderr failed");
+    }
+
+    return 0;
+}
+
+static void
+parse_options(int argc, char *argv[])
+{
+    enum {
+        OPT_BOOTSTRAP_CA_CERT = UCHAR_MAX + 1,
+        OPT_TIMESTAMP,
+        VLOG_OPTION_ENUMS,
+        DAEMON_OPTION_ENUMS,
+        TABLE_OPTION_ENUMS
+    };
+    static const struct option long_options[] = {
+        {"help", no_argument, NULL, 'h'},
+        {"version", no_argument, NULL, 'V'},
+        {"timestamp", no_argument, NULL, OPT_TIMESTAMP},
+        VLOG_LONG_OPTIONS,
+        DAEMON_LONG_OPTIONS,
+#ifdef HAVE_OPENSSL
+        {"bootstrap-ca-cert", required_argument, NULL, OPT_BOOTSTRAP_CA_CERT},
+        STREAM_SSL_LONG_OPTIONS,
+#endif
+        TABLE_LONG_OPTIONS,
+        {NULL, 0, NULL, 0},
+    };
+    char *short_options = long_options_to_short_options(long_options);
+
+    for (;;) {
+        int c;
+
+        c = getopt_long(argc, argv, short_options, long_options, NULL);
+        if (c == -1) {
+            break;
+        }
+
+        switch (c) {
+        case 'h':
+            usage();
+
+        case 'V':
+            ovs_print_version(0, 0);
+            exit(EXIT_SUCCESS);
+
+        VLOG_OPTION_HANDLERS
+        DAEMON_OPTION_HANDLERS
+        TABLE_OPTION_HANDLERS(&table_style)
+        STREAM_SSL_OPTION_HANDLERS
+
+        case OPT_BOOTSTRAP_CA_CERT:
+            stream_ssl_set_ca_cert_file(optarg, true);
+            break;
+
+        case OPT_TIMESTAMP:
+            timestamp = true;
+            break;
+
+        case '?':
+            exit(EXIT_FAILURE);
+
+        case 0:
+            /* getopt_long() already set the value for us. */
+            break;
+
+        default:
+            abort();
+        }
+    }
+    free(short_options);
+}
+
+static void
+usage(void)
+{
+    printf("%s: Open vSwitch database JSON-RPC client\n"
+           "usage: %s [OPTIONS] COMMAND [ARG...]\n"
+           "\nValid commands are:\n"
+           "\n  list-dbs [SERVER]\n"
+           "    list databases available on SERVER\n"
+           "\n  get-schema [SERVER] [DATABASE]\n"
+           "    retrieve schema for DATABASE from SERVER\n"
+           "\n  get-schema-version [SERVER] [DATABASE]\n"
+           "    retrieve schema for DATABASE from SERVER and report only its\n"
+           "    version number on stdout\n"
+           "\n  list-tables [SERVER] [DATABASE]\n"
+           "    list tables for DATABASE on SERVER\n"
+           "\n  list-columns [SERVER] [DATABASE] [TABLE]\n"
+           "    list columns in TABLE (or all tables) in DATABASE on SERVER\n"
+           "\n  transact [SERVER] TRANSACTION\n"
+           "    run TRANSACTION (a JSON array of operations) on SERVER\n"
+           "    and print the results as JSON on stdout\n"
+           "\n  monitor [SERVER] [DATABASE] TABLE [COLUMN,...]...\n"
+           "    monitor contents of COLUMNs in TABLE in DATABASE on SERVER.\n"
+           "    COLUMNs may include !initial, !insert, !delete, !modify\n"
+           "    to avoid seeing the specified kinds of changes.\n"
+           "\n  monitor [SERVER] [DATABASE] ALL\n"
+           "    monitor all changes to all columns in all tables\n"
+           "    in DATBASE on SERVER.\n"
+           "\n  dump [SERVER] [DATABASE]\n"
+           "    dump contents of DATABASE on SERVER to stdout\n"
+           "\nThe default SERVER is unix:%s/db.sock.\n"
+           "The default DATABASE is Open_vSwitch.\n",
+           program_name, program_name, ovs_rundir());
+    stream_usage("SERVER", true, true, true);
+    printf("\nOutput formatting options:\n"
+           "  -f, --format=FORMAT         set output formatting to FORMAT\n"
+           "                              (\"table\", \"html\", \"csv\", "
+           "or \"json\")\n"
+           "  --no-headings               omit table heading row\n"
+           "  --pretty                    pretty-print JSON in output\n"
+           "  --timestamp                 timestamp \"monitor\" output");
+    daemon_usage();
+    vlog_usage();
+    printf("\nOther options:\n"
+           "  -h, --help                  display this help message\n"
+           "  -V, --version               display version information\n");
+    exit(EXIT_SUCCESS);
+}
+
+static void
+check_txn(int error, struct jsonrpc_msg **reply_)
+{
+    struct jsonrpc_msg *reply = *reply_;
+
+    if (error) {
+        ovs_fatal(error, "transaction failed");
+    }
+
+    if (reply->error) {
+        ovs_fatal(error, "transaction returned error: %s",
+                  json_to_string(reply->error, table_style.json_flags));
+    }
+}
+
+static struct json *
+parse_json(const char *s)
+{
+    struct json *json = json_from_string(s);
+    if (json->type == JSON_STRING) {
+        ovs_fatal(0, "\"%s\": %s", s, json->u.string);
+    }
+    return json;
+}
+
+static struct jsonrpc *
+open_jsonrpc(const char *server)
+{
+    struct stream *stream;
+    int error;
+
+    error = stream_open_block(jsonrpc_stream_open(server, &stream,
+                              DSCP_DEFAULT), &stream);
+    if (error == EAFNOSUPPORT) {
+        struct pstream *pstream;
+
+        error = jsonrpc_pstream_open(server, &pstream, DSCP_DEFAULT);
+        if (error) {
+            ovs_fatal(error, "failed to connect or listen to \"%s\"", server);
+        }
+
+        VLOG_INFO("%s: waiting for connection...", server);
+        error = pstream_accept_block(pstream, &stream);
+        if (error) {
+            ovs_fatal(error, "failed to accept connection on \"%s\"", server);
+        }
+
+        pstream_close(pstream);
+    } else if (error) {
+        ovs_fatal(error, "failed to connect to \"%s\"", server);
+    }
+
+    return jsonrpc_open(stream);
+}
+
+static void
+print_json(struct json *json)
+{
+    char *string = json_to_string(json, table_style.json_flags);
+    fputs(string, stdout);
+    free(string);
+}
+
+static void
+print_and_free_json(struct json *json)
+{
+    print_json(json);
+    json_destroy(json);
+}
+
+static void
+check_ovsdb_error(struct ovsdb_error *error)
+{
+    if (error) {
+        ovs_fatal(0, "%s", ovsdb_error_to_string(error));
+    }
+}
+
+static struct ovsdb_schema *
+fetch_schema(struct jsonrpc *rpc, const char *database)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct ovsdb_schema *schema;
+
+    request = jsonrpc_create_request("get_schema",
+                                     json_array_create_1(
+                                         json_string_create(database)),
+                                     NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    check_ovsdb_error(ovsdb_schema_from_json(reply->result, &schema));
+    jsonrpc_msg_destroy(reply);
+
+    return schema;
+}
+
+static void
+fetch_dbs(struct jsonrpc *rpc, struct svec *dbs)
+{
+    struct jsonrpc_msg *request, *reply;
+    size_t i;
+
+    request = jsonrpc_create_request("list_dbs", json_array_create_empty(),
+                                     NULL);
+
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    if (reply->result->type != JSON_ARRAY) {
+        ovs_fatal(0, "list_dbs response is not array");
+    }
+
+    for (i = 0; i < reply->result->u.array.n; i++) {
+        const struct json *name = reply->result->u.array.elems[i];
+
+        if (name->type != JSON_STRING) {
+            ovs_fatal(0, "list_dbs response %"PRIuSIZE" is not string", i);
+        }
+        svec_add(dbs, name->u.string);
+    }
+    jsonrpc_msg_destroy(reply);
+    svec_sort(dbs);
+}
+
+static void
+do_list_dbs(struct jsonrpc *rpc, const char *database OVS_UNUSED,
+            int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+{
+    const char *db_name;
+    struct svec dbs;
+    size_t i;
+
+    svec_init(&dbs);
+    fetch_dbs(rpc, &dbs);
+    SVEC_FOR_EACH (i, db_name, &dbs) {
+        puts(db_name);
+    }
+    svec_destroy(&dbs);
+}
+
+static void
+do_get_schema(struct jsonrpc *rpc, const char *database,
+              int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+{
+    struct ovsdb_schema *schema = fetch_schema(rpc, database);
+    print_and_free_json(ovsdb_schema_to_json(schema));
+    ovsdb_schema_destroy(schema);
+}
+
+static void
+do_get_schema_version(struct jsonrpc *rpc, const char *database,
+                      int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+{
+    struct ovsdb_schema *schema = fetch_schema(rpc, database);
+    puts(schema->version);
+    ovsdb_schema_destroy(schema);
+}
+
+static void
+do_list_tables(struct jsonrpc *rpc, const char *database,
+               int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+{
+    struct ovsdb_schema *schema;
+    struct shash_node *node;
+    struct table t;
+
+    schema = fetch_schema(rpc, database);
+    table_init(&t);
+    table_add_column(&t, "Table");
+    SHASH_FOR_EACH (node, &schema->tables) {
+        struct ovsdb_table_schema *ts = node->data;
+
+        table_add_row(&t);
+        table_add_cell(&t)->text = xstrdup(ts->name);
+    }
+    ovsdb_schema_destroy(schema);
+    table_print(&t, &table_style);
+}
+
+static void
+do_list_columns(struct jsonrpc *rpc, const char *database,
+                int argc OVS_UNUSED, char *argv[])
+{
+    const char *table_name = argv[0];
+    struct ovsdb_schema *schema;
+    struct shash_node *table_node;
+    struct table t;
+
+    schema = fetch_schema(rpc, database);
+    table_init(&t);
+    if (!table_name) {
+        table_add_column(&t, "Table");
+    }
+    table_add_column(&t, "Column");
+    table_add_column(&t, "Type");
+    SHASH_FOR_EACH (table_node, &schema->tables) {
+        struct ovsdb_table_schema *ts = table_node->data;
+
+        if (!table_name || !strcmp(table_name, ts->name)) {
+            struct shash_node *column_node;
+
+            SHASH_FOR_EACH (column_node, &ts->columns) {
+                const struct ovsdb_column *column = column_node->data;
+
+                table_add_row(&t);
+                if (!table_name) {
+                    table_add_cell(&t)->text = xstrdup(ts->name);
+                }
+                table_add_cell(&t)->text = xstrdup(column->name);
+                table_add_cell(&t)->json = ovsdb_type_to_json(&column->type);
+            }
+        }
+    }
+    ovsdb_schema_destroy(schema);
+    table_print(&t, &table_style);
+}
+
+static void
+do_transact(struct jsonrpc *rpc, const char *database OVS_UNUSED,
+            int argc OVS_UNUSED, char *argv[])
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+
+    transaction = parse_json(argv[0]);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    print_json(reply->result);
+    putchar('\n');
+    jsonrpc_msg_destroy(reply);
+}
+
+/* "monitor" command. */
+
+struct monitored_table {
+    struct ovsdb_table_schema *table;
+    struct ovsdb_column_set columns;
+};
+
+static void
+monitor_print_row(struct json *row, const char *type, const char *uuid,
+                  const struct ovsdb_column_set *columns, struct table *t)
+{
+    size_t i;
+
+    if (!row) {
+        ovs_error(0, "missing %s row", type);
+        return;
+    } else if (row->type != JSON_OBJECT) {
+        ovs_error(0, "<row> is not object");
+        return;
+    }
+
+    table_add_row(t);
+    table_add_cell(t)->text = xstrdup(uuid);
+    table_add_cell(t)->text = xstrdup(type);
+    for (i = 0; i < columns->n_columns; i++) {
+        const struct ovsdb_column *column = columns->columns[i];
+        struct json *value = shash_find_data(json_object(row), column->name);
+        struct cell *cell = table_add_cell(t);
+        if (value) {
+            cell->json = json_clone(value);
+            cell->type = &column->type;
+        }
+    }
+}
+
+void global_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------global_table_node, action=%s----------------", ACTION_TYPE(action));
+
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+                    if(uuid_is_zero(&ovsdb_vtep_db_table.table_global.uuid_self))
+                    {
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_global.uuid_self, node_name);
+
+                        OVSDB_PRINTF_DEBUG("global_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_global.uuid_self));
+
+                    }
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+
+}
+
+void global_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------global_table_node_stage_2, action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_switch_table_node, action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+    {
+        case TABLE_INITIAL:
+        case TABLE_INSERT:
+            {
+                int i = 0;
+                struct json *name;
+                struct json *des;
+                struct json *tunnel_ips;
+                struct json *management_ips;
+                //struct json_array *ports;
+                //struct json_array *ports_set;
+                //int id = 0;
+                //struct json_array *ports_uuid;
+                unsigned int uiRet = 0;
+
+                name = shash_find_data(json_object(new), "name");
+                des = shash_find_data(json_object(new), "description");
+
+                tunnel_ips = shash_find_data(json_object(new), "tunnel_ips");
+                management_ips = shash_find_data(json_object(new), "management_ips");
+
+                /*这里port的处理不正确，当port个数为一个时，init会有问题*/
+                #if 0
+                ports = json_array(shash_find_data(json_object(new), "ports"));
+                ports_set = json_array(ports->elems[1]);    /*elems[0] is "set" string */
+                #endif
+
+                for(i=0; i<TABLE_PHYSICAL_SWITCH_NUM; i++)
+                {
+                    /*获取表中的第一个不为0的表项*/
+                    if(!uuid_is_zero(&ovsdb_vtep_db_table.table_physical_switch[i].uuid_self))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        /*uuid*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_switch[i].uuid_self, node_name);
+
+                        /*name*/
+                        ovsdb_vtep_db_table.table_physical_switch[i].name= malloc(strlen(json_string(name))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_physical_switch[i].name, json_string(name), strlen(json_string(name))+1);
+
+                        /*description*/
+                        ovsdb_vtep_db_table.table_physical_switch[i].description= malloc(strlen(json_string(des))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_physical_switch[i].description, json_string(des), strlen(json_string(des))+1);
+                        #if 1
+                        OVSDB_PRINTF_DEBUG("physical_switch_table i=%d, name=%s, description=%s.", i,
+                             ovsdb_vtep_db_table.table_physical_switch[i].name, ovsdb_vtep_db_table.table_physical_switch[i].description);
+                        OVSDB_PRINTF_DEBUG("physical_switch_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_switch[i].uuid_self));
+                        #endif
+
+                        /*management_ips*/
+                        if(JSON_STRING == management_ips->type) /*只有1个management ip*/
+                        {
+                            ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]= malloc(strlen(json_string(management_ips))+1) ;
+                            memcpy(ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0], json_string(management_ips), strlen(json_string(management_ips))+1);
+                            OVSDB_PRINTF_DEBUG("\nonly one management_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]);
+                        }
+                        else if(JSON_ARRAY == management_ips->type) /*有多个management ip*/
+                        {
+                            struct json_array *management_ips_set;
+                            struct json_array *management_ips_set_value;
+                            struct json *ip_value;
+                            int j =0;
+
+                            management_ips_set = json_array(management_ips);
+                            management_ips_set_value = json_array(management_ips_set->elems[1]);    /*elems[0] is "set" string*/
+                            if(!management_ips_set_value->n) OVSDB_PRINTF_DEBUG("physical switch has no management ips.");
+                            else OVSDB_PRINTF_DEBUG("physical switch has more than one management ips.");
+                            for(; j < management_ips_set_value->n; j++)
+                            {
+                                if(j >= PHYSICAL_SWITCH_MANAGE_IP_NUM)
+                                {
+                                    break;
+                                }
+                                ip_value = management_ips_set_value->elems[j];
+                                ovsdb_vtep_db_table.table_physical_switch[i].management_ips[j]= malloc(strlen(json_string(ip_value))+1) ;
+                                memcpy(ovsdb_vtep_db_table.table_physical_switch[i].management_ips[j], json_string(ip_value), strlen(json_string(ip_value))+1);
+                                OVSDB_PRINTF_DEBUG("management_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].management_ips[j]);
+                            }
+                        }
+
+
+                        /*tunnel_ips*/
+                        if(JSON_STRING == tunnel_ips->type) /*只有1个tunnel ip*/
+                        {
+                            ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]= malloc(strlen(json_string(tunnel_ips))+1) ;
+                            memcpy(ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0], json_string(tunnel_ips), strlen(json_string(tunnel_ips))+1);
+                            OVSDB_PRINTF_DEBUG("only one tunnel_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]);
+                        }
+                        else if(JSON_ARRAY == tunnel_ips->type) /*有多个tunnel ip*/
+                        {
+                            struct json_array *tunnel_ips_set;
+                            struct json_array *tunnel_ips_set_value;
+                            struct json *ip_value;
+                            int j =0;
+
+                            tunnel_ips_set = json_array(tunnel_ips);
+                            tunnel_ips_set_value = json_array(tunnel_ips_set->elems[1]);    /*elems[0] is "set" string*/
+                            if(!tunnel_ips_set_value->n)
+                            {
+                                OVSDB_PRINTF_DEBUG("physical switch has no tunnel ips.");
+                            }
+                            else
+                            {
+                                OVSDB_PRINTF_DEBUG("physical switch has more than one tunnel ips.");
+                            }
+
+                            for(; j < tunnel_ips_set_value->n; j++)
+                            {
+                                if(j >= PHYSICAL_SWITCH_TUNNEL_IP_NUM)
+                                {
+                                    break;
+                                }
+                                ip_value = tunnel_ips_set_value->elems[j];
+                                ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[j]= malloc(strlen(json_string(ip_value))+1) ;
+                                memcpy(ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[j], json_string(ip_value), strlen(json_string(ip_value))+1);
+                                OVSDB_PRINTF_DEBUG("tunnel_ips = %s.", ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[j]);
+                            }
+                        }
+
+                        //ce_config_nve1_source();
+                        uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+                        if (OVSDB_OK != uiRet)
+                        {
+                            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source when processing physical switch table.");
+                            return;
+                        }
+
+                        /*ports*/
+                        #if 0
+                        for(; id < ports_set->n; id++)
+                        {
+                            ports_uuid = json_array(ports_set->elems[id]);
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_switch[i].ports[id], json_string(ports_uuid->elems[1])); /*elems[0] is "uuid" string*/
+                            #if 1
+                            printf("physical_switch_table port uuid = "UUID_FMT"\n", UUID_ARGS(&ovsdb_vtep_db_table.table_physical_switch[i].ports[id]));
+                            #endif
+                        }
+                        #endif
+
+                        break;
+                    }
+                }
+                break;
+            }
+
+        /*case TABLE_INSERT:
+            {
+
+                break;
+            }*/
+
+        case TABLE_DELETE:
+            {
+                break;
+            }
+
+        case TABLE_UPDATE:  /*主要是添加port的场景,management_ip的问题后续如何处理?*/
+            {
+                ovsdb_switch_update_management_ips_process(new, old, node_name);
+                ovsdb_switch_update_tunnel_ips_process(new, old, node_name);
+                break;
+            }
+
+        default:
+            break;
+
+    }
+
+}
+
+void physical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_switch_table_node_stage_2,action=%s----------------", ACTION_TYPE(action));
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------logical_switch_table_node,action=%s----------------", ACTION_TYPE(action));
+
+    switch(action)
+    {
+        case TABLE_INITIAL:
+        case TABLE_INSERT:
+            {
+                int i = 0;
+                struct json *name;
+                struct json *des;
+                struct json *tunnel_key;    /*vni*/
+                unsigned int uiRet = 0;
+                char *paReply = NULL;
+
+                name = shash_find_data(json_object(new), "name");
+                des = shash_find_data(json_object(new), "description");
+                tunnel_key = shash_find_data(json_object(new), "tunnel_key");
+
+                for(i=0; i<TABLE_LOGICAL_SWITCH_NUM; i++)
+                {
+                    /*获取表中的第一个不为0的表项*/
+                    if(!uuid_is_zero(&ovsdb_vtep_db_table.table_logical_switch[i].uuid_self))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        /*uuid*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_logical_switch[i].uuid_self, node_name);
+
+                        /*name*/
+                        ovsdb_vtep_db_table.table_logical_switch[i].name= malloc(strlen(json_string(name))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_logical_switch[i].name, json_string(name), strlen(json_string(name))+1);
+
+                        /*description*/
+                        ovsdb_vtep_db_table.table_logical_switch[i].description= malloc(strlen(json_string(des))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_logical_switch[i].description, json_string(des), strlen(json_string(des))+1);
+                        #if 1
+                        OVSDB_PRINTF_DEBUG("logical_switch_table .i=%d, name = %s, des = %s", i,
+                            ovsdb_vtep_db_table.table_logical_switch[i].name, ovsdb_vtep_db_table.table_logical_switch[i].description);
+                        OVSDB_PRINTF_DEBUG("logical_switch_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_logical_switch[i].uuid_self));
+                        #endif
+
+                        /*tunnel_key*/
+                        /*如果tunnel-key的json类型为JSON_INTEGER，则有值,如果为JSON_ARRAY，则没有值*/
+                        //printf("\n tunnel key type =%d\n", tunnel_key->type);
+                        if(JSON_INTEGER == tunnel_key->type)
+                        {
+                            ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key = json_integer(tunnel_key);
+                            OVSDB_PRINTF_DEBUG("tunnel key = %d.", ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key);
+
+                            /*是否需要添加以下功能:如果该bd已经创建了(因为有可能多个ls的vni相同，是不是就不创建bd了)*/
+                            //ce_config_bd(ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key);
+                            uiRet = netconf_ce_config_bd(ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key);
+                            if (OVSDB_OK != uiRet)
+                            {
+                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config bridge-domain when inserting table in processing logical switch table");
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                }
+                break;
+            }
+
+        case TABLE_DELETE:
+            {
+                struct uuid deleted_ls_uuid;
+                int j=0;
+                int k=0;
+                int other_ls_has_same_vni_exist=0;
+                unsigned int uiRet = 0;
+
+                uuid_zero(&deleted_ls_uuid);
+                (void)uuid_from_string(&deleted_ls_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("deleted logical_switch uuid = "UUID_FMT, UUID_ARGS(&deleted_ls_uuid));
+
+                for(j=0; j<TABLE_LOGICAL_SWITCH_NUM; j++)
+                {
+                    if(uuid_equals(&deleted_ls_uuid, &ovsdb_vtep_db_table.table_logical_switch[j].uuid_self))
+                    {
+                       /*调试打印*/
+                       OVSDB_PRINTF_DEBUG("deleted logical_switch name = %s.", ovsdb_vtep_db_table.table_logical_switch[j].name);
+
+                       /*如果没有其他的ls的vni与当前删除的ls的vni相同，则undo bridge-domain*/
+                       for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
+                       {
+                           if(k == j)
+                           {
+                               continue;
+                           }
+                           else if(ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key == ovsdb_vtep_db_table.table_logical_switch[j].tunnel_key)
+                           {
+                               other_ls_has_same_vni_exist = 1;
+                               break;
+                           }
+                       }
+
+                       if(!other_ls_has_same_vni_exist)
+                       {
+                           //ce_undo_config_bd(ovsdb_vtep_db_table.table_logical_switch[j].tunnel_key);
+                           uiRet = netconf_ce_undo_config_bd(ovsdb_vtep_db_table.table_logical_switch[j].tunnel_key);
+                           if (OVSDB_OK != uiRet)
+                           {
+                               OVSDB_PRINTF_DEBUG("[ERROR]Failed to config undo bridge-domain when deleting table in processing logical switch table");
+                               return;
+                           }
+                       }
+
+                        /*释放空间*/
+                        if(ovsdb_vtep_db_table.table_logical_switch[j].name)
+                        {
+                            free(ovsdb_vtep_db_table.table_logical_switch[j].name);
+                        }
+                        if(ovsdb_vtep_db_table.table_logical_switch[j].description)
+                        {
+                            free(ovsdb_vtep_db_table.table_logical_switch[j].description);
+                        }
+                        memset(&ovsdb_vtep_db_table.table_logical_switch[j], 0, sizeof(struct ovsdb_vtep_table_logical_switch));
+
+                        break;
+                    }
+                }
+
+                break;
+            }
+
+        case TABLE_UPDATE:  /*主要针对给ls添加vni的场景*/
+            /*是否要考虑改变vni时，隧道配置的改变，代码改动会比较大*/
+            /*是否要考虑改变vni时，隧道配置的改变，代码改动会比较大*/
+            /*是否要考虑改变vni时，隧道配置的改变，代码改动会比较大*/
+            /*是否要考虑改变vni时，隧道配置的改变，代码改动会比较大*/
+            {
+                struct uuid updated_ls_uuid;
+                struct json *tunnel_key;    /*vni*/
+                int k=0;
+                int m=0;
+                int other_ls_has_same_vni_exist=0;
+                unsigned int uiRet = 0;
+
+                uuid_zero(&updated_ls_uuid);
+                (void)uuid_from_string(&updated_ls_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("updated logical_switch uuid = "UUID_FMT, UUID_ARGS(&updated_ls_uuid));
+
+                tunnel_key = shash_find_data(json_object(new), "tunnel_key");
+                if(NULL == tunnel_key)
+                {
+                    break;
+                }
+
+                for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
+                {
+                    if(uuid_equals(&updated_ls_uuid, &ovsdb_vtep_db_table.table_logical_switch[k].uuid_self))
+                    {
+                        if(JSON_INTEGER == tunnel_key->type)
+                        {
+                            int tunnel_key_temp = json_integer(tunnel_key);
+
+                            if(ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key == tunnel_key_temp)
+                            {
+                                OVSDB_PRINTF_DEBUG("logical_swutch %s's tunnel_key is not updated,tunnel_key = %d.",
+                                    ovsdb_vtep_db_table.table_logical_switch[k].name, ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key);
+                            }
+                            else
+                            {
+                                OVSDB_PRINTF_DEBUG("logical_swutch %s's tunnel_key is updated,old tunnel_key = %d.",
+                                    ovsdb_vtep_db_table.table_logical_switch[k].name,
+                                    ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key);
+                                OVSDB_PRINTF_DEBUG("new tunnel_key = %d.", tunnel_key_temp);
+
+                                /*在TOR上进行相应的配置BD和删除BD操作*/
+                                if(tunnel_key_temp > 4095)  /*如果新的vni大于4095,则创建BD，暂时未考虑tor上已经创建了该BD的情况*/
+                                {
+                                    //ce_config_bd(tunnel_key_temp);
+                                    uiRet = netconf_ce_config_bd(tunnel_key_temp);
+                                    if (OVSDB_OK != uiRet)
+                                    {
+                                        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config bridge-domain when updating table in processing logical switch table");
+                                        return;
+                                    }
+                                }
+                                /*如果旧的vni大于4095, 则查看其他的ls的vni是否有与当前的相同的，如果没有,在tor上删除BD*/
+                                if(ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key > 4095)
+                                {
+                                    for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
+                                    {
+                                        if(m == k)
+                                        {
+                                            continue;
+                                        }
+                                        else if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key == ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key)
+                                        {
+                                            other_ls_has_same_vni_exist = 1;
+                                            break;
+                                        }
+                                    }
+
+                                    if(!other_ls_has_same_vni_exist)
+                                    {
+                                        //ce_undo_config_bd(ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key);
+                                        uiRet = netconf_ce_undo_config_bd(ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key);
+                                        if (OVSDB_OK != uiRet)
+                                        {
+                                            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config undo bridge-domain when updating table in processing logical switch table");
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                /*写表*/
+                                ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key = tunnel_key_temp;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                break;
+            }
+
+        default:
+            break;
+
+    }
+
+}
+
+void logical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------logical_switch_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_locator_table_node,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+    {
+        case TABLE_INITIAL:
+        case TABLE_INSERT:
+            {
+                int i = 0;
+                struct json *dst_ip;
+                dst_ip = shash_find_data(json_object(new), "dst_ip");
+
+                for(i=0; i<TABLE_PHYSICAL_LOCATOR_NUM; i++)
+                {
+                    /*获取表中的第一个不为0的表项*/
+                    if(!uuid_is_zero(&ovsdb_vtep_db_table.table_physical_locator[i].uuid_self))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        /*uuid*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_locator[i].uuid_self, node_name);
+                        /*dst_ip*/
+                        ovsdb_vtep_db_table.table_physical_locator[i].dst_ip= malloc(strlen(json_string(dst_ip))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_physical_locator[i].dst_ip, json_string(dst_ip), strlen(json_string(dst_ip))+1);
+
+                        OVSDB_PRINTF_DEBUG("physical locator i=%d, dst_ip=%s.", i, ovsdb_vtep_db_table.table_physical_locator[i].dst_ip);
+                        OVSDB_PRINTF_DEBUG("physical locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator[i].uuid_self));
+
+                        ovsdb_physical_locator_process(&ovsdb_vtep_db_table.table_physical_locator[i].uuid_self, ovsdb_vtep_db_table.table_physical_locator[i].dst_ip);
+
+                        break;
+                    }
+                }
+                break;
+            }
+
+        case TABLE_DELETE:
+            {
+                struct uuid deleted_pl_uuid;
+                int j=0;
+                int m=0;
+                unsigned int uiRet = 0;
+
+                uuid_zero(&deleted_pl_uuid);
+                (void)uuid_from_string(&deleted_pl_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("deleted physical_locator uuid = "UUID_FMT, UUID_ARGS(&deleted_pl_uuid));
+
+                for(j=0; j<TABLE_PHYSICAL_LOCATOR_NUM; j++)
+                {
+                    if(uuid_equals(&deleted_pl_uuid, &ovsdb_vtep_db_table.table_physical_locator[j].uuid_self))
+                    {
+
+                        /*首先在switch_vxlan_tunnel全局变量中找对应的隧道*/
+                        for(m=0; m<VXLAN_TUNNEL_NUM_MAX; m++)
+                        {
+                            if(string_equals(switch_vxlan_tunnel[m].dst_ip, ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
+                            {
+                                if((switch_vxlan_tunnel[m].used_bit)&&(switch_vxlan_tunnel[m].vni>4095))
+                                {
+                                    //ce_undo_config_vxlan_tunnel(switch_vxlan_tunnel[m].vni,
+                                        //ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0], switch_vxlan_tunnel[m].dst_ip);
+
+                                    uiRet = netconf_ce_undo_config_vxlan_tunnel(switch_vxlan_tunnel[m].vni, switch_vxlan_tunnel[m].dst_ip);
+                                    if (OVSDB_OK != uiRet)
+                                    {
+                                        OVSDB_PRINTF_DEBUG("[ERROR]Failed to undo vxlan tunnel");
+                                        return;
+                                    }
+
+                                    OVSDB_PRINTF_DEBUG("delete entry to switch_vxlan_tunnel. m =%d, vni = %d,", m, switch_vxlan_tunnel[m].vni);
+                                    OVSDB_PRINTF_DEBUG("source_ip = %s, dst_ip = %s.", switch_vxlan_tunnel[m].source_ip, switch_vxlan_tunnel[m].dst_ip);
+
+                                    /*释放switch_vxlan_tunnel中的该条表项*/
+                                    #if 1
+                                    if(switch_vxlan_tunnel[m].source_ip)
+                                    {
+                                        free(switch_vxlan_tunnel[m].source_ip);
+                                    }
+                                    if(switch_vxlan_tunnel[m].dst_ip)
+                                    {
+                                        free(switch_vxlan_tunnel[m].dst_ip);
+                                    }
+                                    #endif
+
+                                    memset(&switch_vxlan_tunnel[m], 0, sizeof(struct hw_vtep_vxlan_tunnel));
+
+
+                                    break;
+                                }
+                            }
+                        }
+
+                        /*释放空间*/
+                        if(ovsdb_vtep_db_table.table_physical_locator[j].dst_ip)
+                        {
+                            free(ovsdb_vtep_db_table.table_physical_locator[j].dst_ip);
+                        }
+                        memset(&ovsdb_vtep_db_table.table_physical_locator[j], 0, sizeof(struct ovsdb_vtep_table_physical_locator));
+
+                        break;
+                    }
+                }
+
+                break;
+            }
+
+        case TABLE_UPDATE:
+        /*需要考虑1.先add-ucast-remote _nvp_internal XXXX 192.168.2.124,然后再add-ucast-remote ls0 YYYY 192.168.2.124*/
+        /*需要考虑2.一个locator出现在多个locator_set中，从而对应多个vni，也就对应多个隧道*/
+        /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
+         /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
+         /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
+         /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
+
+        /*另外一种当前还不支持的场景；*/
+            {
+                struct uuid updated_pl_uuid;
+                int k=0;
+
+                uuid_zero(&updated_pl_uuid);
+                (void)uuid_from_string(&updated_pl_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("updated physical_locator uuid = "UUID_FMT, UUID_ARGS(&updated_pl_uuid));
+
+                for(k=0; k<TABLE_PHYSICAL_LOCATOR_NUM; k++)
+                {
+                    if(uuid_equals(&updated_pl_uuid, &ovsdb_vtep_db_table.table_physical_locator[k].uuid_self))
+                    {
+                        ovsdb_physical_locator_process(&updated_pl_uuid, ovsdb_vtep_db_table.table_physical_locator[k].dst_ip);
+                        break;
+                    }
+                }
+
+
+
+
+                break;
+            }
+
+        default:
+            break;
+
+    }
+
+}
+
+void physical_locator_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_locator_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+                    int i =0;
+
+                    /*只有在标志位置起的时候才会创建隧道*/
+                    /*多个locator对应的隧道一起创建*/
+                    /*先创建service node的隧道，再创建hypervisror的隧道*/
+                    if(vxlan_tunnel_to_be_create_flag)
+                    {
+                        /*service node隧道创建*/
+                        for(i=0; i<SERVICE_NODE_MAX; i++)
+                        {
+                            if(service_node_vxlan_tunnel_to_be_created[i].used_bit)
+                            {
+                                ovsdb_physical_locator_process_config_vxlan_tunnel(
+                                    service_node_vxlan_tunnel_to_be_created[i].vni,
+                                    service_node_vxlan_tunnel_to_be_created[i].dst_ip
+                                    );
+                            }
+
+                            /*清除缓冲区数据*/
+                            #if 1
+                            if(service_node_vxlan_tunnel_to_be_created[i].dst_ip)
+                            {
+                                free(service_node_vxlan_tunnel_to_be_created[i].dst_ip);
+                            }
+
+                            if(service_node_vxlan_tunnel_to_be_created[i].source_ip)
+                            {
+                                free(service_node_vxlan_tunnel_to_be_created[i].source_ip);
+                            }
+
+                            service_node_vxlan_tunnel_to_be_created[i].vni = 0;
+
+                            service_node_vxlan_tunnel_to_be_created[i].used_bit = 0;
+
+                            service_node_vxlan_tunnel_to_be_created[i].dst_ip = NULL;
+
+                            service_node_vxlan_tunnel_to_be_created[i].source_ip = NULL;
+                            #endif
+
+                            memset(&service_node_vxlan_tunnel_to_be_created[i], 0 , sizeof(struct hw_vtep_vxlan_tunnel));
+                        }
+
+                        /*hypervisor隧道创建*/
+                        for(i=0; i<HYPERVISOR_MAX; i++)
+                        {
+                            if(hypervisor_vxlan_tunnel_to_be_created[i].used_bit)
+                            {
+                                ovsdb_physical_locator_process_config_vxlan_tunnel(
+                                    hypervisor_vxlan_tunnel_to_be_created[i].vni,
+                                    hypervisor_vxlan_tunnel_to_be_created[i].dst_ip
+                                    );
+                            }
+
+                            /*清除缓冲区数据*/
+                            #if 1
+                            if(hypervisor_vxlan_tunnel_to_be_created[i].dst_ip)
+                            {
+                                free(hypervisor_vxlan_tunnel_to_be_created[i].dst_ip);
+                            }
+
+                            if(hypervisor_vxlan_tunnel_to_be_created[i].source_ip)
+                            {
+                                free(hypervisor_vxlan_tunnel_to_be_created[i].source_ip);
+                            }
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].vni = 0;
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].used_bit = 0;
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].dst_ip = NULL;
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].source_ip = NULL;
+                            #endif
+
+                            memset(&hypervisor_vxlan_tunnel_to_be_created[i], 0 , sizeof(struct hw_vtep_vxlan_tunnel));
+                        }
+
+                        /*创建完标志位清零*/
+                        vxlan_tunnel_to_be_create_flag= 0;
+                    }
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+                    int i =0;
+
+                    /*只有在标志位置起的时候才会创建隧道*/
+                    /*多个locator对应的隧道一起创建*/
+                    /*先创建service node的隧道，再创建hypervisror的隧道*/
+                    if(vxlan_tunnel_to_be_create_flag)
+                    {
+                        /*service node隧道创建*/
+                        for(i=0; i<SERVICE_NODE_MAX; i++)
+                        {
+                            if(service_node_vxlan_tunnel_to_be_created[i].used_bit)
+                            {
+                                ovsdb_physical_locator_process_config_vxlan_tunnel(
+                                    service_node_vxlan_tunnel_to_be_created[i].vni,
+                                    service_node_vxlan_tunnel_to_be_created[i].dst_ip
+                                    );
+                            }
+
+                            /*清除缓冲区数据*/
+                            #if 1
+                            if(service_node_vxlan_tunnel_to_be_created[i].dst_ip)
+                            {
+                                free(service_node_vxlan_tunnel_to_be_created[i].dst_ip);
+                            }
+
+                            if(service_node_vxlan_tunnel_to_be_created[i].source_ip)
+                            {
+                                free(service_node_vxlan_tunnel_to_be_created[i].source_ip);
+                            }
+
+                            service_node_vxlan_tunnel_to_be_created[i].vni = 0;
+
+                            service_node_vxlan_tunnel_to_be_created[i].used_bit = 0;
+
+                            service_node_vxlan_tunnel_to_be_created[i].dst_ip = NULL;
+
+                            service_node_vxlan_tunnel_to_be_created[i].source_ip = NULL;
+                            #endif
+                            memset(&service_node_vxlan_tunnel_to_be_created[i], 0 , sizeof(struct hw_vtep_vxlan_tunnel));
+
+                        }
+
+                        /*hypervisor隧道创建*/
+                        for(i=0; i<HYPERVISOR_MAX; i++)
+                        {
+                            if(hypervisor_vxlan_tunnel_to_be_created[i].used_bit)
+                            {
+                                ovsdb_physical_locator_process_config_vxlan_tunnel(
+                                    hypervisor_vxlan_tunnel_to_be_created[i].vni,
+                                    hypervisor_vxlan_tunnel_to_be_created[i].dst_ip
+                                    );
+                            }
+
+                            /*清除缓冲区数据*/
+                            #if 1
+                            if(hypervisor_vxlan_tunnel_to_be_created[i].dst_ip)
+                            {
+                                free(hypervisor_vxlan_tunnel_to_be_created[i].dst_ip);
+                            }
+
+                            if(hypervisor_vxlan_tunnel_to_be_created[i].source_ip)
+                            {
+                                free(hypervisor_vxlan_tunnel_to_be_created[i].source_ip);
+                            }
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].vni = 0;
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].used_bit = 0;
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].dst_ip = NULL;
+
+                            hypervisor_vxlan_tunnel_to_be_created[i].source_ip = NULL;
+                            #endif
+
+                            memset(&hypervisor_vxlan_tunnel_to_be_created[i], 0 , sizeof(struct hw_vtep_vxlan_tunnel));
+                        }
+
+                        /*创建完标志位清零*/
+                        vxlan_tunnel_to_be_create_flag= 0;
+                    }
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action) /*not completed yet*/
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_locator_set__table_node,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+    {
+        case TABLE_INITIAL:
+        case TABLE_INSERT:
+            {
+                int i = 0;
+                struct json *locators;
+                struct json_array *locators_value;
+                int k = 0;
+                struct uuid locator_uuid;
+
+                locators = shash_find_data(json_object(new), "locators");
+                locators_value = json_array(locators);
+
+                for(i=0; i<TABLE_PHYSICAL_LOCATOR_SET_NUM; i++)
+                {
+                    /*获取表中的第一个不为0的表项*/
+                    if(!uuid_is_zero(&ovsdb_vtep_db_table.table_physical_locator_set[i].uuid_self))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        /*uuid*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_locator_set[i].uuid_self, node_name);
+
+                        /*locators*/
+                        /*需要考虑一个locator_set中只有一个locator以及多个locator的情况*/
+                        /*首先考虑只有1个locator的情况*/
+                        if(string_equals(json_string(locators_value->elems[0]), "uuid"))
+                        {
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[0],
+                                json_string(locators_value->elems[1]));
+                                OVSDB_PRINTF_DEBUG("physical locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator_set[i].uuid_self));
+                                OVSDB_PRINTF_DEBUG("physical locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[0]));
+
+                        }
+                        /*然后考虑多个locator的情况*/
+                        else if(string_equals(json_string(locators_value->elems[0]), "set"))
+                        {
+                            struct json_array *locator_elems;
+                            locator_elems = json_array(locators_value->elems[1]);
+
+                            for(k=0; k<locator_elems->n; k++)
+                            {
+                                uuid_from_string(&locator_uuid, json_string(json_array(locator_elems->elems[k])->elems[1]));
+                                OVSDB_PRINTF_DEBUG("k=%d, physical locator uuid = "UUID_FMT, k, UUID_ARGS(&locator_uuid));
+                                if(k<LOCATOR_NUM_IN_LOCATION_SET)
+                                {
+                                    uuid_from_string(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[k], json_string(json_array(locator_elems->elems[k])->elems[1]));
+                                }
+                            }
+
+                        }
+
+                        break;
+                    }
+                }
+                break;
+            }
+
+        case TABLE_DELETE:
+            {
+
+                struct uuid deleted_pls_uuid;
+                int j=0;
+
+                uuid_zero(&deleted_pls_uuid);
+                (void)uuid_from_string(&deleted_pls_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("deleted physical_locator_set uuid = "UUID_FMT, UUID_ARGS(&deleted_pls_uuid));
+
+                for(j=0; j<TABLE_PHYSICAL_LOCATOR_SET_NUM; j++)
+                {
+                    if(uuid_equals(&deleted_pls_uuid, &ovsdb_vtep_db_table.table_physical_locator_set[j].uuid_self))
+                    {
+
+                        /*释放空间*/
+                        memset(&ovsdb_vtep_db_table.table_physical_locator_set[j], 0, sizeof(struct ovsdb_vtep_table_physical_locator_set));
+
+                        break;
+                    }
+                }
+
+                break;
+            }
+
+        case TABLE_UPDATE:  /*不存在更新的情况，往locator_set中添加或删除一个locator时，会删掉老的set，并创建新的set*/
+            {
+
+                break;
+            }
+
+        default:
+            break;
+
+    }
+
+}
+
+void physical_locator_set_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action) /*not completed yet*/
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_locator_set_table_node_stage_2,action=%s----------------", ACTION_TYPE(action));
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_port_table_node,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+    {
+        case TABLE_INITIAL:
+        case TABLE_INSERT:
+            {
+                int i=0;
+                struct json *port_name;
+                struct json *port_des;
+
+                port_name = shash_find_data(json_object(new), "name");/*find name  in table*/
+                port_des = shash_find_data(json_object(new), "description");/*find description  in  table*/
+
+                for(i=0; i<TABLE_PHYSICAL_PORT_NUM; i++)
+                {
+                    /*获取表中的第一个不为0的表项*/
+                    if(!uuid_is_zero(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        /*uuid*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self, node_name);
+                        OVSDB_PRINTF_DEBUG("port uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self));
+
+                        /*name*/
+                        ovsdb_vtep_db_table.table_physical_port[i].name = malloc(strlen(json_string(port_name))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_physical_port[i].name, json_string(port_name), strlen(json_string(port_name))+1);
+                        OVSDB_PRINTF_DEBUG("port name is %s, i = %d", ovsdb_vtep_db_table.table_physical_port[i].name, i);
+
+                        /*description*/
+                        ovsdb_vtep_db_table.table_physical_port[i].description = malloc(strlen(json_string(port_des))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_physical_port[i].description, json_string(port_des), strlen(json_string(port_des))+1);
+                        OVSDB_PRINTF_DEBUG("port description is %s, i = %d", ovsdb_vtep_db_table.table_physical_port[i].description, i);
+
+                        /*vlan bingding*/
+                        /*vlan bingding的处理逻辑不正确，有时间重写一下*/
+                        ovsdb_port_add_vlanbinding_process(new, old, node_name);
+
+                        break;
+
+                    }
+                }
+                break;
+            }
+
+        case TABLE_DELETE:
+            {
+                struct uuid deleted_port_uuid;
+                int j=0;
+
+                uuid_zero(&deleted_port_uuid);
+                (void)uuid_from_string(&deleted_port_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("deleted physical port uuid = "UUID_FMT, UUID_ARGS(&deleted_port_uuid));
+
+                for(j=0; j<TABLE_PHYSICAL_PORT_NUM; j++)
+                {
+                    if(uuid_equals(&deleted_port_uuid, &ovsdb_vtep_db_table.table_physical_port[j].uuid_self))
+                    {
+
+                        /*释放空间*/
+                        if(ovsdb_vtep_db_table.table_physical_port[j].name)
+                        {
+                            free(ovsdb_vtep_db_table.table_physical_port[j].name);
+                        }
+                        if(ovsdb_vtep_db_table.table_physical_port[j].description)
+                        {
+                            free(ovsdb_vtep_db_table.table_physical_port[j].description);
+                        }
+                        memset(&ovsdb_vtep_db_table.table_physical_port[j], 0, sizeof(struct ovsdb_vtep_table_physical_port));
+
+                        break;
+                    }
+                }
+
+                break;
+            }
+
+        case TABLE_UPDATE:  /*添加和去除vlan_binding的场景*/
+            {
+                int port_update_type = PORT_UPDATE_INVALID_TYPE;
+                ovsdb_port_update_vlanbinding_process(new, old, node_name, &port_update_type);
+
+                /**/
+
+                break;
+            }
+
+        default:
+            break;
+
+    }
+
+    return;
+}
+
+void physical_port_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------physical_port_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void ucast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------ucast_macs_local_table_node,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+                    struct json *MAC;
+                    struct json *ip_addr;
+                    struct json *logic_switch;
+                    struct json_array *logic_switch_array;
+                    struct json *uuid_logic_switch;
+
+                    struct json *locator;
+                    struct json_array *locator_array;
+                    struct json *uuid_locator;
+
+                    int i = 0;
+
+                    MAC = shash_find_data(json_object(new), "MAC");
+                    ip_addr = shash_find_data(json_object(new), "ipaddr");    /*ipaddr is always empty,so ignore it. otherwise ,error occur while memcpy.*/
+
+                    logic_switch= shash_find_data(json_object(new), "logical_switch");
+                    logic_switch_array = json_array(logic_switch);
+                    uuid_logic_switch = logic_switch_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                    locator= shash_find_data(json_object(new), "locator");
+                    locator_array = json_array(locator);
+                    uuid_locator = locator_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                    for(i=0; i<TABLE_UCAST_MACS_LOCAL_NUM; i++)
+                    {
+                        /*获取表中的第一个不为0的表项*/
+                        if(!uuid_is_zero(&ovsdb_vtep_db_table.table_ucast_macs_local[i].uuid_self))
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            /*uuid*/
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_local[i].uuid_self, node_name);
+                            /*MAC*/
+                            ovsdb_vtep_db_table.table_ucast_macs_local[i].MAC = malloc(strlen(json_string(MAC))+1) ;
+                            memcpy(ovsdb_vtep_db_table.table_ucast_macs_local[i].MAC, json_string(MAC), strlen(json_string(MAC))+1);
+                            /*ip_addr*/
+                            /*不处理ipaddr*/
+                            //ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr = malloc(strlen(json_string(ip_addr))+1) ;
+                            //memcpy(ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr, json_string(ip_addr), strlen(json_string(ip_addr))+1);
+                            OVSDB_PRINTF_DEBUG("ucast_macs_local_table i=%d, MAC=%s, ipaddr=NULL.", i, ovsdb_vtep_db_table.table_ucast_macs_local[i].MAC);
+                            OVSDB_PRINTF_DEBUG("ucast_macs_local_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].uuid_self));
+
+                            /*uuid of Logical_Switch*/
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_local[i].logical_switch, json_string(uuid_logic_switch));
+                            OVSDB_PRINTF_DEBUG("U Local table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].logical_switch));
+
+                            /*uuid of Physical_Locator*/
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_local[i].locator, json_string(uuid_locator));
+                            OVSDB_PRINTF_DEBUG("U Local table Physical_Locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].locator));
+
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+                    struct uuid deleted_ucast_local_uuid;
+                    int j=0;
+
+                    uuid_zero(&deleted_ucast_local_uuid);
+                    (void)uuid_from_string(&deleted_ucast_local_uuid, node_name);
+                    OVSDB_PRINTF_DEBUG("deleted ucast local uuid = "UUID_FMT, UUID_ARGS(&deleted_ucast_local_uuid));
+
+                    for(j=0; j<TABLE_UCAST_MACS_LOCAL_NUM; j++)
+                    {
+                        if(uuid_equals(&deleted_ucast_local_uuid, &ovsdb_vtep_db_table.table_ucast_macs_local[j].uuid_self))
+                        {
+
+                           /*释放空间*/
+                            if(ovsdb_vtep_db_table.table_ucast_macs_local[j].MAC)
+                            {
+                                free(ovsdb_vtep_db_table.table_ucast_macs_local[j].MAC);
+                            }
+                            if(ovsdb_vtep_db_table.table_ucast_macs_local[j].ipaddr)
+                            {
+                                free(ovsdb_vtep_db_table.table_ucast_macs_local[j].ipaddr);
+                            }
+                           memset(&ovsdb_vtep_db_table.table_ucast_macs_local[j], 0, sizeof(struct ovsdb_vtep_table_ucast_macs_local));
+
+                           break;
+                        }
+                    }
+
+                    break;
+                }
+
+            case TABLE_UPDATE:/*暂未想到更新场景*/
+                {
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+void ucast_macs_local_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------ucast_macs_local_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------ucast_macs_remote_table_node,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+                    struct json *MAC;
+                    struct json *ip_addr;
+                    struct json *logic_switch;
+                    struct json_array *logic_switch_array;
+                    struct json *uuid_logic_switch;
+
+                    struct json *locator;
+                    struct json_array *locator_array;
+                    struct json *uuid_locator;
+
+                    int i = 0;
+
+                    MAC = shash_find_data(json_object(new), "MAC");
+                    ip_addr = shash_find_data(json_object(new), "ipaddr");    /*ipaddr is always empty,so ignore it. otherwise ,error occur while memcpy.*/
+
+                    logic_switch= shash_find_data(json_object(new), "logical_switch");
+                    logic_switch_array = json_array(logic_switch);
+                    uuid_logic_switch = logic_switch_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                    locator= shash_find_data(json_object(new), "locator");
+                    locator_array = json_array(locator);
+                    uuid_locator = locator_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                    for(i=0; i<TABLE_UCAST_MACS_REMOTE_NUM; i++)
+                    {
+                        /*获取表中的第一个不为0的表项*/
+                        if(!uuid_is_zero(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].uuid_self))
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            /*uuid*/
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].uuid_self, node_name);
+                            /*MAC*/
+                            ovsdb_vtep_db_table.table_ucast_macs_remote[i].MAC = malloc(strlen(json_string(MAC))+1) ;
+                            memcpy(ovsdb_vtep_db_table.table_ucast_macs_remote[i].MAC, json_string(MAC), strlen(json_string(MAC))+1);
+                            /*ip_addr*/
+                            /*不处理ipaddr，因为是空*/
+                            OVSDB_PRINTF_DEBUG("ucast_macs_remote_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_ucast_macs_remote[i].MAC);
+                            OVSDB_PRINTF_DEBUG("ucast_macs_remote_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].uuid_self));
+
+                            /*uuid of Logical_Switch*/
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].logical_switch, json_string(uuid_logic_switch));
+                            OVSDB_PRINTF_DEBUG("U Remote table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].logical_switch));
+
+                            /*uuid of Physical_Locator*/
+                            (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].locator, json_string(uuid_locator));
+                            OVSDB_PRINTF_DEBUG("U Remote table Physical_Locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].locator));
+
+                            break;
+                        }
+                    }
+                    break;
+                }
+
+
+            case TABLE_DELETE:
+                {
+                    int j = 0;
+                    int k =0;
+                    int m = 0;
+                    int con_1  =0;  /*条件1*/
+                    int con_2  =0;
+                    int con_3  =0;
+                    unsigned int uiRet = 0;
+                    struct uuid deleted_ucast_remote_uuid;
+
+                    uuid_zero(&deleted_ucast_remote_uuid);
+                    (void)uuid_from_string(&deleted_ucast_remote_uuid, node_name);
+                    OVSDB_PRINTF_DEBUG("deleted ucast remote uuid = "UUID_FMT, UUID_ARGS(&deleted_ucast_remote_uuid));
+
+                    for(j=0; j<TABLE_UCAST_MACS_REMOTE_NUM; j++)
+                    {
+                        if(uuid_equals(&deleted_ucast_remote_uuid, &ovsdb_vtep_db_table.table_ucast_macs_remote[j].uuid_self))
+                        {
+
+                            #if 1
+                            /*未考虑到logical_switch和ucast_remote同时删除的情况，这样会找不到vni*/
+                            /*未考虑到logical_switch和ucast_remote同时删除的情况，这样会找不到vni*/
+
+                            /*先找physical_locator中的dst_ip*/
+                            for(k=0; k<TABLE_PHYSICAL_LOCATOR_NUM; k++)
+                            {
+                                if(uuid_equals(&ovsdb_vtep_db_table.table_ucast_macs_remote[j].locator, &ovsdb_vtep_db_table.table_physical_locator[k].uuid_self))
+                                {
+                                    break;
+                                }
+                            }
+
+                            /*再找logical_switch中的tunnel_key*/
+                            for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
+                            {
+                                if(uuid_equals(&ovsdb_vtep_db_table.table_ucast_macs_remote[j].logical_switch, &ovsdb_vtep_db_table.table_logical_switch[m].uuid_self))
+                                {
+                                    break;
+                                }
+                            }
+                            /*条件1:交换机tunnel ip存在*/
+                            if(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
+                            {
+                                con_1 = 1;
+                            }
+                            /*条件2: physical locator的dst ip存在*/
+                            if(ovsdb_vtep_db_table.table_physical_locator[k].dst_ip)
+                            {
+                                con_2 = 1;
+                            }
+                            /*条件3;logical_switch的vni大于4095*/
+                            if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key > 4095)
+                            {
+                                con_3 = 1;
+                            }
+
+                            if(con_1 && con_2 && con_3)
+                            {
+                                /*MAC格式转换*/
+                                char *mac_ce;
+                                mac_ce= malloc(strlen(CE_MAC_FORM)+1);
+                                memset(mac_ce, 0 ,strlen(CE_MAC_FORM)+1);
+
+                                mac_translate_ovsdb_to_ce(ovsdb_vtep_db_table.table_ucast_macs_remote[j].MAC, mac_ce);
+
+                                /*ce_undo_config_vxlan_tunnel_static_mac(mac_ce,
+                                    ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                                    ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
+                                    ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);*/
+
+                                uiRet = netconf_ce_config_vxlan_tunnel_static_mac(
+                                    mac_ce,
+                                    ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                                    ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
+                                    ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
+                                if (OVSDB_OK != uiRet)
+                                {
+                                    OVSDB_PRINTF_DEBUG("[ERROR]Failed to undo static mac of vxlan tunnel");
+                                    if (mac_ce != NULL)
+                                    {
+                                        free(mac_ce);
+                                    }
+                                    return;
+                                }
+
+
+                            }
+
+                            #endif
+
+                           /*释放空间*/
+                            if(ovsdb_vtep_db_table.table_mcast_macs_local[j].MAC)
+                            {
+                                free(ovsdb_vtep_db_table.table_mcast_macs_local[j].MAC);
+                            }
+                            if(ovsdb_vtep_db_table.table_mcast_macs_local[j].ipaddr)
+                            {
+                                free(ovsdb_vtep_db_table.table_mcast_macs_local[j].ipaddr);
+                            }
+                           memset(&ovsdb_vtep_db_table.table_mcast_macs_local[j], 0, sizeof(struct ovsdb_vtep_table_mcast_macs_local));
+
+
+                           break;
+                        }
+                    }
+
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------ucast_macs_remote_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+
+    unsigned int uiRet = 0;
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+                    int i = 0;
+                    int j =0;
+                    int k = 0;
+                    int tunnel_key = 0;
+                    int physical_locator_exist = 0;
+                    char *mac_ce;
+                    struct uuid uuid_self;
+
+                    (void)uuid_from_string(&uuid_self, node_name);
+
+                    for(i = 0; i < TABLE_MCAST_MACS_REMOTE_NUM; i++)
+                    {
+                        if(uuid_equals(&uuid_self, &ovsdb_vtep_db_table.table_ucast_macs_remote[i].uuid_self))
+                        {
+                            /*1.首先找到对应的ls的vni，如果vni不满足要求，可以直接返回*/
+                            for(j = 0; j < TABLE_LOGICAL_SWITCH_NUM; j++)
+                            {
+                                if(uuid_equals(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].logical_switch, &ovsdb_vtep_db_table.table_logical_switch[j].uuid_self))
+                                {
+                                    tunnel_key = ovsdb_vtep_db_table.table_logical_switch[j].tunnel_key;
+                                    break;
+                                }
+                            }
+
+                            if(tunnel_key < 4096)
+                            {
+                                break;  /*vni不满足则退出*/
+                            }
+
+                            /*2.确保隧道的dst_ip能找到*/
+                            for(k = 0; k < TABLE_PHYSICAL_LOCATOR_NUM; k++)
+                            {
+                                if(uuid_equals(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].locator, &ovsdb_vtep_db_table.table_physical_locator[k].uuid_self))
+                                {
+                                    if(ovsdb_vtep_db_table.table_physical_locator[k].dst_ip)
+                                    {
+                                        physical_locator_exist = 1;
+                                    }
+
+                                    break;
+                                }
+                            }
+
+                            if(!physical_locator_exist)
+                            {
+                                break;  /*没找到dst_ip则退出*/
+                            }
+
+                            /*3.判断隧道源IP是否存在*/
+                            if(NULL == ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
+                            {
+                                OVSDB_PRINTF_DEBUG("No tunnel ip in physical switch[0].");
+                                break ;
+                            }
+
+                            /*4. MAC格式转换*/
+                            mac_ce = malloc(strlen(CE_MAC_FORM) + 1);
+                            memset(mac_ce, 0 ,strlen(CE_MAC_FORM) + 1);
+                            mac_translate_ovsdb_to_ce(ovsdb_vtep_db_table.table_ucast_macs_remote[i].MAC, mac_ce);
+
+                            /*5. 配置静态MAC，这时候对应的隧道应该已经创建了*/
+                            /*ce_config_vxlan_tunnel_static_mac(
+                                mac_ce,
+                                ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                                ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
+                                tunnel_key);*/
+                            uiRet = netconf_ce_config_vxlan_tunnel_static_mac(
+                                mac_ce,
+                                ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                                ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
+                                tunnel_key);
+                            if (OVSDB_OK != uiRet)
+                            {
+                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config static mac of vxlan tunnel.");
+                                if (mac_ce != NULL)
+                                {
+                                    free(mac_ce);
+                                }
+                                return;
+                            }
+
+                            /*6.释放内存*/
+                            if(mac_ce)
+                            {
+                                free(mac_ce);
+                            }
+
+
+                            break;
+                        }
+                    }
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void mcast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------mcast_macs_local_table_node,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+    {
+        case TABLE_INITIAL:
+        case TABLE_INSERT:
+            {
+                struct json *MAC;
+                struct json *ip_addr;
+                struct json *logic_switch;
+                struct json_array *logic_switch_array;
+                struct json *uuid_logic_switch;
+
+                struct json *locator_set;
+                struct json_array *locator_set_array;
+                struct json *uuid_locator_set;
+
+                int i = 0;
+
+                MAC = shash_find_data(json_object(new), "MAC");
+                ip_addr = shash_find_data(json_object(new), "ipaddr");    /*ipaddr is always empty,so ignore it. otherwise ,error occur while memcpy.*/
+
+                logic_switch= shash_find_data(json_object(new), "logical_switch");
+                logic_switch_array = json_array(logic_switch);
+                uuid_logic_switch = logic_switch_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                locator_set= shash_find_data(json_object(new), "locator_set");
+                locator_set_array = json_array(locator_set);
+                uuid_locator_set = locator_set_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                for(i=0; i<TABLE_MCAST_MACS_LOCAL_NUM; i++)
+                {
+                    /*获取表中的第一个不为0的表项*/
+                    if(!uuid_is_zero(&ovsdb_vtep_db_table.table_mcast_macs_local[i].uuid_self))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        /*uuid*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_local[i].uuid_self, node_name);
+                        /*MAC*/
+                        ovsdb_vtep_db_table.table_mcast_macs_local[i].MAC = malloc(strlen(json_string(MAC))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_mcast_macs_local[i].MAC, json_string(MAC), strlen(json_string(MAC))+1);
+                        /*ip_addr*/
+                        /*不处理ipaddr*/
+                        //ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr = malloc(strlen(json_string(ip_addr))+1) ;
+                        //memcpy(ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr, json_string(ip_addr), strlen(json_string(ip_addr))+1);
+                        OVSDB_PRINTF_DEBUG("mcast_macs_local_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_mcast_macs_local[i].MAC);
+                        OVSDB_PRINTF_DEBUG("mcast_macs_local_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].uuid_self));
+
+                        /*uuid of Logical_Switch*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_local[i].logical_switch, json_string(uuid_logic_switch));
+                        OVSDB_PRINTF_DEBUG("M Local table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].logical_switch));
+
+                        /*uuid of Physical_Locator_Set*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set, json_string(uuid_locator_set));
+                        OVSDB_PRINTF_DEBUG("M Local table Physical_Locator_Set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
+
+                        break;
+                    }
+                }
+                break;
+            }
+
+        /*case TABLE_INSERT:
+            {
+                break;
+            }*/
+
+        case TABLE_DELETE:
+            {
+                struct uuid deleted_mcast_local_uuid;
+                int j=0;
+
+                uuid_zero(&deleted_mcast_local_uuid);
+                (void)uuid_from_string(&deleted_mcast_local_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("deleted mcast local uuid = "UUID_FMT, UUID_ARGS(&deleted_mcast_local_uuid));
+
+                for(j=0; j<TABLE_MCAST_MACS_LOCAL_NUM; j++)
+                {
+                    if(uuid_equals(&deleted_mcast_local_uuid, &ovsdb_vtep_db_table.table_mcast_macs_local[j].uuid_self))
+                    {
+
+                        /*释放空间*/
+                        if(ovsdb_vtep_db_table.table_mcast_macs_local[j].MAC)
+                        {
+                            free(ovsdb_vtep_db_table.table_mcast_macs_local[j].MAC);
+                        }
+                        if(ovsdb_vtep_db_table.table_mcast_macs_local[j].ipaddr)
+                        {
+                            free(ovsdb_vtep_db_table.table_mcast_macs_local[j].ipaddr);
+                        }
+                        memset(&ovsdb_vtep_db_table.table_mcast_macs_local[j], 0, sizeof(struct ovsdb_vtep_table_mcast_macs_local));
+
+                        break;
+                    }
+                }
+
+                break;
+            }
+
+        case TABLE_UPDATE:
+            {
+                ovsdb_mcast_local_update_locator_set_process(new, old, node_name);
+
+                break;
+            }
+
+        default:
+            break;
+
+    }
+
+}
+
+
+void mcast_macs_local_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------mcast_macs_local_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------mcast_macs_remote_table_node,action=%s----------------",ACTION_TYPE(action));
+
+    switch(action)
+    {
+        case TABLE_INITIAL:
+        case TABLE_INSERT:
+            {
+
+                struct json *MAC;
+                struct json *ip_addr;
+                struct json *logic_switch;
+                struct json_array *logic_switch_array;
+                struct json *uuid_logic_switch;
+
+                struct json *locator_set;
+                struct json_array *locator_set_array;
+                struct json *uuid_locator_set;
+
+                int i = 0;
+
+                MAC = shash_find_data(json_object(new), "MAC");
+                ip_addr = shash_find_data(json_object(new), "ipaddr");    /*ipaddr is always empty,so ignore it. otherwise ,error occur while memcpy.*/
+
+                logic_switch= shash_find_data(json_object(new), "logical_switch");
+                logic_switch_array = json_array(logic_switch);
+                uuid_logic_switch = logic_switch_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                locator_set= shash_find_data(json_object(new), "locator_set");
+                locator_set_array = json_array(locator_set);
+                uuid_locator_set = locator_set_array->elems[1];   /*elems[0] is "uuid" const string*/
+
+                for(i=0; i<TABLE_MCAST_MACS_REMOTE_NUM; i++)
+                {
+                    /*获取表中的第一个不为0的表项*/
+                    if(!uuid_is_zero(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].uuid_self))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        /*uuid*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].uuid_self, node_name);
+                        /*MAC*/
+                        ovsdb_vtep_db_table.table_mcast_macs_remote[i].MAC = malloc(strlen(json_string(MAC))+1) ;
+                        memcpy(ovsdb_vtep_db_table.table_mcast_macs_remote[i].MAC, json_string(MAC), strlen(json_string(MAC))+1);
+                        /*ip_addr*/
+                        /*不处理ipaddr*/
+                        //ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr = malloc(strlen(json_string(ip_addr))+1) ;
+                        //memcpy(ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr, json_string(ip_addr), strlen(json_string(ip_addr))+1);
+                        OVSDB_PRINTF_DEBUG("mcast_macs_remote_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_mcast_macs_remote[i].MAC);
+                        OVSDB_PRINTF_DEBUG("mcast_macs_remote_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].uuid_self));
+
+                        /*uuid of Logical_Switch*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].logical_switch, json_string(uuid_logic_switch));
+                        OVSDB_PRINTF_DEBUG("M Remote table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].logical_switch));
+
+                        /*uuid of Physical_Locator_Set*/
+                        (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set, json_string(uuid_locator_set));
+                        OVSDB_PRINTF_DEBUG("M Remote table Physical_Locator_Set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
+
+                        //:TODO:
+                        /*此处添加remote mcast mac表变化处理*/
+                        /*配置组播集中复制点*/
+                        {
+
+                        int id_ls = 0;
+                        int id_pls = 0; /*Physical_Locator_Set*/
+                        int id_pl = 0;  /*Physical_Locator*/
+                        int tunnel_key = 0;
+
+                        /*首先获取vni*/
+                        /*应该通过关联的鍀uuid找到logical switch，再获取，这里借鉴了physical locator中的做法，不规范*/
+                        for(id_ls=0; id_ls<TABLE_LOGICAL_SWITCH_NUM; id_ls++)
+                        {
+                            /*如果uuid不为0，并且tunnel key大于0，则取tunnel key(vni)*/
+                            if((!(uuid_is_zero(&ovsdb_vtep_db_table.table_logical_switch[id_ls].uuid_self)))&&(ovsdb_vtep_db_table.table_logical_switch[id_ls].tunnel_key >0))
+                            {
+                                tunnel_key = ovsdb_vtep_db_table.table_logical_switch[id_ls].tunnel_key;
+                                OVSDB_PRINTF_DEBUG("vni in remote mcast mac is %d.", tunnel_key);
+                            }
+                        }
+
+                        /*获取peer-ip，不知道对不对*/
+                        /*1.先通过Mcast_Macs_Remote中的locator_set找到第一个Physical_Locator*/
+                        for(id_pls=0; id_pls<TABLE_PHYSICAL_LOCATOR_SET_NUM; id_pls++)
+                        {
+                            if(uuid_is_zero(&ovsdb_vtep_db_table.table_physical_locator_set[id_pls].uuid_self))
+                            {
+                                continue;
+                            }
+                            else if(uuid_equals(&ovsdb_vtep_db_table.table_physical_locator_set[id_pls].uuid_self, &ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set))
+                            {
+                                OVSDB_PRINTF_DEBUG("table_physical_locator_set id = %d.", id_pls);
+                                break;  /*获取到id_pls*/
+                                /*认为table_physical_locator_set[id_pls].locators[0]就是要找的Physical_Locator*/
+                            }
+                        }
+
+                        /*2.取Physical_Locator中的dst-ip*/
+                        for(id_pl=0; id_pl<TABLE_PHYSICAL_LOCATOR_NUM; id_pl++)
+                        {
+                            if(uuid_is_zero(&ovsdb_vtep_db_table.table_physical_locator[id_pl].uuid_self))
+                            {
+                                continue;
+                            }
+                            else if(uuid_equals(&ovsdb_vtep_db_table.table_physical_locator_set[id_pls].locators[0], &ovsdb_vtep_db_table.table_physical_locator[id_pl].uuid_self))
+                            {
+                                OVSDB_PRINTF_DEBUG("table_physical_locator id = %d.", id_pl);
+                                break;  /*获取到id_pl*/
+                            }
+                        }
+
+                        //:TODO:
+                        #if 1
+                        /*调用TOR命令行，配置组播集中复制点*/
+                        #endif
+
+                        }
+
+                        break;
+                    }
+                }
+                break;
+            }
+
+        case TABLE_DELETE:
+            {
+                struct uuid deleted_mcast_remote_uuid;
+                int j=0;
+
+                uuid_zero(&deleted_mcast_remote_uuid);
+                (void)uuid_from_string(&deleted_mcast_remote_uuid, node_name);
+                OVSDB_PRINTF_DEBUG("deleted mcast remote uuid = "UUID_FMT, UUID_ARGS(&deleted_mcast_remote_uuid));
+
+                for(j=0; j<TABLE_MCAST_MACS_REMOTE_NUM; j++)
+                {
+                    if(uuid_equals(&deleted_mcast_remote_uuid, &ovsdb_vtep_db_table.table_mcast_macs_remote[j].uuid_self))
+                    {
+
+                        /*释放空间*/
+                        if(ovsdb_vtep_db_table.table_mcast_macs_remote[j].MAC)
+                        {
+                            free(ovsdb_vtep_db_table.table_mcast_macs_remote[j].MAC);
+                        }
+                        if(ovsdb_vtep_db_table.table_mcast_macs_remote[j].ipaddr)
+                        {
+                            free(ovsdb_vtep_db_table.table_mcast_macs_remote[j].ipaddr);
+                        }
+                        memset(&ovsdb_vtep_db_table.table_mcast_macs_remote[j], 0, sizeof(struct ovsdb_vtep_table_mcast_macs_remote));
+
+                        break;
+                    }
+                }
+
+
+                break;
+            }
+
+        case TABLE_UPDATE:  /*to be add，locator_set会改变*/
+            {
+                ovsdb_mcast_remote_update_locator_set_process(new, old, node_name);
+
+                break;
+            }
+
+        default:
+            break;
+
+    }
+
+}
+
+void mcast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    OVSDB_PRINTF_DEBUG("----------------mcast_macs_remote_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    switch(action)
+        {
+            case TABLE_INITIAL:
+            case TABLE_INSERT:
+                {
+
+
+                    break;
+                }
+
+            case TABLE_DELETE:
+                {
+
+                    break;
+                }
+
+            case TABLE_UPDATE:
+                {
+
+                    break;
+                }
+
+            default:
+                break;
+
+        }
+
+}
+
+
+void logical_binding_stats_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+void logical_binding_stats_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+
+    return;
+}
+
+void logical_router_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+void logical_router_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+
+void manager_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+void manager_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+void arp_sources_local_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+void arp_sources_local_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+
+void arp_sources_remote_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+void arp_sources_remote_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
+{
+    return;
+}
+
+
+void
+monitor_print_table(struct json *table_update,
+                    const struct monitored_table *mt, char *caption,
+                    bool initial)
+{
+    const struct ovsdb_table_schema *table = mt->table;
+    const struct ovsdb_column_set *columns = &mt->columns;
+    struct shash_node *node;
+    struct table t;
+    size_t i;
+
+    if (table_update->type != JSON_OBJECT) {
+        ovs_error(0, "<table-update> for table %s is not object", table->name);
+        return;
+    }
+
+    table_init(&t);
+    table_set_timestamp(&t, timestamp);
+    table_set_caption(&t, caption);
+
+    table_add_column(&t, "row");
+    table_add_column(&t, "action");
+    for (i = 0; i < columns->n_columns; i++) {
+        table_add_column(&t, "%s", columns->columns[i]->name);
+    }
+    SHASH_FOR_EACH (node, json_object(table_update)) {
+        struct json *row_update = node->data;
+        struct json *old, *new;
+
+        if (row_update->type != JSON_OBJECT) {
+            ovs_error(0, "<row-update> is not object");
+            continue;
+        }
+        old = shash_find_data(json_object(row_update), "old");
+        new = shash_find_data(json_object(row_update), "new");
+        if (initial) {
+            monitor_print_row(new, "initial", node->name, columns, &t);
+        } else if (!old) {
+            monitor_print_row(new, "insert", node->name, columns, &t);
+        } else if (!new) {
+            monitor_print_row(old, "delete", node->name, columns, &t);
+        } else {
+            monitor_print_row(old, "old", node->name, columns, &t);
+            monitor_print_row(new, "new", "", columns, &t);
+        }
+    }
+    table_print(&t, &table_style);
+    table_destroy(&t);
+}
+
+static void
+monitor_print(struct json *table_updates,
+              const struct monitored_table *mts, size_t n_mts,
+              bool initial)
+{
+    size_t i;
+
+    if (table_updates->type != JSON_OBJECT) {
+        ovs_error(0, "<table-updates> is not object");
+        return;
+    }
+
+    for (i = 0; i < n_mts; i++) {
+        const struct monitored_table *mt = &mts[i];
+        struct json *table_update = shash_find_data(json_object(table_updates),
+                                                    mt->table->name);
+        if (table_update) {
+            monitor_print_table(table_update, mt,
+                                n_mts > 1 ? xstrdup(mt->table->name) : NULL,
+                                initial);
+        }
+    }
+}
+
+static void
+add_column(const char *server, const struct ovsdb_column *column,
+           struct ovsdb_column_set *columns, struct json *columns_json)
+{
+    if (ovsdb_column_set_contains(columns, column->index)) {
+        ovs_fatal(0, "%s: column \"%s\" mentioned multiple times",
+                  server, column->name);
+    }
+    ovsdb_column_set_add(columns, column);
+    json_array_add(columns_json, json_string_create(column->name));
+}
+
+static struct json *
+parse_monitor_columns(char *arg, const char *server, const char *database,
+                      const struct ovsdb_table_schema *table,
+                      struct ovsdb_column_set *columns)
+{
+    bool initial, insert, delete, modify;
+    struct json *mr, *columns_json;
+    char *save_ptr = NULL;
+    char *token;
+
+    mr = json_object_create();
+    columns_json = json_array_create_empty();
+    json_object_put(mr, "columns", columns_json);
+
+    initial = insert = delete = modify = true;
+    for (token = strtok_r(arg, ",", &save_ptr); token != NULL;
+         token = strtok_r(NULL, ",", &save_ptr)) {
+        if (!strcmp(token, "!initial")) {
+            initial = false;
+        } else if (!strcmp(token, "!insert")) {
+            insert = false;
+        } else if (!strcmp(token, "!delete")) {
+            delete = false;
+        } else if (!strcmp(token, "!modify")) {
+            modify = false;
+        } else {
+            const struct ovsdb_column *column;
+
+            column = ovsdb_table_schema_get_column(table, token);
+            if (!column) {
+                ovs_fatal(0, "%s: table \"%s\" in %s does not have a "
+                          "column named \"%s\"",
+                          server, table->name, database, token);
+            }
+            add_column(server, column, columns, columns_json);
+        }
+    }
+
+    if (columns_json->u.array.n == 0) {
+        const struct shash_node **nodes;
+        size_t i, n;
+
+        n = shash_count(&table->columns);
+        nodes = shash_sort(&table->columns);
+        for (i = 0; i < n; i++) {
+            const struct ovsdb_column *column = nodes[i]->data;
+            if (column->index != OVSDB_COL_UUID
+                && column->index != OVSDB_COL_VERSION) {
+                add_column(server, column, columns, columns_json);
+            }
+        }
+        free(nodes);
+
+        add_column(server, ovsdb_table_schema_get_column(table, "_version"),
+                   columns, columns_json);
+    }
+
+    if (!initial || !insert || !delete || !modify) {
+        struct json *select = json_object_create();
+        json_object_put(select, "initial", json_boolean_create(initial));
+        json_object_put(select, "insert", json_boolean_create(insert));
+        json_object_put(select, "delete", json_boolean_create(delete));
+        json_object_put(select, "modify", json_boolean_create(modify));
+        json_object_put(mr, "select", select);
+    }
+
+    return mr;
+}
+
+static void
+ovsdb_client_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                  const char *argv[] OVS_UNUSED, void *exiting_)
+{
+    bool *exiting = exiting_;
+    *exiting = true;
+    unixctl_command_reply(conn, NULL);
+}
+
+static void
+ovsdb_client_block(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                   const char *argv[] OVS_UNUSED, void *blocked_)
+{
+    bool *blocked = blocked_;
+
+    if (!*blocked) {
+        *blocked = true;
+        unixctl_command_reply(conn, NULL);
+    } else {
+        unixctl_command_reply(conn, "already blocking");
+    }
+}
+
+static void
+ovsdb_client_unblock(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                     const char *argv[] OVS_UNUSED, void *blocked_)
+{
+    bool *blocked = blocked_;
+
+    if (*blocked) {
+        *blocked = false;
+        unixctl_command_reply(conn, NULL);
+    } else {
+        unixctl_command_reply(conn, "already unblocked");
+    }
+}
+
+static void
+add_monitored_table(int argc, char *argv[],
+                    const char *server, const char *database,
+                    struct ovsdb_table_schema *table,
+                    struct json *monitor_requests,
+                    struct monitored_table **mts,
+                    size_t *n_mts, size_t *allocated_mts)
+{
+    struct json *monitor_request_array;
+    struct monitored_table *mt;
+
+    if (*n_mts >= *allocated_mts) {
+        *mts = x2nrealloc(*mts, allocated_mts, sizeof **mts);
+    }
+    mt = &(*mts)[(*n_mts)++];
+    mt->table = table;
+    ovsdb_column_set_init(&mt->columns);
+
+    monitor_request_array = json_array_create_empty();
+    if (argc > 1) {
+        int i;
+
+        for (i = 1; i < argc; i++) {
+            json_array_add(
+                monitor_request_array,
+                parse_monitor_columns(argv[i], server, database, table,
+                                      &mt->columns));
+        }
+    } else {
+        /* Allocate a writable empty string since parse_monitor_columns()
+         * is going to strtok() it and that's risky with literal "". */
+        char empty[] = "";
+        json_array_add(
+            monitor_request_array,
+            parse_monitor_columns(empty, server, database,
+                                  table, &mt->columns));
+    }
+
+    json_object_put(monitor_requests, table->name, monitor_request_array);
+}
+
+void do_table_process(struct jsonrpc *rpc, struct json *table_updates,
+              const struct monitored_table *mts, size_t n_mts,
+              bool initial)
+{
+    size_t i;
+
+    if (table_updates->type != JSON_OBJECT) {
+        ovs_error(0, "<table-updates> is not object");
+        return;
+    }
+
+    for (i = 0; i < MAX_TABLE_ID; i++) {
+        struct json *table_update = shash_find_data(json_object(table_updates),
+                                                    table_func_map[i].table_name);
+        if (table_update)
+        {
+            int table_id = 0;
+            struct shash_node *node;
+
+            OVSDB_PRINTF_DEBUG("#################begin to process table [%s]#################", table_func_map[i].table_name);
+
+            if (table_update->type != JSON_OBJECT) {
+                ovs_error(0, "<table-update> for table %s is not object", table_func_map[i].table_name);
+                return;
+            }
+
+            SHASH_FOR_EACH (node, json_object(table_update))
+            {
+                struct json *row_update = node->data;
+                struct json *old, *new;
+
+                if (row_update->type != JSON_OBJECT) {
+                    ovs_error(0, "<row-update> is not object");
+                    continue;
+                }
+                old = shash_find_data(json_object(row_update), "old");
+                new = shash_find_data(json_object(row_update), "new");
+
+
+                if (initial)
+                {
+                    table_func_map[i].callback(rpc, new, NULL, node->name, TABLE_INITIAL);
+                }
+                else if (!old)
+                {
+                    table_func_map[i].callback(rpc, new, NULL, node->name, TABLE_INSERT);
+                }
+                else if (!new)
+                {
+                    table_func_map[i].callback(rpc,NULL, old, node->name, TABLE_DELETE);
+                }
+                else
+                {
+                    table_func_map[i].callback(rpc, new, old, node->name, TABLE_UPDATE);
+                }
+            }
+        }
+    }
+}
+
+void do_table_process_2(struct jsonrpc *rpc, struct json *table_updates,
+              const struct monitored_table *mts, size_t n_mts,
+              bool initial)
+{
+    size_t i;
+
+    if (table_updates->type != JSON_OBJECT) {
+        ovs_error(0, "<table-updates> is not object");
+        return;
+    }
+
+    for (i = 0; i < MAX_TABLE_ID; i++) {
+        struct json *table_update = shash_find_data(json_object(table_updates),
+                                                    table_func_map_2[i].table_name);
+        if (table_update)
+        {
+            int table_id = 0;
+            struct shash_node *node;
+
+            OVSDB_PRINTF_DEBUG("#################begin to process table [%s]#################", table_func_map_2[i].table_name);
+
+            if (table_update->type != JSON_OBJECT) {
+                ovs_error(0, "<table-update> for table %s is not object", table_func_map_2[i].table_name);
+                return;
+            }
+
+            SHASH_FOR_EACH (node, json_object(table_update))
+            {
+                struct json *row_update = node->data;
+                struct json *old, *new;
+
+                if (row_update->type != JSON_OBJECT) {
+                    ovs_error(0, "<row-update> is not object");
+                    continue;
+                }
+                old = shash_find_data(json_object(row_update), "old");
+                new = shash_find_data(json_object(row_update), "new");
+
+
+                if (initial)
+                {
+                    table_func_map_2[i].callback(rpc, new, NULL, node->name, TABLE_INITIAL);
+                }
+                else if (!old)
+                {
+                    table_func_map_2[i].callback(rpc, new, NULL, node->name, TABLE_INSERT);
+                }
+                else if (!new)
+                {
+                    table_func_map_2[i].callback(rpc,NULL, old, node->name, TABLE_DELETE);
+                }
+                else
+                {
+                    table_func_map_2[i].callback(rpc, new, old, node->name, TABLE_UPDATE);
+                }
+            }
+        }
+        }
+}
+
+
+static void
+do_monitor(struct jsonrpc *rpc, const char *database,
+           int argc, char *argv[])
+{
+    const char *server = jsonrpc_get_name(rpc);
+    const char *table_name = argv[0];
+    struct unixctl_server *unixctl;
+    struct ovsdb_schema *schema;
+    struct jsonrpc_msg *request;
+    struct json *monitor, *monitor_requests, *request_id;
+    bool exiting = false;
+    bool blocked = false;
+
+    struct monitored_table *mts;
+    size_t n_mts, allocated_mts;
+
+    daemon_save_fd(STDOUT_FILENO);
+    daemonize_start();
+    if (get_detach()) {
+        int error;
+
+        error = unixctl_server_create(NULL, &unixctl);
+        if (error) {
+            ovs_fatal(error, "failed to create unixctl server");
+        }
+
+        unixctl_command_register("exit", "", 0, 0,
+                                 ovsdb_client_exit, &exiting);
+        unixctl_command_register("ovsdb-client/block", "", 0, 0,
+                                 ovsdb_client_block, &blocked);
+        unixctl_command_register("ovsdb-client/unblock", "", 0, 0,
+                                 ovsdb_client_unblock, &blocked);
+    } else {
+        unixctl = NULL;
+    }
+
+    schema = fetch_schema(rpc, database);
+
+    monitor_requests = json_object_create();
+
+    mts = NULL;
+    n_mts = allocated_mts = 0;
+    if (strcmp(table_name, "ALL")) {
+        struct ovsdb_table_schema *table;
+
+        table = shash_find_data(&schema->tables, table_name);
+        if (!table) {
+            ovs_fatal(0, "%s: %s does not have a table named \"%s\"",
+                      server, database, table_name);
+        }
+
+        add_monitored_table(argc, argv, server, database, table,
+                            monitor_requests, &mts, &n_mts, &allocated_mts);
+    } else {
+        size_t n = shash_count(&schema->tables);
+        const struct shash_node **nodes = shash_sort(&schema->tables);
+        size_t i;
+
+        for (i = 0; i < n; i++) {
+            struct ovsdb_table_schema *table = nodes[i]->data;
+
+            add_monitored_table(argc, argv, server, database, table,
+                                monitor_requests,
+                                &mts, &n_mts, &allocated_mts);
+        }
+        free(nodes);
+    }
+
+    monitor = json_array_create_3(json_string_create(database),
+                                  json_null_create(), monitor_requests);
+    request = jsonrpc_create_request("monitor", monitor, NULL);
+    request_id = json_clone(request->id);
+    jsonrpc_send(rpc, request);
+
+    for (;;) {
+        unixctl_server_run(unixctl);
+        while (!blocked) {
+            struct jsonrpc_msg *msg;
+            int error;
+
+            error = jsonrpc_recv(rpc, &msg);
+            if (error == EAGAIN) {
+                break;
+            } else if (error) {
+                ovs_fatal(error, "%s: receive failed", server);
+            }
+
+            if (msg->type == JSONRPC_REQUEST && !strcmp(msg->method, "echo")) {
+                jsonrpc_send(rpc, jsonrpc_create_reply(json_clone(msg->params),
+                                                       msg->id));
+            } else if (msg->type == JSONRPC_REPLY
+                       && json_equal(msg->id, request_id)) {
+                monitor_print(msg->result, mts, n_mts, true);
+
+                OVSDB_PRINTF_DEBUG("Begin to print monitor INIT json.");
+                print_json(msg->result);
+                putchar('\n');
+                OVSDB_PRINTF_DEBUG("End to print monitor INIT json.");
+
+                fflush(stdout);
+                daemonize_complete();
+            } else if (msg->type == JSONRPC_NOTIFY
+                       && !strcmp(msg->method, "update")) {
+                struct json *params = msg->params;
+                if (params->type == JSON_ARRAY
+                    && params->u.array.n == 2
+                    && params->u.array.elems[0]->type == JSON_NULL) {
+                    monitor_print(params->u.array.elems[1], mts, n_mts, false);
+
+
+                    OVSDB_PRINTF_DEBUG("Begin to print monitor NOTIFY json.");
+                    print_json(params->u.array.elems[1]);
+                    putchar('\n');
+                    OVSDB_PRINTF_DEBUG("End to print monitor NOTIFY json.");
+
+
+                    fflush(stdout);
+                }
+            }
+            jsonrpc_msg_destroy(msg);
+        }
+
+        if (exiting) {
+            break;
+        }
+
+        jsonrpc_run(rpc);
+        jsonrpc_wait(rpc);
+        if (!blocked) {
+            jsonrpc_recv_wait(rpc);
+        }
+        unixctl_server_wait(unixctl);
+        poll_block();
+    }
+}
+
+struct dump_table_aux {
+    struct ovsdb_datum **data;
+    const struct ovsdb_column **columns;
+    size_t n_columns;
+};
+
+static int
+compare_data(size_t a_y, size_t b_y, size_t x,
+             const struct dump_table_aux *aux)
+{
+    return ovsdb_datum_compare_3way(&aux->data[a_y][x],
+                                    &aux->data[b_y][x],
+                                    &aux->columns[x]->type);
+}
+
+static int
+compare_rows(size_t a_y, size_t b_y, void *aux_)
+{
+    struct dump_table_aux *aux = aux_;
+    size_t x;
+
+    /* Skip UUID columns on the first pass, since their values tend to be
+     * random and make our results less reproducible. */
+    for (x = 0; x < aux->n_columns; x++) {
+        if (aux->columns[x]->type.key.type != OVSDB_TYPE_UUID) {
+            int cmp = compare_data(a_y, b_y, x, aux);
+            if (cmp) {
+                return cmp;
+            }
+        }
+    }
+
+    /* Use UUID columns as tie-breakers. */
+    for (x = 0; x < aux->n_columns; x++) {
+        if (aux->columns[x]->type.key.type == OVSDB_TYPE_UUID) {
+            int cmp = compare_data(a_y, b_y, x, aux);
+            if (cmp) {
+                return cmp;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void
+swap_rows(size_t a_y, size_t b_y, void *aux_)
+{
+    struct dump_table_aux *aux = aux_;
+    struct ovsdb_datum *tmp = aux->data[a_y];
+    aux->data[a_y] = aux->data[b_y];
+    aux->data[b_y] = tmp;
+}
+
+static int
+compare_columns(const void *a_, const void *b_)
+{
+    const struct ovsdb_column *const *ap = a_;
+    const struct ovsdb_column *const *bp = b_;
+    const struct ovsdb_column *a = *ap;
+    const struct ovsdb_column *b = *bp;
+
+    return strcmp(a->name, b->name);
+}
+
+static void
+dump_table(const struct ovsdb_table_schema *ts, struct json_array *rows)
+{
+    const struct ovsdb_column **columns;
+    size_t n_columns;
+
+    struct ovsdb_datum **data;
+
+    struct dump_table_aux aux;
+    struct shash_node *node;
+    struct table t;
+    size_t x, y;
+
+    /* Sort columns by name, for reproducibility. */
+    columns = xmalloc(shash_count(&ts->columns) * sizeof *columns);
+    n_columns = 0;
+    SHASH_FOR_EACH (node, &ts->columns) {
+        struct ovsdb_column *column = node->data;
+        if (strcmp(column->name, "_version")) {
+            columns[n_columns++] = column;
+        }
+    }
+    qsort(columns, n_columns, sizeof *columns, compare_columns);
+
+    /* Extract data from table. */
+    data = xmalloc(rows->n * sizeof *data);
+    for (y = 0; y < rows->n; y++) {
+        struct shash *row;
+
+        if (rows->elems[y]->type != JSON_OBJECT) {
+            ovs_fatal(0,  "row %"PRIuSIZE" in table %s response is not a JSON object: "
+                      "%s", y, ts->name, json_to_string(rows->elems[y], 0));
+        }
+        row = json_object(rows->elems[y]);
+
+        data[y] = xmalloc(n_columns * sizeof **data);
+        for (x = 0; x < n_columns; x++) {
+            const struct json *json = shash_find_data(row, columns[x]->name);
+            if (!json) {
+                ovs_fatal(0, "row %"PRIuSIZE" in table %s response lacks %s column",
+                          y, ts->name, columns[x]->name);
+            }
+
+            check_ovsdb_error(ovsdb_datum_from_json(&data[y][x],
+                                                    &columns[x]->type,
+                                                    json, NULL));
+        }
+    }
+
+    /* Sort rows by column values, for reproducibility. */
+    aux.data = data;
+    aux.columns = columns;
+    aux.n_columns = n_columns;
+    sort(rows->n, compare_rows, swap_rows, &aux);
+
+    /* Add column headings. */
+    table_init(&t);
+    table_set_caption(&t, xasprintf("%s table", ts->name));
+    for (x = 0; x < n_columns; x++) {
+        table_add_column(&t, "%s", columns[x]->name);
+    }
+
+    /* Print rows. */
+    for (y = 0; y < rows->n; y++) {
+        table_add_row(&t);
+        for (x = 0; x < n_columns; x++) {
+            struct cell *cell = table_add_cell(&t);
+            cell->json = ovsdb_datum_to_json(&data[y][x], &columns[x]->type);
+            cell->type = &columns[x]->type;
+            ovsdb_datum_destroy(&data[y][x], &columns[x]->type);
+        }
+        free(data[y]);
+    }
+    table_print(&t, &table_style);
+    table_destroy(&t);
+
+    free(data);
+    free(columns);
+}
+
+static void
+do_dump(struct jsonrpc *rpc, const char *database,
+        int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct ovsdb_schema *schema;
+    struct json *transaction;
+
+    const struct shash_node **tables;
+    size_t n_tables;
+
+    size_t i;
+
+    schema = fetch_schema(rpc, database);
+    tables = shash_sort(&schema->tables);
+    n_tables = shash_count(&schema->tables);
+
+    /* Construct transaction to retrieve entire database. */
+    transaction = json_array_create_1(json_string_create(database));
+    for (i = 0; i < n_tables; i++) {
+        const struct ovsdb_table_schema *ts = tables[i]->data;
+        struct json *op, *columns;
+        struct shash_node *node;
+
+        columns = json_array_create_empty();
+        SHASH_FOR_EACH (node, &ts->columns) {
+            const struct ovsdb_column *column = node->data;
+
+            if (strcmp(column->name, "_version")) {
+                json_array_add(columns, json_string_create(column->name));
+            }
+        }
+
+        op = json_object_create();
+        json_object_put_string(op, "op", "select");
+        json_object_put_string(op, "table", tables[i]->name);
+        json_object_put(op, "where", json_array_create_empty());
+        json_object_put(op, "columns", columns);
+        json_array_add(transaction, op);
+    }
+
+    /* Send request, get reply. */
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    /* Print database contents. */
+    if (reply->result->type != JSON_ARRAY
+        || reply->result->u.array.n != n_tables) {
+        ovs_fatal(0, "reply is not array of %"PRIuSIZE" elements: %s",
+                  n_tables, json_to_string(reply->result, 0));
+    }
+    for (i = 0; i < n_tables; i++) {
+        const struct ovsdb_table_schema *ts = tables[i]->data;
+        const struct json *op_result = reply->result->u.array.elems[i];
+        struct json *rows;
+
+        if (op_result->type != JSON_OBJECT
+            || !(rows = shash_find_data(json_object(op_result), "rows"))
+            || rows->type != JSON_ARRAY) {
+            ovs_fatal(0, "%s table reply is not an object with a \"rows\" "
+                      "member array: %s",
+                      ts->name, json_to_string(op_result, 0));
+        }
+
+        dump_table(ts, &rows->u.array);
+    }
+
+    jsonrpc_msg_destroy(reply);
+    free(tables);
+    ovsdb_schema_destroy(schema);
+}
+
+
+void
+do_transact_temp(struct jsonrpc *rpc, char *json_char)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    //print_json(reply->result);
+    //putchar('\n');
+    jsonrpc_msg_destroy(reply);
+}
+
+void
+do_transact_temp_query_global(struct jsonrpc *rpc, int* global_uuid_num, struct uuid *uuid_global)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *global_uuid;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+
+    char *json_char = "[\"hardware_vtep\",{\"columns\":[\"_uuid\"],\"table\":\"Global\",\"where\":[],\"op\":\"select\"}]";
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    //print_json(reply->result);
+    //putchar('\n');
+
+    global_uuid = json_array(reply->result);
+    elem_0 = global_uuid->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+    //printf("\nglobal_uuid number is %d\n", rows_elem->n);
+    *global_uuid_num = rows_elem->n;
+    if(!*global_uuid_num)
+    {
+        OVSDB_PRINTF_DEBUG("global table is not present.\n");
+    }
+
+    if(*global_uuid_num)
+    {
+        struct json *rows_0;
+        struct json *g_uuid;
+        struct json_array *uuid_array;
+        rows_0 = rows_elem->elems[0];
+        g_uuid = shash_find_data(json_object(rows_0), "_uuid");
+        uuid_array = json_array(g_uuid);
+        uuid_from_string(uuid_global, json_string(uuid_array->elems[1]));/*elems[0] is "uuid" string*/
+    }
+
+    jsonrpc_msg_destroy(reply);
+}
+
+/*过滤不含tunnel_key的情况*/
+void
+do_transact_temp_query_logical_switch(struct jsonrpc *rpc, int *ls_num, struct logical_switch_uuid_and_vni *ls_info)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ls;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    int rows_elem_num=0;
+    int i=0;
+    int j=0;
+
+    char *json_char = "[\"hardware_vtep\",{\"columns\":[\"description\",\"name\",\"_uuid\",\"tunnel_key\"],\"table\":\"Logical_Switch\",\"where\":[],\"op\":\"select\"}]";
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    //print_json(reply->result);
+    //putchar('\n');
+
+    ls = json_array(reply->result);
+    elem_0 = ls->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+    rows_elem_num = rows_elem->n;
+    if(!rows_elem_num)
+    {
+        OVSDB_PRINTF_DEBUG("No logical switch present.");
+    }
+    else   /*rows_elem_num >= 1*/
+    {
+        for(i=0; i<rows_elem_num; i++)
+        {
+            struct json* ls_instance;
+            struct json* tunnel_key;
+            struct json* uuid_ls;
+            struct json_array* uuid_array;
+
+            ls_instance = rows_elem->elems[i];
+            tunnel_key = shash_find_data(json_object(ls_instance), "tunnel_key");
+            uuid_ls= shash_find_data(json_object(ls_instance), "_uuid");
+            uuid_array = json_array(uuid_ls);
+
+            if(JSON_ARRAY == tunnel_key->type)  /*which means this ls does not have a tunnel_key*/
+            {
+                OVSDB_PRINTF_DEBUG("This logical_Switch does not have a tunnel_key.");
+                continue;
+            }
+            else if(JSON_INTEGER == tunnel_key->type)
+            {
+                OVSDB_PRINTF_DEBUG("This logical_Switch has a tunnel_key.");
+                *ls_num=*ls_num + 1;
+                for(j=0; j<TABLE_LOGICAL_SWITCH_NUM; j++)
+                {
+                    if(0 != ls_info[j].vni) /*not empty entry*/
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        ls_info[j].vni = json_integer(tunnel_key);
+                        (void)uuid_from_string(&ls_info[j].uuid_ls, json_string(uuid_array->elems[1]));/*elems[0] is "uuid" string*/
+
+                        //printf("ls_info[%d].vni = %d\n", j, ls_info[j].vni);
+                        //printf("ls_info[%d].uuid_ls ="UUID_FMT"\n", j, UUID_ARGS(&ls_info[j].uuid_ls));
+
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    //printf("ls_num = %d\n", *ls_num);
+    jsonrpc_msg_destroy(reply);
+}
+
+
+void
+do_transact_temp_query_locator_dstip(struct jsonrpc *rpc, char *json_char, int *pl_exist,  char* pl_dst_ip)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *pl;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    int rows_elem_num=0;
+    struct json *dst_ip;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    pl = json_array(reply->result);
+    elem_0 = pl->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+    rows_elem_num = rows_elem->n;
+
+    if(!rows_elem_num)
+    {
+        *pl_exist = 0;
+    }
+    else
+    {
+        *pl_exist = 1;
+        dst_ip = shash_find_data(json_object(rows_elem->elems[0]), "dst_ip");
+        if(dst_ip)
+        {
+            memcpy(pl_dst_ip, json_string(dst_ip), strlen(json_string(dst_ip))+1);
+        }
+    }
+
+    //print_json(reply->result);
+    //putchar('\n');
+    jsonrpc_msg_destroy(reply);
+}
+
+
+void
+do_transact_temp_query_switch_tunnel_ip(struct jsonrpc *rpc, char *json_char, char *tunnel_ip)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ps;
+    struct json *elem_0;
+    struct json *rows;
+    struct json *rows_0;
+    struct json *tunnel_ips;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    ps = json_array(reply->result);
+    elem_0 = ps->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+
+    if(!json_array(rows)->n)
+    {
+        OVSDB_PRINTF_DEBUG("there is no ps named CE6850HI.");
+        jsonrpc_msg_destroy(reply);
+        return;
+    }
+
+    rows_0 = json_array(rows)->elems[0];
+    tunnel_ips = shash_find_data(json_object(rows_0), "tunnel_ips");
+
+    if(JSON_STRING == tunnel_ips->type)
+    {
+       memcpy(tunnel_ip, json_string(tunnel_ips),strlen(json_string(tunnel_ips))+1);
+       OVSDB_PRINTF_DEBUG("physical switch tunnel ip is %s\n.", tunnel_ip);
+    }
+
+    jsonrpc_msg_destroy(reply);
+}
+
+
+
+void
+do_transact_temp_query_switch_management_ip(struct jsonrpc *rpc, char *json_char, char *management_ip)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ps;
+    struct json *elem_0;
+    struct json *rows;
+    struct json *rows_0;
+    struct json *management_ips;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+
+    ps = json_array(reply->result);
+    elem_0 = ps->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+
+    if(!json_array(rows)->n)
+    {
+        OVSDB_PRINTF_DEBUG("there is no ps named CE6850HI.");
+        jsonrpc_msg_destroy(reply);
+        return;
+    }
+
+
+    rows_0 = json_array(rows)->elems[0];
+    management_ips = shash_find_data(json_object(rows_0), "management_ips");
+
+    if(JSON_STRING == management_ips->type)
+    {
+       memcpy(management_ip, json_string(management_ips),strlen(json_string(management_ips))+1);
+       OVSDB_PRINTF_DEBUG("physical switch tunnel ip is %s.", management_ip);
+    }
+
+    jsonrpc_msg_destroy(reply);
+}
+
+
+void
+do_transact_temp_query_locator_uuid(struct jsonrpc *rpc, char *json_char, struct uuid *locator_uuid)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *pl;
+    struct json *elem_0;
+    struct json *rows;
+    struct json *rows_0;
+    struct json *uuid;
+    struct json *uuid_value;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    //print_json(reply->result);
+    //putchar('\n');
+
+    pl= json_array(reply->result);
+    elem_0 = pl->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+
+    if(!json_array(rows)->n)
+    {
+        jsonrpc_msg_destroy(reply);
+        return;
+    }
+
+    rows_0 = json_array(rows)->elems[0];
+    uuid = shash_find_data(json_object(rows_0), "_uuid");
+
+    if(!uuid )
+    {
+        jsonrpc_msg_destroy(reply);
+        return;
+    }
+
+    uuid_value = json_array(uuid)->elems[1];    /*elems[0] is "uuid" string*/
+
+    uuid_from_string(locator_uuid, json_string(uuid_value));
+
+    jsonrpc_msg_destroy(reply);
+}
+
+
+void
+do_transact_temp_query_physical_switch_exist(struct jsonrpc *rpc, char *json_char, int *ps_exist)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *pl;
+    struct json *elem_0;
+    struct json *rows;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    pl= json_array(reply->result);
+    elem_0 = pl->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+
+    if(json_array(rows)->n)
+    {
+        *ps_exist = 1;
+    }
+    else
+    {
+        *ps_exist = 0;
+    }
+
+    jsonrpc_msg_destroy(reply);
+}
+
+
+void
+do_transact_temp_query_port_binding_logical_switch(struct jsonrpc *rpc, char *json_char ,int *ls_num, struct uuid *ls_uuids)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ls;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    struct json *vlan_bindings;
+    struct json_array *vlan_bindings_elems;
+    int rows_elem_num=0;
+    int i=0;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    //print_json(reply->result);
+    //putchar('\n');
+
+    ls = json_array(reply->result);
+    elem_0 = ls->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+    rows_elem_num = rows_elem->n;
+
+    if(!rows_elem_num)
+    {
+        OVSDB_PRINTF_DEBUG("No such port present.");
+        *ls_num = 0;
+    }
+
+    else   /*rows_elem_num >= 1*/
+    {
+        vlan_bindings = shash_find_data(json_object(rows_elem->elems[0]), "vlan_bindings");
+        vlan_bindings_elems = json_array(json_array(vlan_bindings)->elems[1]);  /*elems[0] is "map" string*/
+        *ls_num= vlan_bindings_elems->n;
+
+        OVSDB_PRINTF_DEBUG("vlan_bindings_elems num =%d.", vlan_bindings_elems->n);
+
+        for(i=0; i < vlan_bindings_elems->n; i++)
+        {
+            uuid_from_string(&ls_uuids[i],  json_string(json_array(json_array(vlan_bindings_elems->elems[i])->elems[1])->elems[1]));
+            OVSDB_PRINTF_DEBUG("No.%d logical switch uuid = "UUID_FMT, i, UUID_ARGS(&ls_uuids[i]));
+        }
+    }
+
+    //printf("ls_num = %d\n", *ls_num);
+    jsonrpc_msg_destroy(reply);
+}
+
+/*根据MAC地址,在ucast-local表中查询具有该mac的表项的uuid，理论上最多只有1个，为了防止万一，支持多个的情况*/
+void
+do_transact_temp_query_mac_local_uuid(struct jsonrpc *rpc, char *json_char ,int *uuid_num, struct uuid *ucast_local_uuids)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ls;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    struct json *uuid;
+    int rows_elem_num=0;
+    int i=0;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    //print_json(reply->result);
+    //putchar('\n');
+
+    ls = json_array(reply->result);
+    elem_0 = ls->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+    rows_elem_num = rows_elem->n;
+
+    *uuid_num = 0;  /*先置0*/
+
+    if(!rows_elem_num)
+    {
+        OVSDB_PRINTF_DEBUG("No such mac table present.");
+        *uuid_num = 0;
+    }
+
+    else   /*rows_elem_num >= 1*/
+    {
+        for(i=0; i<rows_elem_num; i++)
+        {
+            *uuid_num = *uuid_num + 1;
+            uuid = shash_find_data(json_object(rows_elem->elems[i]), "_uuid");
+            uuid_from_string(&ucast_local_uuids[i], json_string(json_array(uuid)->elems[1]));
+        }
+    }
+
+    jsonrpc_msg_destroy(reply);
+}
+
+
+int do_check_mac_info_from_fei(unsigned char *aucMacAddr, unsigned char *aucIfname, unsigned int add_or_delete_flag, unsigned int dyn_or_static_flag, unsigned int ulBDID)
+{
+    if(!aucMacAddr)
+    {
+        OVSDB_PRINTF_DEBUG("Error! aucMacAddr is NULL.");
+        return FEI_MAC_CHECK_ERROR;
+    }
+
+    if(strlen(aucMacAddr) != strlen("01:02:33:44:55:66"))
+    {
+        OVSDB_PRINTF_DEBUG("Error! aucMacAddr fomat is valid.");
+        return FEI_MAC_CHECK_ERROR;
+    }
+
+    if(!aucIfname)
+    {
+        OVSDB_PRINTF_DEBUG("Error! aucIfname is NULL.");
+        return FEI_MAC_CHECK_ERROR;
+    }
+
+    if((ntohl(add_or_delete_flag)>2)||(ntohl(add_or_delete_flag)<1))
+    {
+        OVSDB_PRINTF_DEBUG("Error! add_or_delete_flag is invalid.");
+        return FEI_MAC_CHECK_ERROR;
+    }
+
+    if((ntohl(dyn_or_static_flag)>2)||(ntohl(add_or_delete_flag)<1))
+    {
+        OVSDB_PRINTF_DEBUG("Error! dyn_or_static_flag is invalid.");
+        return FEI_MAC_CHECK_ERROR;
+    }
+
+    if(ntohl(ulBDID) < 4096)
+    {
+        OVSDB_PRINTF_DEBUG("Error! ulBDID is invalid.");
+        return FEI_MAC_CHECK_ERROR;
+    }
+
+    return FEI_MAC_CHECK_OK;
+}
+
+
+void
+do_transact_temp_query_logical_switch_tunnel_key(struct jsonrpc *rpc, char *json_char ,int *tunnel_key_exist, int *tunnel_key)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ls;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    struct json *ls_0;
+    struct json *tunnel_key_json;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    //print_json(reply->result);
+    //putchar('\n');
+
+    ls = json_array(reply->result);
+    elem_0 = ls->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+
+    *tunnel_key_exist = 0;
+    *tunnel_key = 0;
+
+    if(!rows_elem->n)
+    {
+        OVSDB_PRINTF_DEBUG("No such logical switch.");
+        *tunnel_key_exist = 0;
+    }
+    else
+    {
+        ls_0 = rows_elem->elems[0];
+        tunnel_key_json = shash_find_data(json_object(ls_0), "tunnel_key");
+
+        if(JSON_INTEGER == tunnel_key_json->type)
+        {
+            *tunnel_key_exist = 1;
+            *tunnel_key = json_integer(tunnel_key_json);
+
+            OVSDB_PRINTF_DEBUG("json_integer(tunnel_key_json) = %d.", json_integer(tunnel_key_json));
+            OVSDB_PRINTF_DEBUG("tunnel_key=%d.", *tunnel_key);
+        }
+
+    }
+
+    //printf("ls_num = %d\n", *ls_num);
+    jsonrpc_msg_destroy(reply);
+}
+
+
+/*写完后发现与do_transact_temp_query_locator_dstip功能相同，统一用do_transact_temp_query_locator_dstip*/
+/*后续考虑将其删除*/
+void
+do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_char, char* dst_ip)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *pl;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    struct json *pl_0;
+    struct json *dst_ip_json;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+    //print_json(reply->result);
+    //putchar('\n');
+
+    pl = json_array(reply->result);
+    elem_0 = pl->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+
+    if(!rows_elem->n)
+    {
+        OVSDB_PRINTF_DEBUG("No such physical locator.");
+
+    }
+    else
+    {
+        pl_0 = rows_elem->elems[0];
+        dst_ip_json = shash_find_data(json_object(pl_0), "dst_ip");
+
+        if(JSON_STRING == dst_ip_json->type)
+        {
+            dst_ip = malloc(strlen(json_string(dst_ip_json))+1) ;
+            memcpy(dst_ip, json_string(dst_ip_json),strlen(json_string(dst_ip_json))+1);
+            OVSDB_PRINTF_DEBUG("dst ip in physical locator is %s.", dst_ip);
+        }
+
+    }
+
+    jsonrpc_msg_destroy(reply);
+}
+
+struct ovsdb_write_mcast_local_args * g_args_local = NULL;
+
+struct ovsdb_sub_table g_aucTBL[OVSDB_SUB_TABLE_MAX] =
+{
+    {"OVSDB_SUB_TABLE_MAC"      , &(g_aucTBL[0].pstTblA), &(g_aucTBL[0].pstTblB), NULL, NULL, sizeof(struct ovsdb_sub_mac_data)},
+    {"OVSDB_SUB_TABLE_INTERFACE", &(g_aucTBL[1].pstTblA), &(g_aucTBL[1].pstTblB), NULL, NULL, 0},
+};
+
+static struct ovsdb_sub_entry *find_entry(struct ovsdb_sub_entry *table, char * key)
+{
+    struct ovsdb_sub_entry *entry;
+
+    HASH_FIND_STR(table, key, entry);
+
+    return entry;
+}
+
+static struct ovsdb_sub_entry *add_entry(enum OVSDB_SUB_TABLE_NAME table_name, char * key, void * pdata)
+{
+    int iDatalength = 0;
+    struct ovsdb_sub_entry **table = &OVSDB_SUB_GET_AGEINGTABLE(table_name);
+    struct ovsdb_sub_entry *entry = (struct ovsdb_sub_entry *)malloc(sizeof(struct ovsdb_sub_entry));
+
+    if (NULL == entry)
+    {
+        return NULL;
+    }
+
+    (void)memset(entry, 0, sizeof(struct ovsdb_sub_entry));
+
+    (void)strncpy(entry->key, key, OVSDB_SUB_KEY_LEN);
+
+    iDatalength = OVSDB_SUB_GET_DATA_LENGTH(table_name);
+    if (0 != iDatalength){
+        entry->pdata = malloc(iDatalength);
+        if (NULL == entry->pdata){
+            free(entry);
+            return NULL;
+        }
+
+        (void)memcpy(entry->pdata, pdata, iDatalength);
+    }
+
+    HASH_ADD_STR(*table, key, entry);
+
+    return entry;
+}
+
+static void delete_entry(struct ovsdb_sub_entry **table, struct ovsdb_sub_entry *entry)
+{
+    HASH_DEL(*table, entry);
+    if (NULL != entry->pdata)
+        free(entry->pdata);
+    free(entry);
+}
+
+int ovsdb_sub_add_port(struct ovsdb_sub_entry * entry)
+{
+    ovsdb_add_port(entry->key);
+    return 0;
+}
+
+int ovsdb_sub_delete_port(struct ovsdb_sub_entry * entry)
+{
+    ovsdb_delete_port(entry->key);
+    return 0;
+}
+
+int ovsdb_sub_add_mac(struct ovsdb_sub_entry * entry)
+{
+    char mac[32] = {0};
+    char bd[OVSDB_SUB_BD_LEN] = {0};
+    struct ovsdb_sub_mac_key  * key  = (struct ovsdb_sub_mac_key *)(entry->key);
+    struct ovsdb_sub_mac_data * data = (struct ovsdb_sub_mac_data *)(entry->pdata);
+
+    (void)snprintf(mac, 18, "%s", key->macAdd);
+
+    (void)snprintf(bd, OVSDB_SUB_BD_LEN, "%s", key->BD);
+
+    return ovsdb_add_mac(mac, bd, data->interface, data->mac_type);
+}
+
+int ovsdb_sub_delete_mac(struct ovsdb_sub_entry * entry)
+{
+    char mac[32] = {0};
+    char bd[OVSDB_SUB_BD_LEN] = {0};
+    struct ovsdb_sub_mac_key  * key  = (struct ovsdb_sub_mac_key *)(entry->key);
+    struct ovsdb_sub_mac_data * data = (struct ovsdb_sub_mac_data *)(entry->pdata);
+
+    (void)snprintf(mac, 18, "%s", key->macAdd);
+
+    (void)snprintf(bd, OVSDB_SUB_BD_LEN, "%s", key->BD);
+
+    ovsdb_delete_mac(mac, bd, data->interface, data->mac_type);
+
+    return 0;
+}
+
+int ovsdb_sub_add_msg(enum OVSDB_SUB_TABLE_NAME table_name, struct ovsdb_sub_entry * entry)
+{
+    if (OVSDB_SUB_TABLE_MAC == table_name)
+        return ovsdb_sub_add_mac(entry);
+
+    return ovsdb_sub_add_port(entry);
+}
+
+int ovsdb_sub_delete_msg(enum OVSDB_SUB_TABLE_NAME table_name, struct ovsdb_sub_entry * entry)
+{
+    if (OVSDB_SUB_TABLE_MAC == table_name)
+        return ovsdb_sub_delete_mac(entry);
+
+    return ovsdb_sub_delete_port(entry);
+}
+
+int ovsdb_sub_table_add(enum OVSDB_SUB_TABLE_NAME table_name, char *key, void *data, int data_len)
+{
+    int ret = 0;
+    bool flag = true;
+    struct ovsdb_sub_entry * entry  = NULL;
+    struct ovsdb_sub_entry * current  = NULL;
+
+    if ((NULL == data) && (0 != data_len))
+        return -1;
+
+    /* 防止重复表项，现在老化流表中查找是否存在 */
+    entry = find_entry(OVSDB_SUB_GET_AGEINGTABLE(table_name), key);
+    if (entry != NULL) {
+        if (data == NULL)
+            return 0;
+        else {
+            if (0 != memcmp(data, entry->pdata, data_len)) {
+                /* 发删除消息 */
+                (void)ovsdb_sub_delete_msg(table_name, entry);
+
+                delete_entry(&OVSDB_SUB_GET_AGEINGTABLE(table_name), entry);
+            } else
+                return 0;
+        }
+    }
+
+    /* 查找当前软表中是否存在 */
+    entry = find_entry(OVSDB_SUB_GET_TABLE(table_name), key);
+    if (entry != NULL) {
+        if (data != NULL) {
+            if (0 != memcmp(data, entry->pdata, data_len)) {
+                /* 发删除消息 */
+                (void)ovsdb_sub_delete_msg(table_name, entry);
+            } else
+                flag = false;
+        } else
+            flag = false;
+        delete_entry(&OVSDB_SUB_GET_TABLE(table_name), entry);
+    }
+
+    current = add_entry(table_name, key, (void *)data);
+    if (NULL == current)
+        return -1;
+
+    /* 发添加消息 */
+    if (true == flag)
+        ret = ovsdb_sub_add_msg(table_name, current);
+    if (ret != 0) {
+        delete_entry(&OVSDB_SUB_GET_AGEINGTABLE(table_name), current);
+        return ret;
+    }
+
+    return 0;
+}
+
+int ovsdb_sub_table_delete(enum OVSDB_SUB_TABLE_NAME table_name)
+{
+    struct ovsdb_sub_entry * current, *tmp;
+
+    HASH_ITER(hh, OVSDB_SUB_GET_TABLE(table_name), current, tmp) {
+        /* 发送删除消息 */
+        (void)ovsdb_sub_delete_msg(table_name, current);
+
+        delete_entry(&OVSDB_SUB_GET_TABLE(table_name), current);
+    }
+
+    /* 交换表 */
+    OVSDB_SUB_EXCHANGE_AGEINGTABLE(table_name);
+
+    return 0;
+}
+
+int ovsdb_sub_table_interface_check(char *interface)
+{
+    if (interface == NULL)
+        return -1;
+
+    if (OVSDB_SUB_INTERFACE_LEN <= strlen(interface))
+        return -1;
+
+    return 0;
+}
+
+int ovsdb_sub_table_mac_check(char *mac, char *bd, char *interface, int mac_type)
+{
+    int i = 0;
+
+    if (mac == NULL)
+        return -1;
+    if (bd == NULL)
+        return -1;
+
+    if (strlen(mac) != strlen("1111-2222-3333"))
+        return -1;
+
+    for (i = 0; i < strlen(mac); i++){
+        if ((i == 4)||(i == 9)){
+            if (mac[i] != '-')
+                return -1;
+        } else {
+            if ((mac[i] < '0') ||
+                ((mac[i] > '9') && (mac[i] < 'A')) ||
+                ((mac[i] > 'F') && (mac[i] < 'a')) ||
+                (mac[i] > 'f'))
+                return -1;
+        }
+    }
+
+    if (OVSDB_SUB_BD_LEN <= strlen(bd))
+        return -1;
+
+    return ovsdb_sub_table_interface_check(interface);
+}
+
+int ovsdb_sub_table_mac_add(char *mac, char *bd, char *interface, int mac_type)
+{
+    int ret = 0;
+    struct ovsdb_sub_mac_key  key   = {0};
+    struct ovsdb_sub_mac_data *data = NULL;
+
+    /* 入参检查 */
+    if (0 != ovsdb_sub_table_mac_check(mac, bd, interface, mac_type))
+        return -1;
+
+    /* 构造key */
+    //memcpy(key.macAdd3[0], mac,    4);
+    //memcpy(key.macAdd3[1], mac+5,  4);
+    //memcpy(key.macAdd3[2], mac+10, 4);
+    (void)snprintf(key.macAdd, 18,
+                   "%c%c:%c%c:%c%c:%c%c:%c%c:%c%c",
+                   mac[0], mac[1], mac[2], mac[3],
+                   mac[5], mac[6], mac[7], mac[8],
+                   mac[10], mac[11], mac[12], mac[13]);
+    key.macAdd[17] = '_';
+    (void)strncpy(key.BD, bd, OVSDB_SUB_BD_LEN);
+
+    /* 构造data */
+    data = (struct ovsdb_sub_mac_data *)malloc(sizeof(struct ovsdb_sub_mac_data));
+    if (NULL == data)
+        return -1;
+
+    (void)strncpy(data->interface, interface, OVSDB_SUB_INTERFACE_LEN);
+    data->mac_type = mac_type;
+
+    ret = ovsdb_sub_table_add(OVSDB_SUB_TABLE_MAC, (char *)&key, (void *)data, sizeof(struct ovsdb_sub_mac_data));
+    free(data);
+    if (ret != 0)
+    {
+        return ret;
+    }
+
+    return 0;
+}
+
+int ovsdb_sub_table_interface_check_type(char *interface)
+{
+    char *pcDot = ".";
+    char *pcGE = "GE";
+    char *pcTrunk = "Eth-Trunk";
+
+    if (NULL != strstr(interface, pcDot))
+    {
+        return -1;
+    }
+
+    if ((NULL == strstr(interface, pcGE))&&(NULL == strstr(interface, pcTrunk)))
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+int ovsdb_sub_table_interface_add(char *interface)
+{
+    int ret = 0;
+    struct ovsdb_sub_port_key key = {0};
+
+    /* 入参检查 */
+    if (0 != ovsdb_sub_table_interface_check(interface))
+        return -1;
+
+    /* 判断是否是物理口和LAG口 */
+    if (0 != ovsdb_sub_table_interface_check_type(interface))
+        return 0;
+
+    /* 构造key */
+    (void)strncpy(key.interface, interface, OVSDB_SUB_INTERFACE_LEN);
+
+    ret = ovsdb_sub_table_add(OVSDB_SUB_TABLE_INTERFACE, (char *)&key, NULL, 0);
+    if (ret != 0)
+    {
+        return ret;
+    }
+
+    return 0;
+}
+
+int ovsdb_sub_table_mac_delete()
+{
+    (void)ovsdb_sub_table_delete(OVSDB_SUB_TABLE_MAC);
+
+    return 0;
+}
+
+int ovsdb_sub_table_interface_delete()
+{
+    (void)ovsdb_sub_table_delete(OVSDB_SUB_TABLE_INTERFACE);
+
+    return 0;
+}
+
+void ovsdb_add_port(char *interface)
+{
+    struct jsonrpc *rpc = g_args_local->rpc;
+    char json_insert_port[512]={0};
+
+    /*写Physical_Port表*/
+    (void)snprintf(json_insert_port, 512,
+        "[\"hardware_vtep\",{\"op\":\"insert\", \"table\":\"Physical_Port\", "
+        "\"row\":{\"name\":\"%s\"}, \"uuid-name\":\"anotheritem\" }, "
+        "{\"op\":\"mutate\", \"table\":\"Physical_Switch\", \"where\":[[\"name\",\"==\",\"CE6850HI\"]], "
+        "\"mutations\":[[\"ports\", \"insert\", [\"set\",[[\"named-uuid\", \"anotheritem\"]]]]] }]", interface);
+    do_transact_temp(rpc, json_insert_port);
+
+    return;
+}
+
+void ovsdb_delete_port(char *interface)
+{
+    struct jsonrpc *rpc = g_args_local->rpc;
+    char json_insert_port[512]={0};
+
+    /*写Physical_Port表*/
+    (void)snprintf(json_insert_port, 512,
+        "[\"hardware_vtep\",{\"row\":{\"ports\":[\"set\",[[\"uuid\",\"8229e0c3-d55d-4170-9d84-410edc5d0e82\"],"
+        "[\"uuid\",\"9eeb6255-e70a-472f-b326-abfad1d62822\"]]]},\"table\":\"Physical_Switch\","
+        "\"where\":[[\"_uuid\",\"==\",[\"uuid\",\"6cb706ed-3be6-4c1c-93b7-feb6378e87a2\"]]],\"op\":\"update\"}]",
+        interface);
+    do_transact_temp(rpc, json_insert_port);
+
+    return;
+}
+
+int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
+{
+    int i = 0;
+    char json_query[1000] = {0};
+    int ls_num = 0;
+    struct uuid *ls_uuid_s;
+    int tunnel_key_exist = 0;
+    int tunnel_key = 0;
+    struct jsonrpc *rpc = g_args_local->rpc;
+    char *tunnel_ip = g_args_local->tunnel_ip;
+
+    ls_uuid_s= (struct uuid*)malloc(TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
+    if(!ls_uuid_s)
+    {
+        OVSDB_PRINTF_DEBUG("Error, malloc memory failed.");
+        return -1;
+    }
+    (void)memset(ls_uuid_s, 0, TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
+
+    /*方法:先查找ifname绑定的logical_switch，可能不止一个，然后在其中找出vni符合要求的一个*/
+    (void)snprintf(json_query, 1000,
+        "[\"hardware_vtep\",{\"columns\":[\"name\",\"_uuid\",\"vlan_bindings\"],"
+        "\"table\":\"Physical_Port\",\"where\":[[\"name\",\"==\",\"%s\"]],\"op\":\"select\"}]",
+        interface);
+
+    do_transact_temp_query_port_binding_logical_switch(rpc, json_query, &ls_num, ls_uuid_s);
+
+    if (0 == ls_num){
+        free(ls_uuid_s);
+        ls_uuid_s = NULL;
+        return -1;
+    }
+
+    /*是否存在多个ls的vni符合要求的情况*/
+    for(i=0; i<ls_num; i++)
+    {
+        char tunnel_key_string[8] = {0};
+        tunnel_key_exist = 0;
+        tunnel_key = 0;
+
+        (void)snprintf(json_query, 1000,
+            "[\"hardware_vtep\",{\"columns\":[\"description\",\"name\",\"_uuid\",\"tunnel_key\"],"
+            "\"table\":\"Logical_Switch\",\"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"select\"}]",
+            UUID_ARGS(&ls_uuid_s[i]));
+
+        do_transact_temp_query_logical_switch_tunnel_key(rpc, json_query, &tunnel_key_exist, &tunnel_key);
+        OVSDB_PRINTF_DEBUG("No.%d tunnel_key_exist = %d.", i , tunnel_key_exist);
+        (void)snprintf(tunnel_key_string, 8, "%d", tunnel_key);
+        OVSDB_PRINTF_DEBUG("tunnel_key = %s.", tunnel_key_string);
+
+        if((tunnel_key_exist)&&(0 == strcmp(bd, tunnel_key_string)))
+        {
+            /*需要先获取到tunnel ip对应的locator的uuid*/
+            struct uuid phyical_locator_uuid;
+
+            uuid_zero(&phyical_locator_uuid);
+
+            (void)snprintf(json_query, 1000,
+                "[\"hardware_vtep\",{\"columns\":[\"_uuid\",\"dst_ip\",\"encapsulation_type\"],"
+                "\"table\":\"Physical_Locator\",\"where\":[[\"dst_ip\",\"==\",\"%s\"]],\"op\":\"select\"}]",
+                tunnel_ip);
+            do_transact_temp_query_locator_uuid(rpc, json_query, &phyical_locator_uuid);
+
+            if(uuid_is_zero(&phyical_locator_uuid))
+            {
+                OVSDB_PRINTF_DEBUG("Error! Does not find physical_locator uuid with ip %s.", tunnel_ip);
+                free(ls_uuid_s);
+                ls_uuid_s = NULL;
+                return -1;
+            }
+            else
+            {
+                OVSDB_PRINTF_DEBUG("Add MAC.");
+
+                (void)snprintf(json_query, 1000,
+                    "[\"hardware_vtep\",{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
+                    "\"MAC\":\"%s\",\"locator\":[\"uuid\",\""UUID_FMT"\"]},\"table\":\"Ucast_Macs_Local\","
+                    "\"uuid-name\":\"ucasl_local\",\"op\":\"insert\"}]",
+                    UUID_ARGS(&ls_uuid_s[i]), mac, UUID_ARGS(&phyical_locator_uuid));
+
+                do_transact_temp(rpc, json_query);
+
+                /*temp to delete*/
+                OVSDB_PRINTF_DEBUG("write a new ucast local tabel.");
+            }
+
+            break;
+        }
+    }
+
+    free(ls_uuid_s);
+    ls_uuid_s = NULL;
+
+    return 0;
+}
+
+void ovsdb_delete_mac(char *mac, char *bd, char *interface, int mac_type)
+{
+    char json_query_mac_local_uuid[1000] = {0};
+    int uuid_num = 0;
+    struct uuid *ucast_local_uuid_s;
+    struct jsonrpc *rpc = g_args_local->rpc;
+    int j = 0;
+
+    ucast_local_uuid_s= (struct uuid*)malloc(TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
+    if(!ucast_local_uuid_s)
+    {
+        OVSDB_PRINTF_DEBUG("Error, malloc memory failed.");
+    }
+    (void)memset(ucast_local_uuid_s, 0, TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
+
+    (void)snprintf(json_query_mac_local_uuid, 1000,
+        "[\"hardware_vtep\",{\"columns\":[\"ipaddr\",\"_uuid\",\"logical_switch\","
+        "\"MAC\",\"locator\"],\"table\":\"Ucast_Macs_Local\",\"where\":[[\"MAC\",\"==\",\"%s\"]],\"op\":\"select\"}]",
+        mac);
+
+    /*temp to delete*/
+    OVSDB_PRINTF_DEBUG("json_query_mac_local_uuid=%s.", json_query_mac_local_uuid);
+
+    do_transact_temp_query_mac_local_uuid(rpc, json_query_mac_local_uuid, &uuid_num, ucast_local_uuid_s);
+
+    /*开始删ucast_local表*/
+    for(j=0; j<uuid_num; j++ )
+    {
+        (void)snprintf(json_query_mac_local_uuid, 1000,
+            "[\"hardware_vtep\",{\"table\":\"Ucast_Macs_Local\","
+            "\"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"delete\"}]",
+            UUID_ARGS(&ucast_local_uuid_s[j]));
+        do_transact_temp(rpc, json_query_mac_local_uuid);
+
+        OVSDB_PRINTF_DEBUG("delete a old ucast local tabel.");
+    }
+
+    return;
+}
+
+void ovsdb_query_port_and_mac(void *args)
+{
+    g_args_local = xmalloc(sizeof(struct ovsdb_write_mcast_local_args));
+
+    if (NULL == g_args_local)
+        return;
+
+    memcpy(g_args_local, args, sizeof(struct ovsdb_write_mcast_local_args));
+
+    /* 查找端口表 */
+    (void)netconf_ce_query_interface();
+
+    /* 查找MAC表 */
+    (void)netconf_ce_query_db_mac();
+
+    free(g_args_local);
+    g_args_local = NULL;
+
+    return;
+}
+
+void
+ovsdb_query_mac_initial(struct jsonrpc *rpc)
+{
+    char *json_char = "[\"hardware_vtep\",{\"columns\":[\"MAC\",\"logical_switch\"],"\
+                      "\"table\":\"Ucast_Macs_Local\",\"where\":[],\"op\":\"select\"}]";
+    unsigned int i;
+    int ret;
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *pl;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    struct json *pl_0;
+    struct json *mac;
+    char *pcMac, *pclogical_switch_uuid_s;
+    struct json *logical_switch;
+    int tunnel_key_exist, tunnel_key;
+    struct ovsdb_sub_mac_key key   = {0};
+    struct ovsdb_sub_mac_data data = {0};
+    struct ovsdb_sub_entry *entry = NULL;
+
+    struct uuid *logical_switch_uuid_s;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    pl = json_array(reply->result);
+    elem_0 = pl->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+
+    for (i = 0; i < rows_elem->n; i++) {
+        pl_0 = rows_elem->elems[i];
+        mac = shash_find_data(json_object(pl_0), "MAC");
+
+        if (JSON_STRING == mac->type) {
+            pcMac = json_string(mac);
+        }
+
+        logical_switch = shash_find_data(json_object(pl_0), "logical_switch");
+
+        if ((JSON_ARRAY == logical_switch->type) &&
+            (logical_switch->u.array.n == 2) &&
+            (logical_switch->u.array.elems[1]->type == JSON_STRING)) {
+            pclogical_switch_uuid_s = json_string(logical_switch->u.array.elems[1]);
+        }
+
+        json_char = (char *)malloc(256);
+        if (NULL == json_char)
+            break;
+
+        (void)snprintf(json_char, 256, 
+            "[\"hardware_vtep\",{\"columns\":[\"_uuid\",\"tunnel_key\"],"
+            "\"table\":\"Logical_Switch\",\"where\":[[\"_uuid\",\"==\","
+            "[\"uuid\",\"%s\"]]],\"op\":\"select\"}]",
+            pclogical_switch_uuid_s);
+
+        tunnel_key_exist = 0;
+        tunnel_key = 0;
+
+        do_transact_temp_query_logical_switch_tunnel_key(rpc, json_char, &tunnel_key_exist, &tunnel_key);
+
+        free(json_char);
+
+        if (tunnel_key_exist) {
+
+            (void)snprintf(key.macAdd, 18, "%s", pcMac);
+            key.macAdd[17] = '_';
+            (void)snprintf(key.BD, OVSDB_SUB_BD_LEN, "%d", tunnel_key);
+            
+            entry = add_entry(OVSDB_SUB_TABLE_MAC, (char *)&key, (char *)&data);
+            if (NULL == entry) {
+                OVSDB_PRINTF_DEBUG("Initial add MAC failed, mac: %s", key.macAdd);
+            }
+        }
+        
+    }
+
+    jsonrpc_msg_destroy(reply);
+
+    /* 交换表 */
+    //OVSDB_SUB_EXCHANGE_AGEINGTABLE(OVSDB_SUB_TABLE_MAC);
+
+}
+
+void
+ovsdb_query_port_initial(struct jsonrpc *rpc)
+{
+    char *json_char = "[\"hardware_vtep\",{\"columns\":[\"name\"],"\
+                      "\"table\":\"Physical_Port\",\"where\":[],\"op\":\"select\"}]";
+    unsigned int i;
+    char * interface;
+    struct ovsdb_sub_port_key key = {0};
+    struct ovsdb_sub_entry *entry = NULL;
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *pl;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    struct json *pl_0;
+    struct json *jsn_portname;
+
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    pl = json_array(reply->result);
+    elem_0 = pl->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+
+    for (i = 0; i < rows_elem->n; i++) {
+        pl_0 = rows_elem->elems[i];
+        jsn_portname = shash_find_data(json_object(pl_0), "name");
+
+        if(JSON_STRING == jsn_portname->type) {
+            interface = json_string(jsn_portname);
+            (void)strncpy(key.interface, interface, OVSDB_SUB_INTERFACE_LEN);
+            entry = add_entry(OVSDB_SUB_TABLE_INTERFACE, (char *)&key, NULL);
+            if (NULL == entry) {
+                OVSDB_PRINTF_DEBUG("Initial add interface failed, interface: %s", interface);
+            }
+        }
+    }
+
+    jsonrpc_msg_destroy(reply);
+
+    /* 交换表 */
+    //OVSDB_SUB_EXCHANGE_AGEINGTABLE(OVSDB_SUB_TABLE_INTERFACE);
+
+    return;
+}
+
+void ovsdb_write_mcast_local(void *args)
+{
+    char *tunnel_ip;
+    struct jsonrpc *rpc;
+    struct ovsdb_write_mcast_local_args * args_local;
+
+    int ls_num=0;
+    struct logical_switch_uuid_and_vni *ls_info;
+    int i=0;
+    int j=0;
+    int k=0;
+    int l=0;
+    int time=0;
+
+    args_local = (struct ovsdb_write_mcast_local_args *)args;
+    tunnel_ip = args_local->tunnel_ip;
+    rpc = args_local->rpc;
+
+    if(!rpc)
+    {
+        OVSDB_PRINTF_DEBUG("rpc is NULL.");
+        return;
+    }
+
+    if(!tunnel_ip)
+    {
+        OVSDB_PRINTF_DEBUG("tunnel_ip is NULL.");
+        return;
+    }
+
+    ls_info = (struct logical_switch_uuid_and_vni*)malloc(TABLE_LOGICAL_SWITCH_NUM * sizeof(struct logical_switch_uuid_and_vni));
+    if(!ls_info)
+    {
+        OVSDB_PRINTF_DEBUG("Error, malloc memorf failed.");
+        return;
+    }
+
+    /* 导入现有mac表和接口表 */
+    ovsdb_query_port_initial(rpc);
+    ovsdb_query_mac_initial(rpc);
+
+    for(;;) /*一直在循环*/
+    {
+        if (time >= 10){
+            ovsdb_query_port_and_mac(args);
+            time = 0;
+        }
+        time++;
+
+        /*a short delay*/
+        sleep(1);
+        ls_num = 0;
+        int ls_info_exist =0;
+        memset(ls_info, 0, TABLE_LOGICAL_SWITCH_NUM * sizeof(struct logical_switch_uuid_and_vni));
+        do_transact_temp_query_logical_switch(rpc, &ls_num, ls_info);
+
+        for(i=0; i<ls_num; i++)
+        {
+            ls_info_exist =0;   /*首先置零*/
+
+            for(j=0; j<TABLE_LOGICAL_SWITCH_NUM; j++)
+            {
+                if(uuid_equals(&logical_switch_info[j].uuid_ls, &ls_info[i].uuid_ls))
+                {
+                    ls_info_exist = 1;  /*说明是老的logical_switch*/
+
+                    /*temp to delete*/
+                    //printf("old logical switch, j=%d\n", j);
+
+                    break;
+                }
+            }
+
+            if(!ls_info_exist)  /*新增的logical_switch*/
+            {
+
+                /*首先对于新增的ls，写一条mcast local表*/
+                /*下面开始写mcast-local表，对于第一个ls以及后续的ls，json不相同*/
+                /*原因是第一次会创建一个locator，后续不会创建locator,但是会引用第一次创建的locator*/
+                char json_insert_mcast_local[2000]={0};
+                int logical_switch_info_is_empty = 1;
+
+                for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
+                {
+                    if(!uuid_is_zero(&logical_switch_info[k].uuid_ls))
+                    {
+                        logical_switch_info_is_empty = 0;
+
+                        break;
+                    }
+                }
+
+                if(logical_switch_info_is_empty)    /*第一个logical_switch*/
+                {
+                    snprintf(json_insert_mcast_local, sizeof(json_insert_mcast_local),
+                        "[\"hardware_vtep\","\
+                        "{\"row\":{\"locators\":[\"named-uuid\",\"locator_uuid\"]},"\
+                        "\"table\":\"Physical_Locator_Set\","\
+                        "\"uuid-name\":\"locator_set_uuid\","\
+                        "\"op\":\"insert\"},"\
+                        "{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"\
+                        "\"locator_set\":[\"named-uuid\",\"locator_set_uuid\"],"\
+                        "\"MAC\":\"unknown-dst\"},"\
+                        "\"table\":\"Mcast_Macs_Local\","\
+                        "\"uuid-name\":\"macst_local_uuid\","\
+                        "\"op\":\"insert\"},"\
+                        "{\"row\":{\"dst_ip\":\"%s\","\
+                        "\"encapsulation_type\":\"vxlan_over_ipv4\"},"\
+                        "\"table\":\"Physical_Locator\","\
+                        "\"uuid-name\":\"locator_uuid\","\
+                        "\"op\":\"insert\"}]",
+                        UUID_ARGS(&ls_info[i].uuid_ls),tunnel_ip);
+                    do_transact_temp(rpc, json_insert_mcast_local);
+
+                    /*temp to delete*/
+                    OVSDB_PRINTF_DEBUG("write a new mcast local tabel, it is the first one.");
+                }
+                else /*不是第一个logical_switch*/
+                {
+                    /*需要先获取到tunnel ip对应的locator的uuid*/
+                    struct uuid phyical_locator_uuid;
+                    char json_query_locator_uuid[1000]={0};
+
+                    uuid_zero(&phyical_locator_uuid);
+
+                    snprintf(json_query_locator_uuid, sizeof(json_query_locator_uuid),
+                        "[\"hardware_vtep\","\
+                        "{\"columns\":[\"_uuid\",\"dst_ip\",\"encapsulation_type\"],"\
+                        "\"table\":\"Physical_Locator\","\
+                        "\"where\":[[\"dst_ip\",\"==\",\"%s\"]],\"op\":\"select\"}]",
+                        tunnel_ip);
+                    do_transact_temp_query_locator_uuid(rpc, json_query_locator_uuid, &phyical_locator_uuid);
+
+                    if(uuid_is_zero(&phyical_locator_uuid))
+                    {
+                        OVSDB_PRINTF_DEBUG("Error! Does not find physical_locator uuid with ip %s.", tunnel_ip);
+                    }
+                    else
+                    {
+                        snprintf(json_insert_mcast_local, sizeof(json_insert_mcast_local),
+                            "[\"hardware_vtep\",{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"\
+                            "\"locator_set\":[\"named-uuid\",\"locator_set_uuid\"],\"MAC\":\"unknown-dst\"},"\
+                            "\"table\":\"Mcast_Macs_Local\",\"uuid-name\":\"macst_local_uuid\","\
+                            "\"op\":\"insert\"},{\"row\":{\"locators\":[\"uuid\",\""UUID_FMT"\"]},"\
+                            "\"table\":\"Physical_Locator_Set\","\
+                            "\"uuid-name\":\"locator_set_uuid\",\"op\":\"insert\"}]",
+                            UUID_ARGS(&ls_info[i].uuid_ls), UUID_ARGS(&phyical_locator_uuid));
+                        do_transact_temp(rpc, json_insert_mcast_local);
+
+                        /*temp to delete*/
+                        OVSDB_PRINTF_DEBUG("write a new mcast local tabel.");
+                    }
+                }
+
+                /*然后将ls信息写入logical_switch_info结构体*/
+                for(l=0; l<TABLE_LOGICAL_SWITCH_NUM; l++)
+                {
+                    if(!uuid_is_zero(&logical_switch_info[l].uuid_ls))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        memcpy(&logical_switch_info[l], &ls_info[i], sizeof(struct logical_switch_uuid_and_vni));
+                        break;
+                    }
+                }
+
+            }
+        }
+
+    }
+
+    free(ls_info);
+    ls_info = NULL;
+
+}
+
+/*以do monitor函数为主体*/
+void
+do_vtep(struct jsonrpc *rpc, const char *database,
+        int argc , char *argv[] )
+{
+    int ret = 0;
+
+    OVSDB_PRINTF_DEBUG("Enter ovsdb-client do_vtep.");
+
+    /* create netconf connection*/
+    ret = netconf_ce_config_init();
+    if (0 != ret)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Session connect failed.");
+        return;
+    }
+
+    if(!strcmp(argv[0], "monitor"))
+    {
+        OVSDB_PRINTF_DEBUG("ovsdb-client monitor.");
+        do_vtep_monitor(rpc, database, argc, argv);
+    }
+    else if(!strcmp(argv[0], "transact"))
+    {
+        OVSDB_PRINTF_DEBUG("ovsdb-client transact.");
+        do_vtep_transact(rpc, database, argc, argv);
+    }
+
+    netconf_ce_config_destory();
+
+    return;
+}
+
+void do_vtep_transact(struct jsonrpc *rpc, const char *database,
+        int argc , char *argv[] )
+{
+    //pthread_t tid_socketFEI;
+    //pthread_t tid_socket_mcast_local;
+    struct ovsdb_write_mcast_local_args args;
+    struct uuid uuid_global;
+
+    char tunnel_ip[1000]={0};
+    char management_ip[1000]={0};
+
+
+    /*1.检测到Global 有数据，将physical_switch Physical_Port信息写入OVSDB*/
+
+    {
+        /*检测Global表是否存在.这种方法是否靠谱?是否要改成Manager表?*/
+        /*3.16最好改成manager表，因为发现增加一个ls，global表也会有*/
+        OVSDB_PRINTF_DEBUG("\Detect whether controller is connected.");
+
+        int global_uuid_num;
+        int physical_switch_exist = 0;
+
+        //char* json_query_global_uuid="[\"hardware_vtep\",{\"columns\":[\"_uuid\"],\"table\":\"Global\",\"where\":[],\"op\":\"select\"}]";
+        char* json_query_physical_switch="[\"hardware_vtep\",{\"columns\":[\"_uuid\"],\"table\":\"Physical_Switch\",\"where\":[],\"op\":\"select\"}]";
+        char json_insert_ps[1000]={0};
+        //char json_insert_port[1000]={0};
+
+
+        uuid_zero(&uuid_global);
+        for(;;)
+        {
+            /*a short delay*/
+            //int cnt=0;
+            //do{cnt++;}while(cnt < 100000000);
+            sleep(1);
+
+            do_transact_temp_query_global(rpc, &global_uuid_num, &uuid_global);
+            if(global_uuid_num)
+            {
+                OVSDB_PRINTF_DEBUG("Global Table is present.");
+                break;
+            }
+        }
+
+        /*首先检查是否已有physical switch，*/
+
+        do_transact_temp_query_physical_switch_exist(rpc, json_query_physical_switch, &physical_switch_exist);
+
+
+        if(!physical_switch_exist)
+        {
+            /*写Physical_Switch表*/
+            OVSDB_PRINTF_DEBUG("Write Physical_Switch info to OVSDB.");
+            OVSDB_PRINTF_DEBUG("global table uuid ="UUID_FMT, UUID_ARGS(&uuid_global));
+            snprintf(json_insert_ps, 1000,
+                "[\"hardware_vtep\",{\"op\":\"insert\", \"table\":\"Physical_Switch\", "
+                "\"row\":{\"name\":\"CE6850HI\",\"description\":\"%s\"}, \"uuid-name\":\"anotheritem\" }, "
+                "{\"op\":\"mutate\", \"table\":\"Global\", \"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]], "
+                "\"mutations\":[[\"switches\", \"insert\", [\"set\",[[\"named-uuid\", \"anotheritem\"]]]]] }]",
+                dev_desc, UUID_ARGS(&uuid_global));
+            OVSDB_PRINTF_DEBUG("json_insert_ps=%s.", json_insert_ps);
+            do_transact_temp(rpc, json_insert_ps);
+        }
+    }
+
+
+    /*检测名为Huawei-CE6850HI的switch是否含有tunnel-ip,因为tunnel ip是写下面的mcast local表的必要条件*/
+    {
+        OVSDB_PRINTF_DEBUG("Detect whether physical switch has tunnel ip.");
+        char* json_query_switch_tunnel_ip="[\"hardware_vtep\",{\"columns\":[\"tunnel_ips\",\"name\",\"management_ips\",\"switch_fault_status\",\"_uuid\",\"description\"],\"table\":\"Physical_Switch\",\"where\":[[\"name\",\"==\",\"CE6850HI\"]],\"op\":\"select\"}]";
+        for(;;)
+        {
+            sleep(1);
+            do_transact_temp_query_switch_tunnel_ip(rpc, json_query_switch_tunnel_ip, tunnel_ip);
+            if(tunnel_ip[0])
+            {
+                break;
+            }
+        }
+    }
+
+
+    /*检测名为Huawei-CE6850HI的switch是否含有management-ip,因为tunnel ip是写下面的mcast local表的必要条件*/
+    {
+        OVSDB_PRINTF_DEBUG("Detect whether physical switch has management ip.");
+        char* json_query_switch_management_ip="[\"hardware_vtep\",{\"columns\":[\"tunnel_ips\",\"name\",\"management_ips\",\"switch_fault_status\",\"_uuid\",\"description\"],\"table\":\"Physical_Switch\",\"where\":[[\"name\",\"==\",\"CE6850HI\"]],\"op\":\"select\"}]";
+        for(;;)
+        {
+            sleep(1);
+            do_transact_temp_query_switch_management_ip(rpc, json_query_switch_management_ip, management_ip);
+            if(management_ip[0])
+            {
+                break;
+            }
+        }
+    }
+
+    args.rpc = rpc;
+    args.tunnel_ip = tunnel_ip;
+    (void)memcpy(&(args.uuid_global), &uuid_global, sizeof(uuid_global));
+
+#if 0   /*暂时注释掉*/
+    if (pthread_create(&tid_socketFEI, NULL, (void *)ovsdb_query_port_and_mac, &args))
+    {
+        printf("Error! Create Thread Failed with ovsdb_receive_mac_from_FEI\n");
+    }
+
+    /*一直检测Logical_Switch，当创建了新的ls后，写入一条mcast-local表*/
+    if (pthread_create(&tid_socket_mcast_local, NULL, (void *)ovsdb_write_mcast_local, &args))
+    {
+        printf("Error! Create Thread Failed with ovsdb_receive_mac_from_FEI\n");
+    }
+
+    /*维持主线程*/
+    do{
+        sleep(1);
+    }while(1);
+
+#endif
+
+    ovsdb_write_mcast_local(&args);
+}
+
+void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
+        int argc , char *argv[] )
+{
+
+    const char *server = jsonrpc_get_name(rpc);
+    /*固定监听所有表*/
+    //const char *table_name = argv[0];
+    const char *table_name = "ALL";
+
+    struct unixctl_server *unixctl;
+    struct ovsdb_schema *schema;
+    struct jsonrpc_msg *request;
+    struct json *monitor, *monitor_requests, *request_id;
+    bool exiting = false;
+    bool blocked = false;
+
+    struct monitored_table *mts;
+    size_t n_mts, allocated_mts;
+
+    daemon_save_fd(STDOUT_FILENO);
+    daemonize_start();
+    if (get_detach()) {
+        int error;
+
+        error = unixctl_server_create(NULL, &unixctl);
+        if (error) {
+            ovs_fatal(error, "failed to create unixctl server");
+        }
+
+        unixctl_command_register("exit", "", 0, 0,
+                                 ovsdb_client_exit, &exiting);
+        unixctl_command_register("ovsdb-client/block", "", 0, 0,
+                                 ovsdb_client_block, &blocked);
+        unixctl_command_register("ovsdb-client/unblock", "", 0, 0,
+                                 ovsdb_client_unblock, &blocked);
+    } else {
+        unixctl = NULL;
+    }
+
+    schema = fetch_schema(rpc, database);
+
+    monitor_requests = json_object_create();
+
+    mts = NULL;
+    n_mts = allocated_mts = 0;
+
+    if (strcmp(table_name, "ALL")) {
+        struct ovsdb_table_schema *table;
+
+        table = shash_find_data(&schema->tables, table_name);
+        if (!table) {
+            ovs_fatal(0, "%s: %s does not have a table named \"%s\"",
+                      server, database, table_name);
+        }
+
+        add_monitored_table(argc, argv, server, database, table,
+                            monitor_requests, &mts, &n_mts, &allocated_mts);
+    } else {
+        size_t n = shash_count(&schema->tables);
+        const struct shash_node **nodes = shash_sort(&schema->tables);
+        size_t i;
+
+        for (i = 0; i < n; i++) {
+            struct ovsdb_table_schema *table = nodes[i]->data;
+
+            add_monitored_table(argc, argv, server, database, table,
+                                monitor_requests,
+                                &mts, &n_mts, &allocated_mts);
+        }
+        free(nodes);
+    }
+
+    monitor = json_array_create_3(json_string_create(database),
+                                  json_null_create(), monitor_requests);
+    request = jsonrpc_create_request("monitor", monitor, NULL);
+    request_id = json_clone(request->id);
+    jsonrpc_send(rpc, request);
+
+    for (;;) {
+        unixctl_server_run(unixctl);
+        while (!blocked) {
+            struct jsonrpc_msg *msg;
+            int error;
+
+            error = jsonrpc_recv(rpc, &msg);
+            if (error == EAGAIN) {
+                break;
+            } else if (error) {
+                ovs_fatal(error, "%s: receive failed", server);
+            }
+
+            if (msg->type == JSONRPC_REQUEST && !strcmp(msg->method, "echo")) {
+                jsonrpc_send(rpc, jsonrpc_create_reply(json_clone(msg->params),
+                                                       msg->id));
+            } else if (msg->type == JSONRPC_REPLY
+                       && json_equal(msg->id, request_id)) {
+                monitor_print(msg->result, mts, n_mts, true);
+
+                OVSDB_PRINTF_DEBUG("begin print msg->result.");
+                print_json(msg->result);
+                putchar('\n');
+                OVSDB_PRINTF_DEBUG("end print msg->result.");
+
+                OVSDB_PRINTF_DEBUG("begin do_table_process.");
+                do_table_process(rpc, msg->result, mts, n_mts, true);
+                do_table_process_2(rpc, msg->result, mts, n_mts, true);
+
+                OVSDB_PRINTF_DEBUG("end do_table_processn");
+
+                fflush(stdout);
+                daemonize_complete();
+            } else if (msg->type == JSONRPC_NOTIFY
+                       && !strcmp(msg->method, "update")) {
+                struct json *params = msg->params;
+                if (params->type == JSON_ARRAY
+                    && params->u.array.n == 2
+                    && params->u.array.elems[0]->type == JSON_NULL) {
+                    monitor_print(params->u.array.elems[1], mts, n_mts, false);
+
+                    OVSDB_PRINTF_DEBUG("begin print params->u.array.elems[1].");
+                    print_json(params->u.array.elems[1]);
+                    putchar('\n');
+                    OVSDB_PRINTF_DEBUG("end print params->u.array.elems[1].");
+
+                    OVSDB_PRINTF_DEBUG("begin do_table_process.");
+                    do_table_process(rpc, params->u.array.elems[1], mts, n_mts, false);
+                    do_table_process_2(rpc, params->u.array.elems[1], mts, n_mts, false);
+
+                    OVSDB_PRINTF_DEBUG("end do_table_processn.");
+
+                    fflush(stdout);
+                }
+            }
+            jsonrpc_msg_destroy(msg);
+        }
+
+        if (exiting) {
+            break;
+        }
+
+        jsonrpc_run(rpc);
+        jsonrpc_wait(rpc);
+        if (!blocked) {
+            jsonrpc_recv_wait(rpc);
+        }
+        unixctl_server_wait(unixctl);
+        poll_block();
+    }
+
+}
+
+
+
+
+
+static void
+do_help(struct jsonrpc *rpc OVS_UNUSED, const char *database OVS_UNUSED,
+        int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+{
+    usage();
+}
+
+/* All command handlers (except for "help") are expected to take an optional
+ * server socket name (e.g. "unix:...") as their first argument.  The socket
+ * name argument must be included in max_args (but left out of min_args).  The
+ * command name and socket name are not included in the arguments passed to the
+ * handler: the argv[0] passed to the handler is the first argument after the
+ * optional server socket name.  The connection to the server is available as
+ * global variable 'rpc'. */
+static const struct ovsdb_client_command all_commands[] = {
+    { "list-dbs",           NEED_RPC,      0, 0,       do_list_dbs },
+    { "get-schema",         NEED_DATABASE, 0, 0,       do_get_schema },
+    { "get-schema-version", NEED_DATABASE, 0, 0,       do_get_schema_version },
+    { "list-tables",        NEED_DATABASE, 0, 0,       do_list_tables },
+    { "list-columns",       NEED_DATABASE, 0, 1,       do_list_columns },
+    { "transact",           NEED_RPC,      1, 1,       do_transact },
+    { "monitor",            NEED_DATABASE, 1, INT_MAX, do_monitor },
+    { "dump",               NEED_DATABASE, 0, 0,       do_dump },
+    { "vtep",               NEED_DATABASE, 1, 2,       do_vtep },
+
+
+    { "help",               NEED_NONE,     0, INT_MAX, do_help },
+
+    { NULL,                 NEED_NONE,     0, 0,       NULL },
+};
+
+static const struct ovsdb_client_command *get_all_commands(void)
+{
+    return all_commands;
+}

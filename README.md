@@ -18,7 +18,7 @@ Installation
 
 Circumstance instruction:
 
-This software runs in lxc environment which installed Debian openration system contained by CE switch.
+This software runs in lxc environment which installed Debian operation system contained by CE switch.
 
 Main steps:
  - Install CE switch with firmware which included lxc environment.

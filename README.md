@@ -32,12 +32,12 @@ Example usage
 
 Start ovsdb-server before starting ovs-vswitchd itself:
 
-$ ovsdb-server --remote=punix:/usr/local/var/run/openvswitch/db.sock \
-                     --remote=db:Open_vSwitch,Open_vSwitch,manager_options \
-                     --private-key=db:Open_vSwitch,SSL,private_key \
-                     --certificate=db:Open_vSwitch,SSL,certificate \
-                     --bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert \
-                     --pidfile --detach
+$ ovsdb-server --remote=punix:/usr/local/var/run/openvswitch/db.sock 
+               --remote=db:Open_vSwitch,Open_vSwitch,manager_options 
+               --private-key=db:Open_vSwitch,SSL,private_key 
+               --certificate=db:Open_vSwitch,SSL,certificate 
+               --bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert 
+               --pidfile --detach
 If you built Open vSwitch without SSL support, then omit --private-key, --certificate, and --bootstrap-ca-cert.
 
 Start client monitoring:
@@ -53,6 +53,7 @@ Configure the IP address of tunnel:
 $ vtep-ctl set physical_switch swich_name tunnel_ips=tunnel IP address
 
 References
+
 [1] Open vSwitch:
     < http://openvswitch.org >
 

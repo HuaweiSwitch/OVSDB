@@ -100,6 +100,29 @@ struct ovsdb_sub_port_key {
     char interface[OVSDB_SUB_INTERFACE_LEN];
 };
 
+enum OVSDB_CLIENT_CFG_TYPE
+{
+	OVSDB_CLIENT_CFG_LINKTYPE,
+	OVSDB_CLIENT_CFG_CONTROLLERIP,
+	OVSDB_CLIENT_CFG_CONTROLLERPORT,
+	OVSDB_CLIENT_CFG_SWITCHNAME,
+	OVSDB_CLIENT_CFG_DESCRIPTION,
+	OVSDB_CLIENT_CFG_SWITCHMANAGEIP,
+	OVSDB_CLIENT_CFG_TUNNERIP,
+	OVSDB_CLIENT_CFG_NETCONFIP,
+	OVSDB_CLIENT_CFG_NETCONFPORT,
+	OVSDB_CLIENT_CFG_NETCONFUSER,
+	OVSDB_CLIENT_CFG_NETCONFPW,
+	OVSDB_CLIENT_CFG_MAX,	
+};
+
+struct ovsdb_client_cfg_map {
+	char acType[32];
+	char acAttribute[256];
+	int (*pfnCheck)(void);
+};
+
+
 int ovsdb_sub_table_mac_add(char *mac, char *bd, char *interface, int mac_type);
 int ovsdb_sub_table_mac_delete();
 int ovsdb_sub_table_interface_add(char *interface);

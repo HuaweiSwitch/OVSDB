@@ -49,6 +49,7 @@
 #include "util.h"
 #include "vlog.h"
 #include "netconf/libnetconf.h"
+#include "netconf/libnetconf_ssh.h"
 #include "ovsdb-client.h"
 
 
@@ -109,9 +110,6 @@ int nve1_source_ip_configured = 0;
 
 /*global used for vtep transact*/
 struct logical_switch_uuid_and_vni logical_switch_info[TABLE_LOGICAL_SWITCH_NUM] = {0};
-
-/*device description*/
-char dev_desc[] = "CloudEngine series TOR";
 
 
 /*用于判断字符串内容是否相等,如果相等,返回1,否则返回0*/
@@ -781,24 +779,174 @@ void ce_undo_config_vxlan_tunnel_static_mac(char* ce_mac, char* source_ip, char*
 }
 
 #if 1
+
+struct ovsdb_client_cfg_map gast_ovsdb_client_cfg_map[OVSDB_CLIENT_CFG_MAX] =
+{
+	{"Link type:",          {0}, NULL},
+	{"Controller IP:",      {0}, NULL},
+	{"Controller port:",    {0}, NULL},
+	
+	{"Switch name:",        {0}, NULL},
+	{"Switch description:", {0}, NULL},
+	{"Manage IP:",          {0}, NULL},
+	{"Tunnel IP:",          {0}, NULL},
+	{"Netconf IP:",         {0}, NULL},
+	{"Netconf port:",       {0}, NULL},
+	{"Netconf user:",       {0}, NULL},
+	{"Netconf password:",   {0}, NULL},
+};
+
+int ovsdb_client_init_cfg(void)
+{
+	FILE*	fpCfg;
+	int 	i;
+	char	acTmp[512]      = {0};
+	char	*pcHead, *pcEnd;
+	
+	fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg","rb");
+	if (NULL == fpCfg) {
+		printf("\r\n[ERROR]Open ovsdb-client.cfg failed.");
+		return -1;
+	}
+	
+	while (!feof(fpCfg)) {
+		fgets(acTmp, 512, fpCfg);
+		
+		for (i = 0; i < OVSDB_CLIENT_CFG_MAX; i++) {
+			pcHead = strstr(acTmp, gast_ovsdb_client_cfg_map[i].acType);
+			if (NULL == pcHead){
+				continue;
+			}
+		
+			pcHead += strlen(gast_ovsdb_client_cfg_map[i].acType);
+			pcEnd = pcHead;
+		
+			while ((*pcEnd != '\0') && (*pcEnd != '\0') && (*pcEnd != '\r'))
+				pcEnd++;
+		
+			while ((*pcHead == ' ') && (pcHead != pcEnd))
+				pcHead++;
+		
+			if ((pcHead >= pcEnd)) ||
+				(sizeof(gast_ovsdb_client_cfg_map[i].acAttribute) <= (pcEnd - pcHead))) {
+				continue;
+			}
+		
+			memcpy(gast_ovsdb_client_cfg_map[i].acAttribute, pcHead, (pcEnd - pcHead));
+		}
+	}
+	
+	fclose(fpCfg);
+	
+	for(i = 0; i < OVSDB_CLIENT_CFG_MAX; i++) {
+		if (0 == strlen(gast_ovsdb_client_cfg_map[i].acAttribute)) {
+			printf("\r\n[ERROR]Cann't find \"%s\" selection.", 
+				gast_ovsdb_client_cfg_map[i].acType);
+			return -1;
+		}
+	}
+	
+	return 0;
+}
+
+#endif
+
+#if 1
 /*netconf session id*/
 struct nc_session* gst_netconf_session = NULL;
 struct nc_cpblts*  gst_cpblts          = NULL;
 
+char * netconf_ce_config_password(const char * username, const char * hostname)
+{
+	char * pcPW = xmalloc(256);
+	
+	if (NULL == pcPW)
+		return NULL;
+	
+	memcpy(pcPW, OVSDB_CLIENT_GET_STRING(OVSDB_CLIENT_CFG_NETCONFPW), 256);
+	
+	return pcPW;
+}
+
+int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session session)
+{
+	char* hexa;
+	int c, state, ret;
+	ssh_key srv_pubkey;
+	unsigned char *hash_sha1 = NULL;
+	size_t hlen;
+	enum ssh_keytypes_e srv_pubkey_type;
+	
+	state = ssh_is_server_known(session);
+	
+	ret = ssh_get_publickey(session, &srv_pubkey);
+	if (ret < 0){
+		OVSDB_PRINTF_DEBUG("Unable to get server public key.");
+		return -1;
+	}
+			
+	srv_pubkey_type = ssh_key_type(srv_pubkey);
+	ret = ssh_get_publickey_hash(srv_pubkey, SSH_PUBLICKEY_HASH_SHA1, &hash_sha1, &hlen);
+	ssh_key_free(srv_pubkey);
+	if (ret < 0) {
+		OVSDB_PRINTF_DEBUG("Failed to calculate SHA1 hash of server public key.");
+		return -1;
+	}
+	
+	hexa = ssh_get_hexa(hash_sha1, hlen);
+	
+	switch (state) {
+	case SSH_SERVER_KNOWN_OK:
+		break; /* ok */
+	
+	case SSH_SERVER_KNOWN_CHANGED:
+		OVSDB_PRINTF_DEBUG("Remote host key changed, the connection will be terminated!");
+		goto fail;
+	
+	case SSH_SERVER_FOUND_OTHER:
+		OVSDB_PRINTF_DEBUG("The remote host key was not found but another type of key was, the connection will be terminated.");
+		goto fail;
+	
+	case SSH_SERVER_FILE_NOT_FOUND:
+		OVSDB_PRINTF_DEBUG("Could not find the known hosts file.");
+		/* fallback to SSH_SERVER_NOT_KNOWN behavior */
+		
+	case SSH_SERVER_NOT_KNOWN:
+		/* store the key into the host file */
+		ret = ssh_write_knownhost(session);
+		if (ret < 0) {
+			OVSDB_PRINTF_DEBUG("Adding the known host %s failed (%s).", hostname, strerror(errno));
+		}
+		
+		break;
+	
+	case SSH_SERVER_ERROR:
+		ssh_clean_pubkey_hash(&hash_sha1);
+		//fprintf(stderr,"%s",ssh_get_error(session));
+		return -1;
+	}
+	
+	ssh_clean_pubkey_hash(&hash_sha1);
+	ssh_string_free_char(hexa);
+	return 0;
+	
+fail:
+	ssh_clean_pubkey_hash(&hash_sha1);
+	ssh_string_free_char(hexa);
+	return -1;
+}
+
 int netconf_ce_config_init()
 {
-    netconf_connect    stNetCon        = {0};
-
-    /* 1.用户输入netconf管理ip */
-    printf("connect ip: ");
-    scanf("%s",stNetCon.ip);
-
-    /* 2.用户输入netconf用户名 */
-    printf("username: ");
-    scanf("%s",stNetCon.username);
-
-    OVSDB_PRINTF_DEBUG("netconf ip: %s, username: %s\r\n", stNetCon.ip, stNetCon.username);
-
+	int port = 0;
+	
+	port = atoi(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFPORT));
+	
+    if (port <= 01 || port >= 65535)
+	{
+		return -1;
+	}
+	
     gst_cpblts = nc_cpblts_new(NULL);
     if (gst_cpblts == NULL)
     {
@@ -826,7 +974,13 @@ int netconf_ce_config_init()
     nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:notification:1.0");
     nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:interleave:1.0");
 
-    gst_netconf_session = nc_session_connect(stNetCon.ip, NETCONF_PORT, stNetCon.username, gst_cpblts);
+    nc_callback_ssh_host_authenticity_check(netconf_ce_ssh_hostkey_check_default));
+	nc_callback_sshhauth_password(netconf_ce_config_password);
+	
+	gst_netconf_session = nc_session_connetct(OVSDB_CLIENT_GET_STRING(OVSDB_CLIENT_CFG_NETCONFIP), (unsigned short)port, OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_GET_NETCONFUSER), gst_cpblts);
+	
+	
+	
     if (NULL == gst_netconf_session)
     {
         nc_cpblts_free(gst_cpblts);
@@ -1199,7 +1353,7 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
     if(nve1_source_ip_configured)
     {
         OVSDB_PRINTF_DEBUG("[ERROR]Nve 1 source ip is configured");
-        return OVSDB_ERR;
+        return OVSDB_OK;
     }
 
     /* 2.查询interface nve 1 是否存在*/
@@ -1685,6 +1839,13 @@ unsigned int netconf_ce_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
         OVSDB_PRINTF_DEBUG("[ERROR]TOR does not have a tunnel ip address.");
         return OVSDB_ERR;
     }
+	
+	/*3.1 确保Nve 1已经配置*/
+	uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+	if (OVSDB_OK != uiRet)
+	{
+		OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source before config VXLAN tunnel.");
+	}
 
     /* 4.配置vni uiVni head-end peer-list paDstIp */
     snprintf(send_data, sizeof(send_data),
@@ -1817,10 +1978,13 @@ unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDs
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
-        return OVSDB_ERR;
+		/*有可能多条隧道对应同一个vni,这里不应该返回错误 */
+        //return OVSDB_ERR;
     }
 
     /* 4.2.再删除VNI*/
+	/* 这里不能这样操作，会误删peer-list里面同vni里其他的peer*/
+	#if 0
     snprintf(send_data, sizeof(send_data),
         "<edit-config>"\
           "<target><running/></target>"\
@@ -1845,8 +2009,10 @@ unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDs
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s]", uiVni, paDstIp);
-        return OVSDB_ERR;
+		/*有可能多条隧道对应同一个vni,这里不应该返回错误 */
+        //return OVSDB_ERR;
     }
+	#endif
 
     return OVSDB_OK;
 }
@@ -2394,7 +2560,7 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
 
     if((!new_vlan_binding)||(!old_vlan_binding))    /*说明更新和vlan_binding无关，可能是更新的description之类的*/
     {
-        OVSDB_PRINTF_DEBUG("port tabel update has nothing to do with vlan_binding.");
+        OVSDB_PRINTF_DEBUG("port table update has nothing to do with vlan_binding.");
         return;
     }
 
@@ -2639,7 +2805,7 @@ void ovsdb_switch_update_management_ips_process(struct json *new, struct json *o
 
     if((!new_management_ips)||(!old_management_ips))    /*说明更新和managemenet ip无关，可能是更新的description之类的*/
     {
-        OVSDB_PRINTF_DEBUG("physical switch tabel update has nothing to do with management_ips.");
+        OVSDB_PRINTF_DEBUG("physical switch table update has nothing to do with management_ips.");
         return;
     }
 
@@ -2688,7 +2854,7 @@ void ovsdb_switch_update_tunnel_ips_process(struct json *new, struct json *old, 
 
     if((!new_tunnel_ips)||(!old_tunnel_ips))    /*说明更新和tunnel ip无关，可能是更新的description之类的*/
     {
-        OVSDB_PRINTF_DEBUG("physical switch tabel update has nothing to do with tunnel_ips.");
+        OVSDB_PRINTF_DEBUG("physical switch table update has nothing to do with tunnel_ips.");
         return;
     }
 
@@ -2738,7 +2904,7 @@ void ovsdb_mcast_remote_update_locator_set_process(struct json *new, struct json
 
     if((!new_locator_set)||(!old_locator_set))    /*说明更新和locator_set无关*/
     {
-        OVSDB_PRINTF_DEBUG("mcast_remote tabel update has nothing to do with locator_set.");
+        OVSDB_PRINTF_DEBUG("mcast_remote table update has nothing to do with locator_set.");
         return;
     }
 
@@ -2777,7 +2943,7 @@ void ovsdb_mcast_local_update_locator_set_process(struct json *new, struct json 
 
     if((!new_locator_set)||(!old_locator_set))    /*说明更新和locator_set无关*/
     {
-        OVSDB_PRINTF_DEBUG("mcast_remote tabel update has nothing to do with locator_set.");
+        OVSDB_PRINTF_DEBUG("mcast_remote table update has nothing to do with locator_set.");
         return;
     }
 
@@ -4221,6 +4387,18 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                             }
                         }
 
+						/*如果是本端的vtep ip，则删除Nve接口*/
+						if((ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]) && (ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
+						{
+							if(string_equals(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0], ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
+							{
+								uiRet = netconf_ce_undo_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+								if (OVSDB_OK != uiRet)
+								{
+									OVSDB_PRINTF_DEBUG("[ERROR]Failed to undo Nve 1.");
+								}
+							}
+						}
                         /*释放空间*/
                         if(ovsdb_vtep_db_table.table_physical_locator[j].dst_ip)
                         {
@@ -4613,11 +4791,17 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
                 int i=0;
                 struct json *port_name;
                 struct json *port_des;
+				struct json *port_vlan_bindings;
 
                 port_name = shash_find_data(json_object(new), "name");/*find name  in table*/
                 port_des = shash_find_data(json_object(new), "description");/*find description  in  table*/
+				port_vlan_bindings = shash_find_data(json_object(new), "vlan_bindings");
+				
 
-                for(i=0; i<TABLE_PHYSICAL_PORT_NUM; i++)
+               
+
+
+ 			    for(i=0; i<TABLE_PHYSICAL_PORT_NUM; i++)
                 {
                     /*获取表中的第一个不为0的表项*/
                     if(!uuid_is_zero(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self))
@@ -4642,10 +4826,116 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
 
                         /*vlan bingding*/
                         /*vlan bingding的处理逻辑不正确，有时间重写一下*/
-                        ovsdb_port_add_vlanbinding_process(new, old, node_name);
-
+                        //ovsdb_port_add_vlanbinding_process(new, old, node_name);
+						
+						/*port中有vlan binding才继续处理*/
+						if(port_vlan_bindings)
+						{
+							struct json *new_vlanbinding_elems;
+							struct json_array *new_vlanbinding_elems_array;
+							int new_vlanbinding_elem_num = 0;
+							int m = 0;
+							int add_port_map_exist = 0;
+							int j = 0;
+							int k = 0;
+							int vlanid = 4096;
+							int vni_temp = 0;
+							struct uuid uuid_ls;
+							unsigned int uiRet = 0;
+							
+							new_vlanbinding_elems = json_array(port_vlan_bindings)->elems[1]; /*elems[0]* is "map" string*/
+							new_vlanbinding_elems_array = json_array(new_vlanbinding_elems);
+							new_vlanbinding_elem_num = new_vlanbinding_elems_array->n;
+							
+							/*检查switch_vxlan_map全局变量中是否已经有该port的映射*/
+							for(m=0; m<TABLE_PHYSICAL_PORT_NUM; m++)
+							{
+								if(uuid_equals(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self, &switch_vxlan_map[m].port_uuid))
+								{
+									add_port_map_exist = 1;
+									break;
+								}
+							}
+							
+							if(!add_port_map_exist)
+							{
+								for(m=0; m<TABLE_PHYSICAL_PORT_NUM; m++)
+								{
+									if(uuid_is_zero(&switch_vxlan_map[m].port_uuid))
+									{
+										memcpy(&switch_vxlan_map[m].port_uuid, 
+											&ovsdb_vtep_db_table.table_physical_port[i].uuid_self,
+											sizeof(ovsdb_vtep_db_table.table_physical_port[i].uuid_self));
+										break;
+									}
+								}
+							}
+							
+							for(m=0; m<TABLE_PHYSICAL_PORT_NUM; m++)
+							{
+								if(uuid_equals(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self, &switch_vxlan_map[m].port_uuid))
+								{
+									for(j=0; j<new_vlanbinding_elem_num; j++)
+									{
+										vlanid = json_integer(json_array(new_vlanbinding_elems_array->elem[j])->elems[0]);
+										
+										if((vlanid > 4093)||(vlanid<0))
+										{
+											OVSDB_PRINTF_DEBUG("vlan_id is not valid, which is %d.",vlanid);
+										}
+										if(switch_vxlan_map[m].vlan_vni_map[vlanid].used_bit)
+										{
+											OVSDB_PRINTF_DEBUG("vlan_id %d mapping is exist, do not process.",vlanid);
+										}
+										else
+										{
+											OVSDB_PRINTF_DEBUG("vlan_id %d mapping is absent, now do process." vlanid);
+											uuid_from_string(&uuid_ls, json_string(json_array(new_vlanbinding_elems_array->elems[j])->elems[1])->elems[1]));
+											for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
+											{
+												if(uuid_equals(&ovsdb_vtep_db_table.table_logical_switch[k].uuid_self, &uuid_ls))
+												{
+													vni_temp = ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key;
+													break;
+												}
+											}
+											
+											if(vni_temp > 4095)
+											{
+												switch_vxlan_map[m].vlan_vni_map[vlanid].vni = vni_temp;
+												switch_vxlan_map[m].vlan_vni_map[vlanid].used_bit = 1;
+												
+												/*配置子接口和vxlan映射*/
+												
+												//ce_config_port(vlanid, switch_vxlan_map[i].vlan_vni_map[vlanid].vni, port_name);
+												uiRet = netconf_ce_config_port(vlanid, switch_vxlan_map[m].vlan_vni_map[vlanid].vni, ovsdb_vtep_db_table.table_physical_port[i].name);
+												if (OVSDB_OK != uiRet)
+												{
+													OVSDB_PRINTF_DEBUG("[ERROR]Failed to config subinterface when processing port vlanbinding.");
+													return;
+												}
+												
+												/*往ovsdb_vtep_db_table全局变量中也写一下*/
+												ovsdb_vtep_db_table.table_physical_port[i].vlan_bindings.vlan_bindings[vlanid].vlan_id = vlanid; /*这里也把vlanid作为下标，好与switch_vxlan_map对应*/
+												memcpy(&ovsdb_vtep_db_table.table_physical_port[i].vlan_bindings.vlan_bindings[vlanid].uuid_logic_switch, &ovsdb_vtep_db_table.table_logical_switch[k].uuid_self,
+													sizeof(ovsdb_vtep_db_table.table_logical_switch[k]));
+											}
+										}
+									}
+									
+									break;
+								}
+							}
+							
+						}
+						/*port中没有vlan binding，记录日志，方便定位*/
+						else 
+						{
+							OVSDB_PRINTF_DEBUG("init or insert port %s do not have vlan binding", ovsdb_vtep_db_table.table_physical_port[i].name);
+						}
+						
                         break;
-
+				
                     }
                 }
                 break;
@@ -5015,7 +5305,7 @@ void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                                     ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
                                     ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);*/
 
-                                uiRet = netconf_ce_config_vxlan_tunnel_static_mac(
+                                uiRet = netconf_ce_undo_config_vxlan_tunnel_static_mac(
                                     mac_ce,
                                     ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
                                     ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
@@ -5604,6 +5894,7 @@ void arp_sources_remote_table_process_2(struct jsonrpc *rpc, struct json *new, s
 }
 
 
+
 void
 monitor_print_table(struct json *table_update,
                     const struct monitored_table *mt, char *caption,
@@ -5837,6 +6128,7 @@ add_monitored_table(int argc, char *argv[],
     json_object_put(monitor_requests, table->name, monitor_request_array);
 }
 
+
 void do_table_process(struct jsonrpc *rpc, struct json *table_updates,
               const struct monitored_table *mts, size_t n_mts,
               bool initial)
@@ -6052,10 +6344,12 @@ do_monitor(struct jsonrpc *rpc, const char *database,
                        && json_equal(msg->id, request_id)) {
                 monitor_print(msg->result, mts, n_mts, true);
 
+
                 OVSDB_PRINTF_DEBUG("Begin to print monitor INIT json.");
                 print_json(msg->result);
                 putchar('\n');
                 OVSDB_PRINTF_DEBUG("End to print monitor INIT json.");
+				
 
                 fflush(stdout);
                 daemonize_complete();
@@ -6312,6 +6606,7 @@ do_dump(struct jsonrpc *rpc, const char *database,
 }
 
 
+
 void
 do_transact_temp(struct jsonrpc *rpc, char *json_char)
 {
@@ -6452,8 +6747,108 @@ do_transact_temp_query_logical_switch(struct jsonrpc *rpc, int *ls_num, struct l
 }
 
 
+void do_transact_temp_query_logical_switch_has_mcast_local_record(struct jsonrpc *rpc, struct uuid *ls_uuid, int *ls_has_mcast_local_record, struct uuid *mac_uuid)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ls;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    int rows_elem_num=0;
+    
+	char json_char[1000]={0};
+	
+	snprintf(json_char, 1000, 
+            "[\"hardware_vtep\",{\"columns\":[\"ipaddr\",\"_uuid\",\"logical_switch\",\"logical_set\",\"MAC\"],"
+            "\"table\":\"Mcast_Macs_Local\",\"where\":[[\"logical_switch\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"select\"}]",
+			UUID_ARGS(ls_uuid));
+			
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    
+	
+	ls = json_array(reply->result);
+    elem_0 = ls->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+    rows_elem_num = rows_elem->n;
+    if(!rows_elem_num)
+    {
+        *ls_has_mcast_local_record = 0;
+		OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
+    }
+    else
+    {
+        struct json* mac_instance;
+		struct json* uuid_mac;
+		struct json_array* uuid_array;
+		
+		*ls_has_mcast_local_record = 1;
+		OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has mcast local record.", UUID_ARGS(ls_uuid));
+		
+		/*理论上只会有一条记录*/
+		mac_instance = rows_elem->elems[0];
+		uuid_mac = shash_find_data(json_object(mac_instance), "_uuid");
+		uuid_array = json_array(uuid_mac);
+		(void)uuid_from_string(mac_uuid, json_string(uuid_array->elems[1]));
+
+    }
+
+
+    jsonrpc_msg_destroy(reply);
+}
+
+void do_transact_temp_query_logical_switch_has_ucast_remote_record(struct jsonrpc *rpc, struct uuid *ls_uuid, int *ls_has_mcast_local_record)
+{
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *ls;
+    struct json *elem_0;
+    struct json *rows;
+    struct json_array *rows_elem;
+    int rows_elem_num=0;
+    
+	char json_char[1000]={0};
+	
+	snprintf(json_char, 1000, 
+            "[\"hardware_vtep\",{\"columns\":[\"ipaddr\",\"_uuid\",\"logical_switch\",\"logical_set\",\"MAC\"],"
+            "\"table\":\"Ucast_Macs_Remote\",\"where\":[[\"logical_switch\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"select\"}]",
+			UUID_ARGS(ls_uuid));
+			
+    transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    
+	
+	ls = json_array(reply->result);
+    elem_0 = ls->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    rows_elem = json_array(rows);
+    rows_elem_num = rows_elem->n;
+    if(!rows_elem_num)
+    {
+        *ls_has_mcast_local_record = 0;
+		OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
+    }
+    else
+    {
+		*ls_has_mcast_local_record = 1;
+		OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has mcast local record.", UUID_ARGS(ls_uuid));
+    }
+
+
+    jsonrpc_msg_destroy(reply);
+}
+
+
 void
-do_transact_temp_query_locator_dstip(struct jsonrpc *rpc, char *json_char, int *pl_exist,  char* pl_dst_ip)
+do_transact_temp_query_locator_dstip(struct jsonrpc *rpc, char *json_char, int *pl_exist, char* pl_dst_ip)
 {
     struct jsonrpc_msg *request, *reply;
     struct json *transaction;
@@ -6461,7 +6856,7 @@ do_transact_temp_query_locator_dstip(struct jsonrpc *rpc, char *json_char, int *
     struct json *elem_0;
     struct json *rows;
     struct json_array *rows_elem;
-    int rows_elem_num=0;
+    int rows_elem_num = 0;
     struct json *dst_ip;
 
     transaction = parse_json(json_char);
@@ -6473,105 +6868,22 @@ do_transact_temp_query_locator_dstip(struct jsonrpc *rpc, char *json_char, int *
     elem_0 = pl->elems[0];
     rows = shash_find_data(json_object(elem_0), "rows");
     rows_elem = json_array(rows);
-    rows_elem_num = rows_elem->n;
+	rows_elem_num = rows_elem->n;
 
-    if(!rows_elem_num)
+    if(!rows_elem->n)
     {
         *pl_exist = 0;
+
     }
     else
     {
         *pl_exist = 1;
-        dst_ip = shash_find_data(json_object(rows_elem->elems[0]), "dst_ip");
+        dst_ip = shash_find_data(json_object(rows_elem->elem[0]), "dst_ip");
         if(dst_ip)
         {
             memcpy(pl_dst_ip, json_string(dst_ip), strlen(json_string(dst_ip))+1);
         }
-    }
 
-    //print_json(reply->result);
-    //putchar('\n');
-    jsonrpc_msg_destroy(reply);
-}
-
-
-void
-do_transact_temp_query_switch_tunnel_ip(struct jsonrpc *rpc, char *json_char, char *tunnel_ip)
-{
-    struct jsonrpc_msg *request, *reply;
-    struct json *transaction;
-    struct json_array *ps;
-    struct json *elem_0;
-    struct json *rows;
-    struct json *rows_0;
-    struct json *tunnel_ips;
-
-    transaction = parse_json(json_char);
-
-    request = jsonrpc_create_request("transact", transaction, NULL);
-    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
-
-    ps = json_array(reply->result);
-    elem_0 = ps->elems[0];
-    rows = shash_find_data(json_object(elem_0), "rows");
-
-    if(!json_array(rows)->n)
-    {
-        OVSDB_PRINTF_DEBUG("there is no ps named CE6850HI.");
-        jsonrpc_msg_destroy(reply);
-        return;
-    }
-
-    rows_0 = json_array(rows)->elems[0];
-    tunnel_ips = shash_find_data(json_object(rows_0), "tunnel_ips");
-
-    if(JSON_STRING == tunnel_ips->type)
-    {
-       memcpy(tunnel_ip, json_string(tunnel_ips),strlen(json_string(tunnel_ips))+1);
-       OVSDB_PRINTF_DEBUG("physical switch tunnel ip is %s\n.", tunnel_ip);
-    }
-
-    jsonrpc_msg_destroy(reply);
-}
-
-
-
-void
-do_transact_temp_query_switch_management_ip(struct jsonrpc *rpc, char *json_char, char *management_ip)
-{
-    struct jsonrpc_msg *request, *reply;
-    struct json *transaction;
-    struct json_array *ps;
-    struct json *elem_0;
-    struct json *rows;
-    struct json *rows_0;
-    struct json *management_ips;
-
-    transaction = parse_json(json_char);
-
-    request = jsonrpc_create_request("transact", transaction, NULL);
-    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
-
-
-    ps = json_array(reply->result);
-    elem_0 = ps->elems[0];
-    rows = shash_find_data(json_object(elem_0), "rows");
-
-    if(!json_array(rows)->n)
-    {
-        OVSDB_PRINTF_DEBUG("there is no ps named CE6850HI.");
-        jsonrpc_msg_destroy(reply);
-        return;
-    }
-
-
-    rows_0 = json_array(rows)->elems[0];
-    management_ips = shash_find_data(json_object(rows_0), "management_ips");
-
-    if(JSON_STRING == management_ips->type)
-    {
-       memcpy(management_ip, json_string(management_ips),strlen(json_string(management_ips))+1);
-       OVSDB_PRINTF_DEBUG("physical switch tunnel ip is %s.", management_ip);
     }
 
     jsonrpc_msg_destroy(reply);
@@ -6626,15 +6938,19 @@ do_transact_temp_query_locator_uuid(struct jsonrpc *rpc, char *json_char, struct
 
 
 void
-do_transact_temp_query_physical_switch_exist(struct jsonrpc *rpc, char *json_char, int *ps_exist)
+do_transact_temp_query_physical_switch_exist(struct jsonrpc *rpc, int *ps_exist, char *tunnel_ip)
 {
     struct jsonrpc_msg *request, *reply;
     struct json *transaction;
     struct json_array *pl;
     struct json *elem_0;
     struct json *rows;
+	struct json_array *rows_elem;
+	int rows_elem_num = 0;
+	struct json *js_tunnel_ip;
+	char* json_query_physical_switch = "[\"hardware_vtep\",{\"columns\":[\"_uuid\",\"tunnel_ips\"],\"table\":\"Physical_Switch\",\"where\":[],\"op\":\"select\"}]";
 
-    transaction = parse_json(json_char);
+    transaction = parse_json(json_query_physical_switch);
 
     request = jsonrpc_create_request("transact", transaction, NULL);
     check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
@@ -6645,7 +6961,16 @@ do_transact_temp_query_physical_switch_exist(struct jsonrpc *rpc, char *json_cha
 
     if(json_array(rows)->n)
     {
-        *ps_exist = 1;
+		rows = shash_find_data(json_object(elem_0), "rows");
+		rows_elem = json_array(rows);
+		rows_elem_num = rows_elem->n;
+		js_tunnel_ip = shash_find_data(json_object(rows_elem->elems[0]),"tunnel_ips");
+		if (NULL == js_tunnel_ip) {
+			*ps_exist = 0;
+		} else {
+			snprintf(tunnel_ip, 128, "%s", json_string(js_tunnel_ip));
+			*ps_exist = 1;
+		} 
     }
     else
     {
@@ -7235,8 +7560,9 @@ void ovsdb_add_port(char *interface)
     (void)snprintf(json_insert_port, 512,
         "[\"hardware_vtep\",{\"op\":\"insert\", \"table\":\"Physical_Port\", "
         "\"row\":{\"name\":\"%s\"}, \"uuid-name\":\"anotheritem\" }, "
-        "{\"op\":\"mutate\", \"table\":\"Physical_Switch\", \"where\":[[\"name\",\"==\",\"CE6850HI\"]], "
-        "\"mutations\":[[\"ports\", \"insert\", [\"set\",[[\"named-uuid\", \"anotheritem\"]]]]] }]", interface);
+        "{\"op\":\"mutate\", \"table\":\"Physical_Switch\", \"where\":[[\"name\",\"==\",\"%s\"]], "
+        "\"mutations\":[[\"ports\", \"insert\", [\"set\",[[\"named-uuid\", \"anotheritem\"]]]]] }]", 
+		interface, OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_SWITCHNAME));
     do_transact_temp(rpc, json_insert_port);
 
     return;
@@ -7323,12 +7649,27 @@ int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
 
             if(uuid_is_zero(&phyical_locator_uuid))
             {
+				
                 OVSDB_PRINTF_DEBUG("Error! Does not find physical_locator uuid with ip %s.", tunnel_ip);
                 free(ls_uuid_s);
                 ls_uuid_s = NULL;
                 return -1;
+				
+				
+				OVSDB_PRINTF_DEBUG("Add MAC. The first local one");
+				
+				(void)snprintf(json_query, 1000,
+                    "[\"hardware_vtep\",{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
+                    "\"MAC\":\"%s\",\"locator\":[\"named-uuid\",\"locator_name\"]},\"table\":\"Ucast_Macs_Local\","
+                    "\"uuid-name\":\"mac_name\",\"op\":\"insert\"},{\"row\":{\"%s\",\"encapsulation_type\":\"vxlan_over_ipv4\"},"
+					"\"table\":\"Physical_Locator\",\"uuid-name\":\"locator_name\",\"op\":\"insert\"}]",
+                    UUID_ARGS(&ls_uuid_s[i]), mac, tunnel_ip);
+
+                do_transact_temp(rpc, json_query);
+                OVSDB_PRINTF_DEBUG("write a new ucast local table.");
             }
-            else
+            
+			else
             {
                 OVSDB_PRINTF_DEBUG("Add MAC.");
 
@@ -7341,7 +7682,7 @@ int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
                 do_transact_temp(rpc, json_query);
 
                 /*temp to delete*/
-                OVSDB_PRINTF_DEBUG("write a new ucast local tabel.");
+                OVSDB_PRINTF_DEBUG("write a new ucast local table.");
             }
 
             break;
@@ -7388,7 +7729,7 @@ void ovsdb_delete_mac(char *mac, char *bd, char *interface, int mac_type)
             UUID_ARGS(&ucast_local_uuid_s[j]));
         do_transact_temp(rpc, json_query_mac_local_uuid);
 
-        OVSDB_PRINTF_DEBUG("delete a old ucast local tabel.");
+        OVSDB_PRINTF_DEBUG("delete a old ucast local table.");
     }
 
     return;
@@ -7436,8 +7777,6 @@ ovsdb_query_mac_initial(struct jsonrpc *rpc)
     struct ovsdb_sub_mac_key key   = {0};
     struct ovsdb_sub_mac_data data = {0};
     struct ovsdb_sub_entry *entry = NULL;
-
-    struct uuid *logical_switch_uuid_s;
 
     transaction = parse_json(json_char);
 
@@ -7498,9 +7837,7 @@ ovsdb_query_mac_initial(struct jsonrpc *rpc)
 
     jsonrpc_msg_destroy(reply);
 
-    /* 交换表 */
-    //OVSDB_SUB_EXCHANGE_AGEINGTABLE(OVSDB_SUB_TABLE_MAC);
-
+    return;
 }
 
 void
@@ -7547,9 +7884,6 @@ ovsdb_query_port_initial(struct jsonrpc *rpc)
 
     jsonrpc_msg_destroy(reply);
 
-    /* 交换表 */
-    //OVSDB_SUB_EXCHANGE_AGEINGTABLE(OVSDB_SUB_TABLE_INTERFACE);
-
     return;
 }
 
@@ -7565,7 +7899,7 @@ void ovsdb_write_mcast_local(void *args)
     int j=0;
     int k=0;
     int l=0;
-    int time=0;
+    int time=8;
 
     args_local = (struct ovsdb_write_mcast_local_args *)args;
     tunnel_ip = args_local->tunnel_ip;
@@ -7613,41 +7947,47 @@ void ovsdb_write_mcast_local(void *args)
         {
             ls_info_exist =0;   /*首先置零*/
 
-            for(j=0; j<TABLE_LOGICAL_SWITCH_NUM; j++)
+            
+			
+			
+			
+			
+			
+			
+			for(j=0; j<TABLE_LOGICAL_SWITCH_NUM; j++)
             {
-                if(uuid_equals(&logical_switch_info[j].uuid_ls, &ls_info[i].uuid_ls))
-                {
-                    ls_info_exist = 1;  /*说明是老的logical_switch*/
-
-                    /*temp to delete*/
-                    //printf("old logical switch, j=%d\n", j);
-
-                    break;
-                }
-            }
-
-            if(!ls_info_exist)  /*新增的logical_switch*/
-            {
-
-                /*首先对于新增的ls，写一条mcast local表*/
-                /*下面开始写mcast-local表，对于第一个ls以及后续的ls，json不相同*/
-                /*原因是第一次会创建一个locator，后续不会创建locator,但是会引用第一次创建的locator*/
-                char json_insert_mcast_local[2000]={0};
-                int logical_switch_info_is_empty = 1;
-
-                for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
-                {
-                    if(!uuid_is_zero(&logical_switch_info[k].uuid_ls))
-                    {
-                        logical_switch_info_is_empty = 0;
-
-                        break;
-                    }
-                }
-
-                if(logical_switch_info_is_empty)    /*第一个logical_switch*/
-                {
-                    snprintf(json_insert_mcast_local, sizeof(json_insert_mcast_local),
+				int ls_has_mcast_local_record = 0;
+				int ls_has_ucast_local_record = 0;
+				struct uuid uuid_mac;
+				
+				
+				do_transact_temp_query_logical_switch_has_mcast_local_record(rpc, &ls_info[i].uuid_ls, &ls_has_mcast_local_record, &uuid_mac);
+				
+				
+				do_transact_temp_query_logical_switch_has_ucast_remote_record(rpc, &ls_info[i].uuid_ls, &ls_has_ucast_remote_record);
+				
+				
+				if((!ls_has_mcast_local_record)&&(ls_has_ucast_remote_record))
+				{
+					
+					struct uuid phyical_locator_uuid;
+					char json_query_locator_uuid[1000] = {0};
+					
+					uuid_zero(&phyical_locator_uuid);
+					
+					snprintf(json_query, sizeof(json_query_locator_uuid),
+							"[\"hardware_vtep\","\
+							"{\"columns\":[\"_uuid\",\"dst_ip\",\"encapsulation_type\"],"\
+							"\"table\":\"Physical_Locator\","\
+							"\"where\":[[\"dst_ip\",\"==\",\"%s\"]],\"op\":\"select\"}]",
+							tunnel_ip);
+					do_transact_temp_query_locator_uuid(rpc, json_query_locator_uuid, &phyical_locator_uuid);
+					
+				
+					if(uuid_is_zero(&phyical_locator_uuid))
+					{
+						char json_insert_mcast_local[2000]={0};
+						snprintf(json_insert_mcast_local, 2000,
                         "[\"hardware_vtep\","\
                         "{\"row\":{\"locators\":[\"named-uuid\",\"locator_uuid\"]},"\
                         "\"table\":\"Physical_Locator_Set\","\
@@ -7667,64 +8007,44 @@ void ovsdb_write_mcast_local(void *args)
                         UUID_ARGS(&ls_info[i].uuid_ls),tunnel_ip);
                     do_transact_temp(rpc, json_insert_mcast_local);
 
-                    /*temp to delete*/
-                    OVSDB_PRINTF_DEBUG("write a new mcast local tabel, it is the first one.");
+                    OVSDB_PRINTF_DEBUG("write a new mcast local entry. nve ip is without locator before");
                 }
-                else /*不是第一个logical_switch*/
+                
+				else /*不是第一个logical_switch*/
                 {
-                    /*需要先获取到tunnel ip对应的locator的uuid*/
-                    struct uuid phyical_locator_uuid;
-                    char json_query_locator_uuid[1000]={0};
-
-                    uuid_zero(&phyical_locator_uuid);
-
-                    snprintf(json_query_locator_uuid, sizeof(json_query_locator_uuid),
-                        "[\"hardware_vtep\","\
-                        "{\"columns\":[\"_uuid\",\"dst_ip\",\"encapsulation_type\"],"\
-                        "\"table\":\"Physical_Locator\","\
-                        "\"where\":[[\"dst_ip\",\"==\",\"%s\"]],\"op\":\"select\"}]",
-                        tunnel_ip);
-                    do_transact_temp_query_locator_uuid(rpc, json_query_locator_uuid, &phyical_locator_uuid);
-
-                    if(uuid_is_zero(&phyical_locator_uuid))
-                    {
-                        OVSDB_PRINTF_DEBUG("Error! Does not find physical_locator uuid with ip %s.", tunnel_ip);
-                    }
-                    else
-                    {
-                        snprintf(json_insert_mcast_local, sizeof(json_insert_mcast_local),
-                            "[\"hardware_vtep\",{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"\
-                            "\"locator_set\":[\"named-uuid\",\"locator_set_uuid\"],\"MAC\":\"unknown-dst\"},"\
-                            "\"table\":\"Mcast_Macs_Local\",\"uuid-name\":\"macst_local_uuid\","\
-                            "\"op\":\"insert\"},{\"row\":{\"locators\":[\"uuid\",\""UUID_FMT"\"]},"\
-                            "\"table\":\"Physical_Locator_Set\","\
-                            "\"uuid-name\":\"locator_set_uuid\",\"op\":\"insert\"}]",
-                            UUID_ARGS(&ls_info[i].uuid_ls), UUID_ARGS(&phyical_locator_uuid));
+                    char json_insert_mcast_local[2000]={0};
+                    snprintf(json_insert_mcast_local, 2000,
+                            "[\"hardware_vtep\",{\"row\":{\"locators\":[\"uuid\",\""UUID_FMT"\"]},"\table\":\"Physical_Locator_Set\","
+                            "\"uuid-name\":\"aa\",\"op\":\"insert\"},{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
+                            "\"locator_set\",[\"name-uuid\",\"aa\"],\"MAC\":\"unknown-dst\"},"\table\":"\Mcast_Macs_Local\","
+                            "\"uuid-name\":\"mcast_local_name\",\"op\":\"insert\"}]",
+                            UUID_ARGS(&phyical_locator_uuid), UUID_ARGS(&ls_info[i].uuid_ls));
                         do_transact_temp(rpc, json_insert_mcast_local);
 
-                        /*temp to delete*/
-                        OVSDB_PRINTF_DEBUG("write a new mcast local tabel.");
+                        OVSDB_PRINTF_DEBUG("write a new mcast local entry. nve ip is without locator before.");
                     }
+					
                 }
+				
+				
+				if((!ls_has_mcast_local_record)&&(ls_has_ucast_remote_record))
+				{
+					char json_delete_mcast_local[1000] = {0};
+					snprintf(json_delete_mcast_local, 2000,
+							"[\"hardware_vtep\",{"\table\":"\Mcast_Macs_Local\","
+							"\"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"delete\"}]",
+							UUID_ARGS(&uuid_mac));
+					do_transact_temp(rpc, json_delete_mcast_local);
+					VSDB_PRINTF_DEBUG("delete a new mcast local entry.");
 
-                /*然后将ls信息写入logical_switch_info结构体*/
-                for(l=0; l<TABLE_LOGICAL_SWITCH_NUM; l++)
-                {
-                    if(!uuid_is_zero(&logical_switch_info[l].uuid_ls))
-                    {
-                        continue;
-                    }
-                    else
-                    {
-                        memcpy(&logical_switch_info[l], &ls_info[i], sizeof(struct logical_switch_uuid_and_vni));
-                        break;
-                    }
-                }
 
-            }
-        }
+				}
+			}
 
-    }
+    
+	
+	
+		}
 
     free(ls_info);
     ls_info = NULL;
@@ -7739,6 +8059,9 @@ do_vtep(struct jsonrpc *rpc, const char *database,
     int ret = 0;
 
     OVSDB_PRINTF_DEBUG("Enter ovsdb-client do_vtep.");
+	
+	if (0 != ovsdb_client_init_cfg())
+		return;
 
     /* create netconf connection*/
     ret = netconf_ce_config_init();
@@ -7772,94 +8095,61 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
     struct ovsdb_write_mcast_local_args args;
     struct uuid uuid_global;
 
-    char tunnel_ip[1000]={0};
-    char management_ip[1000]={0};
-
+    char tunnel_ip[128]={0};
 
     /*1.检测到Global 有数据，将physical_switch Physical_Port信息写入OVSDB*/
+    /*检测Global表是否存在.这种方法是否靠谱?是否要改成Manager表?*/
+    /*3.16最好改成manager表，因为发现增加一个ls，global表也会有*/
+    OVSDB_PRINTF_DEBUG("\Detect whether controller is connected.");
 
+    int global_uuid_num;
+    int physical_switch_exist = 0;
+
+    //char* json_query_global_uuid="[\"hardware_vtep\",{\"columns\":[\"_uuid\"],\"table\":\"Global\",\"where\":[],\"op\":\"select\"}]";
+    char json_insert_ps[1000]={0};
+    //char json_insert_port[1000]={0};
+
+
+    uuid_zero(&uuid_global);
+    for(;;)
     {
-        /*检测Global表是否存在.这种方法是否靠谱?是否要改成Manager表?*/
-        /*3.16最好改成manager表，因为发现增加一个ls，global表也会有*/
-        OVSDB_PRINTF_DEBUG("\Detect whether controller is connected.");
+        /*a short delay*/
+        //int cnt=0;
+        //do{cnt++;}while(cnt < 100000000);
+        sleep(1);
 
-        int global_uuid_num;
-        int physical_switch_exist = 0;
-
-        //char* json_query_global_uuid="[\"hardware_vtep\",{\"columns\":[\"_uuid\"],\"table\":\"Global\",\"where\":[],\"op\":\"select\"}]";
-        char* json_query_physical_switch="[\"hardware_vtep\",{\"columns\":[\"_uuid\"],\"table\":\"Physical_Switch\",\"where\":[],\"op\":\"select\"}]";
-        char json_insert_ps[1000]={0};
-        //char json_insert_port[1000]={0};
-
-
-        uuid_zero(&uuid_global);
-        for(;;)
+        do_transact_temp_query_global(rpc, &global_uuid_num, &uuid_global);
+        if(global_uuid_num)
         {
-            /*a short delay*/
-            //int cnt=0;
-            //do{cnt++;}while(cnt < 100000000);
-            sleep(1);
-
-            do_transact_temp_query_global(rpc, &global_uuid_num, &uuid_global);
-            if(global_uuid_num)
-            {
                 OVSDB_PRINTF_DEBUG("Global Table is present.");
                 break;
-            }
         }
+    }
 
         /*首先检查是否已有physical switch，*/
 
-        do_transact_temp_query_physical_switch_exist(rpc, json_query_physical_switch, &physical_switch_exist);
-
-
-        if(!physical_switch_exist)
+        do_transact_temp_query_physical_switch_exist(rpc, &physical_switch_exist, tunnel_ip);
+		if(!physical_switch_exist)
         {
             /*写Physical_Switch表*/
             OVSDB_PRINTF_DEBUG("Write Physical_Switch info to OVSDB.");
             OVSDB_PRINTF_DEBUG("global table uuid ="UUID_FMT, UUID_ARGS(&uuid_global));
             snprintf(json_insert_ps, 1000,
                 "[\"hardware_vtep\",{\"op\":\"insert\", \"table\":\"Physical_Switch\", "
-                "\"row\":{\"name\":\"CE6850HI\",\"description\":\"%s\"}, \"uuid-name\":\"anotheritem\" }, "
+                "\"row\":{\"name\":\"%s\",\"description\":\"%s\"}, \"tunnel_ips\":\"%s\",\"management_ips\":\"%s\"}, "
+				"\"uuid-name\":\"anotheritem\" },"
                 "{\"op\":\"mutate\", \"table\":\"Global\", \"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]], "
                 "\"mutations\":[[\"switches\", \"insert\", [\"set\",[[\"named-uuid\", \"anotheritem\"]]]]] }]",
-                dev_desc, UUID_ARGS(&uuid_global));
+                OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_SWITCHNAME),
+				OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_DESCRIPTION),
+				OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP),
+				OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_SWITCHMANAGEIP),
+				UUID_ARGS(&uuid_global));
             OVSDB_PRINTF_DEBUG("json_insert_ps=%s.", json_insert_ps);
             do_transact_temp(rpc, json_insert_ps);
-        }
-    }
-
-
-    /*检测名为Huawei-CE6850HI的switch是否含有tunnel-ip,因为tunnel ip是写下面的mcast local表的必要条件*/
-    {
-        OVSDB_PRINTF_DEBUG("Detect whether physical switch has tunnel ip.");
-        char* json_query_switch_tunnel_ip="[\"hardware_vtep\",{\"columns\":[\"tunnel_ips\",\"name\",\"management_ips\",\"switch_fault_status\",\"_uuid\",\"description\"],\"table\":\"Physical_Switch\",\"where\":[[\"name\",\"==\",\"CE6850HI\"]],\"op\":\"select\"}]";
-        for(;;)
-        {
-            sleep(1);
-            do_transact_temp_query_switch_tunnel_ip(rpc, json_query_switch_tunnel_ip, tunnel_ip);
-            if(tunnel_ip[0])
-            {
-                break;
-            }
-        }
-    }
-
-
-    /*检测名为Huawei-CE6850HI的switch是否含有management-ip,因为tunnel ip是写下面的mcast local表的必要条件*/
-    {
-        OVSDB_PRINTF_DEBUG("Detect whether physical switch has management ip.");
-        char* json_query_switch_management_ip="[\"hardware_vtep\",{\"columns\":[\"tunnel_ips\",\"name\",\"management_ips\",\"switch_fault_status\",\"_uuid\",\"description\"],\"table\":\"Physical_Switch\",\"where\":[[\"name\",\"==\",\"CE6850HI\"]],\"op\":\"select\"}]";
-        for(;;)
-        {
-            sleep(1);
-            do_transact_temp_query_switch_management_ip(rpc, json_query_switch_management_ip, management_ip);
-            if(management_ip[0])
-            {
-                break;
-            }
-        }
-    }
+        
+			sprintf(tunnel_ip, 128, "%s", OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP));
+		}
 
     args.rpc = rpc;
     args.tunnel_ip = tunnel_ip;
@@ -7887,6 +8177,81 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
     ovsdb_write_mcast_local(&args);
 }
 
+
+void ovsdb_set_manager(struct jsonrpc *rpc)
+{
+	struct json_char[512] = {0};
+	unsigned int i;
+	char *p;
+    struct jsonrpc_msg *request, *reply;
+    struct json *transaction;
+    struct json_array *pl;
+    struct json *elem_0;
+    struct json *rows;
+	struct json_array *rows_elem;
+    struct json *pl_0;
+    struct uuid ui_manager = {0};
+	struct uuid ui_global = {0};
+	char c_manager[64] = {0};
+	char c_global[64] = {0}；
+	
+	
+	(void)snprintf(json_char, 512, 
+            "[\"hardware_vtep\",{\"columns\":[\"_uuid\","\
+            "\"table\":\"Manager\",\"where\":[],\"op\":\"select\"}]");
+    
+	transaction = parse_json(json_char);
+
+    request = jsonrpc_create_request("transact", transaction, NULL);
+    check_txn(jsonrpc_transact_block(rpc, request, &reply), &reply);
+
+    pl = json_array(reply->result);
+    elem_0 = pl->elems[0];
+    rows = shash_find_data(json_object(elem_0), "rows");
+    if(0 != json_array(rows)->n)
+    {
+        jsonrpc_msg_destroy(reply);
+        return;
+    }
+
+    jsonrpc_msg_destroy(reply);
+	
+	
+	uuid_generate(&ui_manager);
+	uuid_generate(&ui_global);
+	
+	snprintf(c_manager, 64, "row"UUID_FMT, UUID_ARGS(&ui_manager));
+	for (p = c_manager; *p != '\0'; p++) {
+		if (*p == '-'){
+			*p = '_';
+		}
+	}
+	
+	snprintf(c_global, 64, "row"UUID_FMT, UUID_ARGS(&ui_global));
+	for (p = c_global; *p != '\0'; p++) {
+		if (*p == '-'){
+			*p = '_';
+		}
+	}
+	
+	(void)snprintf(json_char, 512,
+        "[\"hardware_vtep\",{\"row\":{\"target\":\"%s:%s:%s\"},"
+        "\"table\":\"Manager\":\"uuid-name\":\"%s\",\"op\":\"insert\"},"
+		"\"row\":{\"managers\":[\"named-uuid\",\"%s\"]},"
+        "\"table\":\"Global\":\"uuid-name\":\"%s\",\"op\":\"insert\"}],",
+        OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_LINKTYPE),
+		OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_CONTROLLERIP),
+		OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_CONTROLLERPORT),
+		c_manager, c_manager, c_global);
+	
+	printf("\r\n%s\r\n", json_char);
+	
+	do_transact_temp(rpc, json_char);
+	
+	return;
+}
+
+
 void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
         int argc , char *argv[] )
 {
@@ -7906,7 +8271,9 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     struct monitored_table *mts;
     size_t n_mts, allocated_mts;
 
-    daemon_save_fd(STDOUT_FILENO);
+    ovsdb_set_manager(rpc);
+	
+	daemon_save_fd(STDOUT_FILENO);
     daemonize_start();
     if (get_detach()) {
         int error;

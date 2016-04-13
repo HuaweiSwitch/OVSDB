@@ -1,0 +1,14 @@
+1. Manager information:
+Link type: ssl
+Controller IP: 192.168.10.100
+Controller port: 6632
+
+2. Switch information:
+Switch name: Huawei-CE6850HI
+Switch description: Huawei CloudEngine series TOR
+Manage IP: 192.168.13.1
+Tunnel IP: 1.1.1.10
+Netconf IP: 192.168.13.1
+Netconf port: 22
+Netconf user: rootDC
+Netconf password: Admin@123

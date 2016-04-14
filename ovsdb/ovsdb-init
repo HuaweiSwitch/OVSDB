@@ -5,7 +5,7 @@ manage=192.168.13.1
 
 start_ovsdb()
 {
-    ovsdb-server --bootstrap-ca-cert=/etc/openvswitch/vswitchd3.cacert -p /etc/openvswitch/vtep-privkey.pem -c /etc/openvswitch/vtep-cert.pem /usr/local/etc/openvswitch/conf.db -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --remote=punix:/usr/local/var/run/openvswitch/db.sock --remote=db:hardware_vtep,Global,managers --no-chdir --log-file=/usr/local/log/run/openvswitch/ovsdb-server.log --pidfile=/usr/local/var/run/openvswitch/ovsdb-server.pid --detach --monitor --remote=ptcp:8111
+    ovsdb-server --bootstrap-ca-cert=/etc/openvswitch/vswitchd3.cacert -p /etc/openvswitch/vtep-privkey.pem -c /etc/openvswitch/vtep-cert.pem /usr/local/etc/openvswitch/conf.db -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --remote=punix:/usr/local/var/run/openvswitch/db.sock --remote=db:hardware_vtep,Global,managers --no-chdir --log-file=/usr/local/var/log/openvswitch/ovsdb-server.log --pidfile=/usr/local/var/run/openvswitch/ovsdb-server.pid --detach --monitor --remote=ptcp:8111
     ssh-keygen -f "/root/.ssh/known_hosts" -R $manage
     echo `date +'%Y-%m-%d %H:%M:%S'` start server OK >> /var/log/ovsdb-init.log
     ovsdb-client vtep monitor &
@@ -21,7 +21,7 @@ ping_fun()
     echo `date +'%Y-%m-%d %H:%M:%S'` start >> /var/log/ovsdb-init.log
     for ((num=1;num<=10;num++));do
         ping -c $count $host &>/dev/null
-        if [ $? = 0];then
+        if [ $? = 0 ];then
             echo `date +'%Y-%m-%d %H:%M:%S'` ping OK >> /var/log/ovsdb-init.log
             sleep 3
             start_ovsdb

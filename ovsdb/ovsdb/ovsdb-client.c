@@ -974,7 +974,7 @@ int netconf_ce_config_init()
     nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:notification:1.0");
     nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:interleave:1.0");
 
-    nc_callback_ssh_host_authenticity_check(netconf_ce_ssh_hostkey_check_default));
+    nc_callback_ssh_host_authenticity_check(netconf_ce_ssh_hostkey_check_default);
     nc_callback_sshauth_password(netconf_ce_config_password);
     
     gst_netconf_session = nc_session_connect(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFIP),
@@ -6814,7 +6814,7 @@ void do_transact_temp_query_logical_switch_has_ucast_remote_record(struct jsonrp
     
     snprintf(json_char, 1000, 
             "[\"hardware_vtep\",{\"columns\":[\"ipaddr\",\"_uuid\",\"logical_switch\",\"MAC\"],"
-            "\"table\":\"Ucast_Macs_Remote\",\"where\":[[\"logical_switch\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"select\"}]",
+            "\"table\":\"Ucast_Macs_Remote\",\"where\":[[\"logical_switch\",\"==\",[\"uuid\", \""UUID_FMT"\"]]],\"op\":\"select\"}]",
             UUID_ARGS(ls_uuid));
             
     transaction = parse_json(json_char);
@@ -8019,7 +8019,7 @@ void ovsdb_write_mcast_local(void *args)
             }
             
             /* É¾³ýÒ»Ìõmcast local±í */
-            if((!ls_has_mcast_local_record)&&(!ls_has_ucast_remote_record))
+            if((ls_has_mcast_local_record)&&(!ls_has_ucast_remote_record))
             {
                 char json_delete_mcast_local[1000] = {0};
                 snprintf(json_delete_mcast_local, 2000,

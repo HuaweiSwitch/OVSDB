@@ -8030,6 +8030,7 @@ void ovsdb_write_mcast_local(void *args)
                 OVSDB_PRINTF_DEBUG("delete a mcast local entry.");
             }
         }
+    }
 
     free(ls_info);
     ls_info = NULL;

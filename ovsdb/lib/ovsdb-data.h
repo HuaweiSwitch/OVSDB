@@ -32,7 +32,7 @@
 #define MAX_NETCONF_USERNAME_LEN      256
 #define NETCONF_PORT                  22
 #define MAX_IP_V4_LEN                 15
-#define NETCONF_SEND_DATA_LEN         2501
+#define NETCONF_SEND_DATA_LEN         2601
 #define MAX_VNI_ID                    32768
 #define MIN_VNI_ID                    4096
 #define MAX_VLAN_ID                   4063
@@ -67,13 +67,6 @@ else                                    \
 {                                       \
     str = 0;                            \
 }
-
-/* netconf连接必备字段 */
-typedef struct tag_netconf_connect
-{
-    char ip[MAX_IP_V4_LEN+1];
-    char username[MAX_NETCONF_USERNAME_LEN];
-}netconf_connect;
 
 struct ds;
 struct ovsdb_symbol_table;
@@ -750,10 +743,7 @@ void do_transact_temp(struct jsonrpc *rpc, char *json_char);
 void do_transact_temp_query_global(struct jsonrpc *rpc, int* global_uuid_num, struct uuid *uuid_global);
 void do_transact_temp_query_logical_switch(struct jsonrpc *rpc, int* ls_num, struct logical_switch_uuid_and_vni *ls_info);
 void do_transact_temp_query_locator_dstip(struct jsonrpc *rpc, char *json_char, int *pl_exist,  char* pl_dst_ip);
-void do_transact_temp_query_switch_tunnel_ip(struct jsonrpc *rpc, char *json_char, char* tunnel_ip);
-void do_transact_temp_query_switch_management_ip(struct jsonrpc *rpc, char *json_char, char *management_ip);
 void do_transact_temp_query_locator_uuid(struct jsonrpc *rpc, char *json_char, struct uuid *locator_uuid);
-void do_transact_temp_query_physical_switch_exist(struct jsonrpc *rpc, char *json_char, int *ps_exist);
 void do_transact_temp_query_port_binding_logical_switch(struct jsonrpc *rpc, char *json_char ,int *ls_num, struct uuid *ls_uuids);
 void do_transact_temp_query_logical_switch_tunnel_key(struct jsonrpc *rpc, char *json_char ,int *tunnel_key_exist, int *tunnel_key);
 void do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_char ,char* dst_ip);

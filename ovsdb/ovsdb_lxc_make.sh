@@ -19,6 +19,7 @@ cp ovsdb/ovsdb-tool                                        ovsdb_dir/
 cp vtep/vtep-ctl                                           ovsdb_dir/
 cp vtep/vtep.ovsschema                                     ovsdb_dir/
 cp ./netconf_depend_so/libnetconf.so.0                     ovsdb_dir/
+cp ovsdb-client.cfg                                        ovsdb_dir/
 
 # Make the base directory
 cd ovsdb_dir
@@ -35,6 +36,7 @@ chmod 775 ./mydeb/DEBIAN/control
 
 # Make the lib&bin directory
 mkdir -p ./mydeb/etc
+mkdir -p ./mydeb/etc/openvswitch
 mkdir -p ./mydeb/usr/bin
 mkdir -p ./mydeb/usr/lib/powerpc-linux-gnu
 
@@ -47,6 +49,7 @@ cp ovsdb-server ./mydeb/usr/bin
 cp ovsdb-tool ./mydeb/usr/bin
 cp vtep-ctl ./mydeb/usr/bin
 cp libnetconf.so.0 ./mydeb/usr/lib/powerpc-linux-gnu
+cp ovsdb-client.cfg ./mydeb/etc/openvswitch
 
 # Write files
 echo Package: ovsdb-2.3.0 >> ./mydeb/DEBIAN/control
@@ -69,6 +72,8 @@ echo 'rm -rf /usr/bin/ovsdb-server' >> ./mydeb/DEBIAN/postrm
 echo 'rm -rf /usr/bin/ovsdb-tool' >> ./mydeb/DEBIAN/postrm
 echo 'rm -rf /usr/bin/vtep-ctl' >> ./mydeb/DEBIAN/postrm
 echo 'rm -rf /usr/lib/powerpc-linux-gnu/libnetconf.so.0' >> ./mydeb/DEBIAN/postrm
+echo 'rm -rf /etc/openvswitch/ovsdb-client.cfg' >> ./mydeb/DEBIAN/postrm
+
 # Make the dpkg file
 PACKAGE_NAME=ovsdb-2.3.0.deb
 dpkg -b mydeb ${PACKAGE_NAME}

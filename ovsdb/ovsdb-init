@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 host=192.168.10.109
 manage=192.168.13.1

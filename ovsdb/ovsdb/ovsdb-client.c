@@ -1183,7 +1183,6 @@ unsigned int netconf_ce_config_bd(unsigned int uiVniId)
     OVSDB_PRINTF_DEBUG("********************netconf_ce_config_bd********************");
     unsigned int    uiRet                             = 0;
     char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
-    char            *paReplyData                      = NULL;
 
     if (uiVniId > MAX_VNI_ID || uiVniId < MIN_VNI_ID)
     {
@@ -1191,53 +1190,28 @@ unsigned int netconf_ce_config_bd(unsigned int uiVniId)
         return OVSDB_ERR;
     }
 
-    /* 1.check before config [bridge-domain uiBdId] */
+    /* 1.config [bridge-domain uiBdId] */
     snprintf(send_data, sizeof(send_data),
-        "<get>"\
-          "<filter type=\"subtree\">"\
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
             "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
               "<bds>"\
-                "<bd>"\
-                  "<bdId></bdId>"\
+                "<bd operation=\"create\">"\
+                  "<bdId>%d</bdId>"\
                 "</bd>"\
               "</bds>"\
             "</evc>"\
-          "</filter>"\
-        "</get>");
+          "</config>"\
+        "</edit-config>", uiVniId);
 
-    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
-    //printf("data out is %s\n", aReplyData);
+    uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query VNI before config [bridge-domain %d]", uiVniId);
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
         return OVSDB_ERR;
-    }
-
-    if ('\0' == paReplyData[0])
-    {
-        /* 1.config [bridge-domain uiBdId] */
-        snprintf(send_data, sizeof(send_data),
-            "<edit-config>"\
-              "<target><running/></target>"\
-              "<default-operation>merge</default-operation>"\
-              "<error-option>rollback-on-error</error-option>"\
-              "<config>"\
-                "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
-                  "<bds>"\
-                    "<bd operation=\"create\">"\
-                      "<bdId>%d</bdId>"\
-                    "</bd>"\
-                  "</bds>"\
-                "</evc>"\
-              "</config>"\
-            "</edit-config>", uiVniId);
-
-        uiRet = netconf_ce_set_config(send_data);
-        if (OVSDB_OK != uiRet)
-        {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
-            return OVSDB_ERR;
-        }
     }
 
     /* 2.config [vxlan vni uiVniId] */
@@ -1330,16 +1304,18 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
         if (OVSDB_OK != uiRet)
         {
             OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo bridge-domain %d].", uiVniId);
-            return OVSDB_ERR;
         }
     }
     else
     {
         OVSDB_PRINTF_DEBUG("[ERROR][bridge-domain %d] doesn't exist.", uiVniId);
-        return OVSDB_ERR;
+        uiRet = OVSDB_ERR;
     }
 
-    return OVSDB_OK;
+    free(paReplyData);
+    paReplyData = NULL;
+
+    return uiRet;
 }
 
 unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
@@ -1401,9 +1377,14 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
         if (OVSDB_OK != uiRet)
         {
             OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [interface Nve1].");
+            free(paReplyData);
+            paReplyData = NULL;
             return OVSDB_ERR;
         }
     }
+
+    free(paReplyData);
+    paReplyData = NULL;
 
     /* 4.≈‰÷√source 1.1.1.1 */
     /* 4.1œ»…æ≥˝source≈‰÷√ */
@@ -1491,7 +1472,6 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
         "</get>");
 
     uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
-    //printf("data out is %s\n", aReplyData);
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG("[ERROR]Failed to query nve1 before config [undo interface nve 1].");
@@ -1500,6 +1480,9 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
 
     if ('\0' != paReplyData[0])
     {
+        free(paReplyData);
+        paReplyData = NULL;
+
         /* 3.…æ≥˝interface nve 1 */
         snprintf(send_data, sizeof(send_data),
             "<edit-config>"\
@@ -1529,6 +1512,8 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     }
     else
     {
+        free(paReplyData);
+        paReplyData = NULL;
         OVSDB_PRINTF_DEBUG("[ERROR][interface Nve 1] doesn't exist.");
         return OVSDB_ERR;
     }
@@ -1594,67 +1579,106 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
         return OVSDB_ERR;
     }
 
-    if ('\0' == paReplyData[0])
+    if ('\0' != paReplyData[0])
     {
-        /* ≈‰÷√interface paIfname.uiSubInterNum mode l2 */
+        OVSDB_PRINTF_DEBUG("[ERROR]Interface %s.%d has existed", paIfname, uiSubInterNum);
+        free(paReplyData);
+        paReplyData = NULL;
+        return OVSDB_ERR;
+    }
+
+    free(paReplyData);
+    paReplyData = NULL;
+
+    /* ≈‰÷√interface paIfname.uiSubInterNum mode l2 */
+    snprintf(send_data, sizeof(send_data),
+    "<edit-config>"\
+      "<target><running/></target>"\
+      "<default-operation>merge</default-operation>"\
+      "<error-option>rollback-on-error</error-option>"\
+      "<config>"\
+        "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+          "<interfaces>"\
+            "<interface operation=\"create\">"\
+              "<ifName>%s.%d</ifName>"\
+              "<l2SubIfFlag>true</l2SubIfFlag>"\
+            "</interface>"\
+          "</interfaces>"\
+        "</ifm>"\
+      "</config>"\
+    "</edit-config>", paIfname, uiSubInterNum);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [interface %s.%d mode l2]",
+            paIfname, uiSubInterNum);
+        return OVSDB_ERR;
+    }
+
+    /* ≈‰÷√bridge-domain uiVniId */
+    snprintf(send_data, sizeof(send_data),
+    "<edit-config>"\
+      "<target><running/></target>"\
+      "<default-operation>merge</default-operation>"\
+      "<error-option>rollback-on-error</error-option>"\
+      "<config>"\
+        "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+          "<bds>"\
+            "<bd operation=\"merge\">"\
+              "<bdId>%d</bdId>"\
+                "<servicePoints>"\
+                  "<servicePoint operation=\"create\">"\
+                    "<ifName>%s.%d</ifName>"\
+                  "</servicePoint>"\
+              "</servicePoints>"\
+            "</bd>"\
+          "</bds>"\
+        "</evc>"\
+      "</config>"\
+    "</edit-config>", uiVniId, paIfname, uiSubInterNum);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    if(0 == uiVlanId)
+    {
+        /* ≈‰÷√encapsulation untag */
         snprintf(send_data, sizeof(send_data),
         "<edit-config>"\
           "<target><running/></target>"\
           "<default-operation>merge</default-operation>"\
           "<error-option>rollback-on-error</error-option>"\
           "<config>"\
-            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<interfaces>"\
-                "<interface operation=\"create\">"\
+            "<ethernet xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<servicePoints>"\
+                "<servicePoint operation=\"merge\">"\
                   "<ifName>%s.%d</ifName>"\
-                  "<l2SubIfFlag>true</l2SubIfFlag>"\
-                "</interface>"\
-              "</interfaces>"\
-            "</ifm>"\
+                  "<flowType>untag</flowType>"\
+                "</servicePoint>"\
+              "</servicePoints>"\
+            "</ethernet>"\
           "</config>"\
         "</edit-config>", paIfname, uiSubInterNum);
 
         uiRet = netconf_ce_set_config(send_data);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [interface %s.%d mode l2]",
-                paIfname, uiSubInterNum);
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
             return OVSDB_ERR;
         }
+    }
+    else
+    {
+        netconf_get_confbit(uiVlanId, vlanBit);
+        netconf_vlanbit2netvlanbit(vlanBit, netconfBit);
 
-        /* ≈‰÷√bridge-domain uiVniId */
+        /* ≈‰÷√encapsulation dot1q vid uiVlanId */
         snprintf(send_data, sizeof(send_data),
-        "<edit-config>"\
-          "<target><running/></target>"\
-          "<default-operation>merge</default-operation>"\
-          "<error-option>rollback-on-error</error-option>"\
-          "<config>"\
-            "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<bds>"\
-                "<bd operation=\"merge\">"\
-                  "<bdId>%d</bdId>"\
-                    "<servicePoints>"\
-                      "<servicePoint operation=\"create\">"\
-                        "<ifName>%s.%d</ifName>"\
-                      "</servicePoint>"\
-                  "</servicePoints>"\
-                "</bd>"\
-              "</bds>"\
-            "</evc>"\
-          "</config>"\
-        "</edit-config>", uiVniId, paIfname, uiSubInterNum);
-
-        uiRet = netconf_ce_set_config(send_data);
-        if (OVSDB_OK != uiRet)
-        {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
-            return OVSDB_ERR;
-        }
-
-        if(0 == uiVlanId)
-        {
-            /* ≈‰÷√encapsulation untag */
-            snprintf(send_data, sizeof(send_data),
             "<edit-config>"\
               "<target><running/></target>"\
               "<default-operation>merge</default-operation>"\
@@ -1664,59 +1688,23 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
                   "<servicePoints>"\
                     "<servicePoint operation=\"merge\">"\
                       "<ifName>%s.%d</ifName>"\
-                      "<flowType>untag</flowType>"\
+                      "<flowType>dot1q</flowType>"\
+                      "<flowDot1qs>"\
+                        "<dot1qVids>%s:%s</dot1qVids>"\
+                      "</flowDot1qs>"\
                     "</servicePoint>"\
                   "</servicePoints>"\
                 "</ethernet>"\
               "</config>"\
-            "</edit-config>", paIfname, uiSubInterNum);
+            "</edit-config>",
+            paIfname, uiSubInterNum, netconfBit, netconfBit);
 
-            uiRet = netconf_ce_set_config(send_data);
-            if (OVSDB_OK != uiRet)
-            {
-                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
-                return OVSDB_ERR;
-            }
-        }
-        else
+        uiRet = netconf_ce_set_config(send_data);
+        if (OVSDB_OK != uiRet)
         {
-            netconf_get_confbit(uiVlanId, vlanBit);
-            netconf_vlanbit2netvlanbit(vlanBit, netconfBit);
-
-            /* ≈‰÷√encapsulation dot1q vid uiVlanId */
-            snprintf(send_data, sizeof(send_data),
-                "<edit-config>"\
-                  "<target><running/></target>"\
-                  "<default-operation>merge</default-operation>"\
-                  "<error-option>rollback-on-error</error-option>"\
-                  "<config>"\
-                    "<ethernet xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-                      "<servicePoints>"\
-                        "<servicePoint operation=\"merge\">"\
-                          "<ifName>%s.%d</ifName>"\
-                          "<flowType>dot1q</flowType>"\
-                          "<flowDot1qs>"\
-                            "<dot1qVids>%s:%s</dot1qVids>"\
-                          "</flowDot1qs>"\
-                        "</servicePoint>"\
-                      "</servicePoints>"\
-                    "</ethernet>"\
-                  "</config>"\
-                "</edit-config>",
-                paIfname, uiSubInterNum, netconfBit, netconfBit);
-
-            uiRet = netconf_ce_set_config(send_data);
-            if (OVSDB_OK != uiRet)
-            {
-                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
-                return OVSDB_ERR;
-            }
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
+            return OVSDB_ERR;
         }
-    }
-    else
-    {
-        OVSDB_PRINTF_DEBUG("[ERROR]Interface %s.%d has existed", paIfname, uiSubInterNum);
-        return OVSDB_ERR;
     }
 
     return OVSDB_OK;
@@ -1773,36 +1761,39 @@ unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
         return OVSDB_ERR;
     }
 
-    if ('\0' != paReplyData[0])
-    {
-        /* …æ≥˝interface paIfname.uiSubInterNum mode l2 */
-        snprintf(send_data, sizeof(send_data),
-            "<edit-config>"\
-              "<target><running/></target>"\
-              "<default-operation>merge</default-operation>"\
-              "<error-option>rollback-on-error</error-option>"\
-              "<config>"\
-                "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-                  "<interfaces>"\
-                    "<interface operation=\"delete\">"\
-                      "<ifName>%s.%d</ifName>"\
-                      "<l2SubIfFlag>true</l2SubIfFlag>"\
-                    "</interface>"\
-                  "</interfaces>"\
-                "</ifm>"\
-              "</config>"\
-            "</edit-config>", paIfname, uiSubInterNum);
-
-        uiRet = netconf_ce_set_config(send_data);
-        if (OVSDB_OK != uiRet)
-        {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
-            return OVSDB_ERR;
-        }
-    }
-    else
+    if ('\0' == paReplyData[0])
     {
         OVSDB_PRINTF_DEBUG("[ERROR]Interface %s.%d doesn't exist", paIfname, uiSubInterNum);
+        free(paReplyData);
+        paReplyData = NULL;
+        return OVSDB_ERR;
+    }
+
+    free(paReplyData);
+    paReplyData = NULL;
+
+    /* …æ≥˝interface paIfname.uiSubInterNum mode l2 */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface operation=\"delete\">"\
+                  "<ifName>%s.%d</ifName>"\
+                  "<l2SubIfFlag>true</l2SubIfFlag>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</config>"\
+        "</edit-config>", paIfname, uiSubInterNum);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
         return OVSDB_ERR;
     }
 
@@ -2368,17 +2359,18 @@ unsigned int netconf_ce_query_interface()
         if (uiRet != OVSDB_OK)
         {
             OVSDB_PRINTF_DEBUG("[ERROR]Failed to get interface from reply message");
+            free(pReplyData);
+            pReplyData = NULL;
             return OVSDB_ERR;
         }
 
         /* ≈–∂œreplyœ˚œ¢ «∑Ò∑÷∆¨ */
         paReplySeg = strstr(pReplyData, "set-id");
 
-        free(pReplyData);
-        pReplyData = NULL;
-
         if (NULL == paReplySeg)
         {
+            free(pReplyData);
+            pReplyData = NULL;
             break;
         }
 
@@ -2394,6 +2386,9 @@ unsigned int netconf_ce_query_interface()
         snprintf(send_data, sizeof(send_data),
             "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
             "</get-next>", aSetId);
+
+        free(pReplyData);
+        pReplyData = NULL;
 
         uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
         if (OVSDB_OK != uiRet)
@@ -2472,17 +2467,18 @@ unsigned int netconf_ce_query_db_mac()
         if (uiRet != OVSDB_OK)
         {
             OVSDB_PRINTF_DEBUG("[ERROR]Failed to get db mac from reply message");
+            free(pReplyData);
+            pReplyData = NULL;
             return OVSDB_ERR;
         }
 
         /* ≈–∂œreplyœ˚œ¢ «∑Ò∑÷∆¨ */
         paReplySeg = strstr(pReplyData, "set-id");
 
-        free(pReplyData);
-        pReplyData = NULL;
-
         if (NULL == paReplySeg)
         {
+            free(pReplyData);
+            pReplyData = NULL;
             break;
         }
 
@@ -2498,6 +2494,9 @@ unsigned int netconf_ce_query_db_mac()
         snprintf(send_data, sizeof(send_data),
             "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
             "</get-next>", aSetId);
+
+        free(pReplyData);
+        pReplyData = NULL;
 
         uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
         if (OVSDB_OK != uiRet)

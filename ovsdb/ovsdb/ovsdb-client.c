@@ -1274,46 +1274,48 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
         "</get>");
 
     uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
-    //printf("data out is %s\n", aReplyData);
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG("[ERROR]Failed to query VNI before config [undo bridge-domain %d].", uiVniId);
         return OVSDB_ERR;
     }
 
-    if ('\0' != paReplyData[0])
-    {
-        /* 2.config [undo bridge-domain uiVniId] */
-        snprintf(send_data, sizeof(send_data),
-            "<edit-config>"\
-              "<target><running/></target>"\
-              "<default-operation>merge</default-operation>"\
-              "<error-option>rollback-on-error</error-option>"\
-              "<config>"\
-                "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
-                  "<bds>"\
-                    "<bd operation=\"delete\">"\
-                      "<bdId>%d</bdId>"\
-                    "</bd>"\
-                  "</bds>"\
-                "</evc>"\
-              "</config>"\
-            "</edit-config>", uiVniId);
-
-        uiRet = netconf_ce_set_config(send_data);
-        if (OVSDB_OK != uiRet)
-        {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo bridge-domain %d].", uiVniId);
-        }
-    }
-    else
+    if ('\0' == paReplyData[0])
     {
         OVSDB_PRINTF_DEBUG("[ERROR][bridge-domain %d] doesn't exist.", uiVniId);
-        uiRet = OVSDB_ERR;
+        free(paReplyData);
+        paReplyData = NULL;
+        return OVSDB_ERR;
     }
 
     free(paReplyData);
     paReplyData = NULL;
+
+    /* 1.1 删除此VNI对应的隧道列表 */
+    (void)netconf_ce_undo_config_vxlan_tunnel(uiVniId, NULL);
+
+    /* 2.config [undo bridge-domain uiVniId] */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
+              "<bds>"\
+                "<bd operation=\"delete\">"\
+                  "<bdId>%d</bdId>"\
+                "</bd>"\
+              "</bds>"\
+            "</evc>"\
+          "</config>"\
+        "</edit-config>", uiVniId);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo bridge-domain %d].", uiVniId);
+    }
 
     return uiRet;
 }
@@ -1347,7 +1349,6 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
         "</get>");
 
     uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
-    //printf("data out is %s\n", aReplyData);
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG("[ERROR]Failed to query nve1 before config [interface nve 1].");
@@ -1939,75 +1940,70 @@ unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDs
     }
 
     /* 4.删除vxlan隧道 */
-    /* 4.1.先删除头端复制列表*/
-    snprintf(send_data, sizeof(send_data),
-        "<edit-config>"\
-          "<target><running/></target>"\
-          "<default-operation>merge</default-operation>"\
-          "<error-option>rollback-on-error</error-option>"\
-          "<config>"\
-            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<nvo3Nves>"\
-                "<nvo3Nve operation=\"merge\">"\
-                  "<ifName>nve1</ifName>"\
-                  "<vniMembers>"\
-                    "<vniMember operation=\"merge\">"\
-                      "<vniId>%d</vniId>"\
-                      "<nvo3VniPeers>"\
-                        "<nvo3VniPeer operation=\"delete\">"\
-                          "<peerAddr>%s</peerAddr>"\
-                        "</nvo3VniPeer>"\
-                      "</nvo3VniPeers>"\
-                    "</vniMember>"\
-                  "</vniMembers>"\
-                "</nvo3Nve>"\
-              "</nvo3Nves>"\
-            "</nvo3>"\
-          "</config>"\
-        "</edit-config>", uiVni, paDstIp);
+    if (NULL != paDstIp) {
+        /* 4.1.先删除头端复制列表*/
+        snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<nvo3Nves>"\
+                    "<nvo3Nve operation=\"merge\">"\
+                      "<ifName>nve1</ifName>"\
+                      "<vniMembers>"\
+                        "<vniMember operation=\"merge\">"\
+                          "<vniId>%d</vniId>"\
+                          "<nvo3VniPeers>"\
+                            "<nvo3VniPeer operation=\"delete\">"\
+                              "<peerAddr>%s</peerAddr>"\
+                            "</nvo3VniPeer>"\
+                          "</nvo3VniPeers>"\
+                        "</vniMember>"\
+                      "</vniMembers>"\
+                    "</nvo3Nve>"\
+                  "</nvo3Nves>"\
+                "</nvo3>"\
+              "</config>"\
+            "</edit-config>", uiVni, paDstIp);
+    }
+    else {
+        /* 4.2.再删除VNI*/
+        snprintf(send_data, sizeof(send_data),
+            "<edit-config>"\
+              "<target><running/></target>"\
+              "<default-operation>merge</default-operation>"\
+              "<error-option>rollback-on-error</error-option>"\
+              "<config>"\
+                "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<nvo3Nves>"\
+                    "<nvo3Nve operation=\"merge\">"\
+                      "<ifName>nve1</ifName>"\
+                      "<vniMembers>"\
+                        "<vniMember operation=\"delete\">"\
+                          "<vniId>%d</vniId>"\
+                        "</vniMember>"\
+                      "</vniMembers>"\
+                    "</nvo3Nve>"\
+                  "</nvo3Nves>"\
+                "</nvo3>"\
+              "</config>"\
+            "</edit-config>", uiVni);
+    }
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
+        if (NULL != paDstIp)
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
+        else
+            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d]", uiVni);
         /*有可能多条隧道对应同一个vni,这里不应该返回错误 */
         //return OVSDB_ERR;
     }
-
-    /* 4.2.再删除VNI*/
-    /* 这里不能这样操作，会误删peer-list里面同vni里其他的peer*/
-    #if 0
-    snprintf(send_data, sizeof(send_data),
-        "<edit-config>"\
-          "<target><running/></target>"\
-          "<default-operation>merge</default-operation>"\
-          "<error-option>rollback-on-error</error-option>"\
-          "<config>"\
-            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<nvo3Nves>"\
-                "<nvo3Nve operation=\"merge\">"\
-                  "<ifName>nve1</ifName>"\
-                  "<vniMembers>"\
-                    "<vniMember operation=\"delete\">"\
-                      "<vniId>%d</vniId>"\
-                    "</vniMember>"\
-                  "</vniMembers>"\
-                "</nvo3Nve>"\
-              "</nvo3Nves>"\
-            "</nvo3>"\
-          "</config>"\
-        "</edit-config>", uiVni);
-    uiRet = netconf_ce_set_config(send_data);
-    if (OVSDB_OK != uiRet)
-    {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s]", uiVni, paDstIp);
-        /*有可能多条隧道对应同一个vni,这里不应该返回错误 */
-        //return OVSDB_ERR;
-    }
-    #endif
 
     return OVSDB_OK;
 }
-
 
 
 unsigned int netconf_ce_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId)

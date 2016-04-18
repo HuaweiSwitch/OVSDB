@@ -7328,20 +7328,21 @@ void ovsdb_write_mcast_local(void *args)
                 do_transact_temp(rpc, json_insert_mcast_local);
 
                 OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is without locator before");
-            }
-            /* 有nve ip对应的locator */
-            else
-            {
-                char json_insert_mcast_local[2000]={0};
-                snprintf(json_insert_mcast_local, 2000,
-                        "[\"hardware_vtep\",{\"row\":{\"locators\":[\"uuid\",\""UUID_FMT"\"]},\"table\":\"Physical_Locator_Set\","
-                        "\"uuid-name\":\"aa\",\"op\":\"insert\"},{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
-                        "\"locator_set\":[\"named-uuid\",\"aa\"],\"MAC\":\"unknown-dst\"},\"table\":\"Mcast_Macs_Local\","
-                        "\"uuid-name\":\"mcast_local_name\",\"op\":\"insert\"}]",
-                        UUID_ARGS(&phyical_locator_uuid), UUID_ARGS(&ls_info[i].uuid_ls));
-                do_transact_temp(rpc, json_insert_mcast_local);
+                }
+                /* 有nve ip对应的locator */
+                else
+                {
+                    char json_insert_mcast_local[2000]={0};
+                    snprintf(json_insert_mcast_local, 2000,
+                            "[\"hardware_vtep\",{\"row\":{\"locators\":[\"uuid\",\""UUID_FMT"\"]},\"table\":\"Physical_Locator_Set\","
+                            "\"uuid-name\":\"aa\",\"op\":\"insert\"},{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
+                            "\"locator_set\":[\"named-uuid\",\"aa\"],\"MAC\":\"unknown-dst\"},\"table\":\"Mcast_Macs_Local\","
+                            "\"uuid-name\":\"mcast_local_name\",\"op\":\"insert\"}]",
+                            UUID_ARGS(&phyical_locator_uuid), UUID_ARGS(&ls_info[i].uuid_ls));
+                    do_transact_temp(rpc, json_insert_mcast_local);
 
-                OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is with locator before.");
+                    OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is with locator before.");
+                }
             }
             
             /* 删除一条mcast local表 */

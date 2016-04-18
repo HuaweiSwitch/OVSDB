@@ -51,10 +51,24 @@ else                                    \
     str = 0;                            \
 }
 
-#define OVSDB_PRINTF_DEBUG(szfmt, args...)\
+#define OVSDB_PRINTF_DEBUG_TRACE(szfmt, args...)\
+//do{\
+//    printf(\
+//        ">>>func: %s, line: %d. Trace: "szfmt"\r\n",\
+//        __FUNCTION__, __LINE__, ##args);\
+//}while(0)
+
+#define OVSDB_PRINTF_DEBUG_WARN(szfmt, args...)\
 do{\
-    printf(\
-        ">>>func: %s, line: %d. "szfmt"\r\n",\
+    VLOG_WARN(\
+        ">>>func: %s, line: %d. Warn: "szfmt"\r\n",\
+        __FUNCTION__, __LINE__, ##args);\
+}while(0)
+
+#define OVSDB_PRINTF_DEBUG_ERROR(szfmt, args...)\
+do{\
+    VLOG_ERR(\
+        ">>>func: %s, line: %d. Error: "szfmt"\r\n",\
         __FUNCTION__, __LINE__, ##args);\
 }while(0)
 
@@ -619,7 +633,6 @@ void do_transact_temp_query_port_binding_logical_switch(struct jsonrpc *rpc, cha
 void do_transact_temp_query_logical_switch_tunnel_key(struct jsonrpc *rpc, char *json_char ,int *tunnel_key_exist, int *tunnel_key);
 void do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_char ,char* dst_ip);
 void do_transact_temp_query_mac_local_uuid(struct jsonrpc *rpc, char *json_char ,int *uuid_num, struct uuid *ucast_local_uuids);
-int do_check_mac_info_from_fei(unsigned char *aucMacAddr, unsigned char *aucIfname, unsigned int add_or_delete_flag, unsigned int dyn_or_static_flag, unsigned int ulBDID);
 
 
 void do_vtep(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );

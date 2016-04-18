@@ -52,6 +52,7 @@
 #include "netconf/libnetconf_ssh.h"
 #include "ovsdb-client.h"
 
+VLOG_DEFINE_THIS_MODULE(ovsdb_client);
 
 struct table_callbacks table_func_map[] = {
     {GLOBAL_TABLE_NAME, global_table_process},
@@ -142,14 +143,14 @@ void mac_translate_ovsdb_to_ce(char* mac_ovsdb, char* mac_ce)
 
     if((NULL==mac_ovsdb) || (NULL==mac_ce))
     {
-        OVSDB_PRINTF_DEBUG("mac_ovsdb or mac_ce is null, return.");
+        OVSDB_PRINTF_DEBUG_ERROR("mac_ovsdb or mac_ce is null, return.");
         return;
     }
 
     /*根据vtep的dump,ovsdb的mac格式如上面那种格式*/
     if((strlen(mac_ovsdb))!=(strlen("11:22:33:44:55:66")))
     {
-        OVSDB_PRINTF_DEBUG("wrong ovsdb-mac format,return.");
+        OVSDB_PRINTF_DEBUG_ERROR("wrong ovsdb-mac format,return.");
         return;
     }
 
@@ -274,7 +275,7 @@ int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session sess
     
     ret = ssh_get_publickey(session, &srv_pubkey);
     if (ret < 0){
-        OVSDB_PRINTF_DEBUG("Unable to get server public key.");
+        OVSDB_PRINTF_DEBUG_ERROR("Unable to get server public key. ret = %d.", ret);
         return -1;
     }
             
@@ -282,7 +283,7 @@ int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session sess
     ret = ssh_get_publickey_hash(srv_pubkey, SSH_PUBLICKEY_HASH_SHA1, &hash_sha1, &hlen);
     ssh_key_free(srv_pubkey);
     if (ret < 0) {
-        OVSDB_PRINTF_DEBUG("Failed to calculate SHA1 hash of server public key.");
+        OVSDB_PRINTF_DEBUG_ERROR("Failed to calculate SHA1 hash of server public key. ret = %d.", ret);
         return -1;
     }
     
@@ -293,22 +294,22 @@ int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session sess
         break; /* ok */
     
     case SSH_SERVER_KNOWN_CHANGED:
-        OVSDB_PRINTF_DEBUG("Remote host key changed, the connection will be terminated!");
+        OVSDB_PRINTF_DEBUG_TRACE("Remote host key changed, the connection will be terminated!");
         goto fail;
     
     case SSH_SERVER_FOUND_OTHER:
-        OVSDB_PRINTF_DEBUG("The remote host key was not found but another type of key was, the connection will be terminated.");
+        OVSDB_PRINTF_DEBUG_TRACE("The remote host key was not found but another type of key was, the connection will be terminated.");
         goto fail;
     
     case SSH_SERVER_FILE_NOT_FOUND:
-        OVSDB_PRINTF_DEBUG("Could not find the known hosts file.");
+        OVSDB_PRINTF_DEBUG_TRACE("Could not find the known hosts file.");
         /* fallback to SSH_SERVER_NOT_KNOWN behavior */
         
     case SSH_SERVER_NOT_KNOWN:
         /* store the key into the host file */
         ret = ssh_write_knownhost(session);
         if (ret < 0) {
-            OVSDB_PRINTF_DEBUG("Adding the known host %s failed (%s).", hostname, strerror(errno));
+            OVSDB_PRINTF_DEBUG_ERROR("Adding the known host %s failed (%s).", hostname, strerror(errno));
         }
         
         break;
@@ -452,7 +453,7 @@ unsigned int netconf_ce_set_config(char* send_data)
     uiRet = nc_reply_get_type(reply);
     if (uiRet != NC_REPLY_OK)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to set vxlan configuration, error message is %s.",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to set vxlan configuration, error message is %s.",
                            nc_reply_get_errormsg(reply));
         nc_reply_free(reply);
         return OVSDB_ERR;
@@ -485,14 +486,14 @@ unsigned int netconf_ce_query_config_data(char* send_data, char ** ppcReplyData)
     rpc = NULL;
 
     if (sessionRet != NC_MSG_REPLY){
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query configuration, error message is %s.",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query configuration, error message is %s.",
             nc_reply_get_errormsg(reply));
     }
 
     replyRet = nc_reply_get_type(reply);
     if (replyRet != NC_REPLY_DATA)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to get reply configuration, error message is %s.",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to get reply configuration, error message is %s.",
             nc_reply_get_errormsg(reply));
         nc_reply_free(reply);
         return OVSDB_ERR;
@@ -540,14 +541,14 @@ unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
     rpc = NULL;
 
     if (sessionRet != NC_MSG_REPLY){
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query configuration, error message is %s.",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query configuration, error message is %s.",
             nc_reply_get_errormsg(reply));
     }
 
     replyRet = nc_reply_get_type(reply);
     if (replyRet != NC_REPLY_DATA)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to get reply configuration, error message is %s.",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to get reply configuration, error message is %s.",
             nc_reply_get_errormsg(reply));
         nc_reply_free(reply);
         return OVSDB_ERR;
@@ -573,13 +574,13 @@ unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
 
 unsigned int netconf_ce_config_bd(unsigned int uiVniId)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_bd********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_bd********************");
     unsigned int    uiRet                             = 0;
     char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
 
     if (uiVniId > MAX_VNI_ID || uiVniId < MIN_VNI_ID)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]The VNI id %d is illegal.", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]The VNI id %d is illegal.", uiVniId);
         return OVSDB_ERR;
     }
 
@@ -603,7 +604,7 @@ unsigned int netconf_ce_config_bd(unsigned int uiVniId)
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
         return OVSDB_ERR;
     }
 
@@ -628,7 +629,7 @@ unsigned int netconf_ce_config_bd(unsigned int uiVniId)
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [vxlan vni %d]", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [vxlan vni %d]", uiVniId);
         return OVSDB_ERR;
     }
 
@@ -641,14 +642,14 @@ unsigned int netconf_ce_config_bd(unsigned int uiVniId)
 */
 unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_bd********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_bd********************");
     unsigned int    uiRet                             = 0;
     char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
     char            *paReplyData                      = NULL;
 
     if (uiVniId > MAX_VNI_ID || uiVniId < MIN_VNI_ID)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]The VNI id %d is illegal.", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]The VNI id %d is illegal.", uiVniId);
         return OVSDB_ERR;
     }
 
@@ -669,13 +670,13 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
     uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query VNI before config [undo bridge-domain %d].", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query VNI before config [undo bridge-domain %d].", uiVniId);
         return OVSDB_ERR;
     }
 
     if ('\0' == paReplyData[0])
     {
-        OVSDB_PRINTF_DEBUG("[ERROR][bridge-domain %d] doesn't exist.", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR][bridge-domain %d] doesn't exist.", uiVniId);
         free(paReplyData);
         paReplyData = NULL;
         return OVSDB_ERR;
@@ -707,7 +708,7 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo bridge-domain %d].", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo bridge-domain %d].", uiVniId);
     }
 
     return uiRet;
@@ -715,7 +716,7 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
 
 unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_nve1_source********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_nve1_source********************");
     unsigned int uiRet                             = 0;
     char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
     char         *paReplyData                      = NULL;
@@ -723,7 +724,7 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
     /* 1.判断nve1的source ip是否已配置 */
     if(nve1_source_ip_configured)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Nve 1 source ip is configured");
+        OVSDB_PRINTF_DEBUG_WARN("[ERROR]Nve 1 source ip is configured");
         return OVSDB_OK;
     }
 
@@ -744,7 +745,7 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
     uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query nve1 before config [interface nve 1].");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query nve1 before config [interface nve 1].");
         return OVSDB_ERR;
     }
 
@@ -770,7 +771,7 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
         uiRet = netconf_ce_set_config(send_data);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [interface Nve1].");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [interface Nve1].");
             free(paReplyData);
             paReplyData = NULL;
             return OVSDB_ERR;
@@ -802,7 +803,7 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo source].");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo source].");
         return OVSDB_ERR;
     }
 
@@ -827,7 +828,7 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [source %s].", paVtepIp);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [source %s].", paVtepIp);
         return OVSDB_ERR;
     }
 
@@ -839,7 +840,7 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
 
 unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_nve1_source********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_nve1_source********************");
     unsigned int uiRet                             = 0;
     char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
     char         *paReplyData                      = NULL;
@@ -847,7 +848,7 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     /* 1.判断nve1的source ip是否已配置 */
     if(!nve1_source_ip_configured)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Nve 1 source ip is not configured.");
+        OVSDB_PRINTF_DEBUG_WARN("[ERROR]Nve 1 source ip is not configured.");
         return OVSDB_ERR;
     }
 
@@ -868,7 +869,7 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query nve1 before config [undo interface nve 1].");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query nve1 before config [undo interface nve 1].");
         return OVSDB_ERR;
     }
 
@@ -897,7 +898,7 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
         uiRet = netconf_ce_set_config(send_data);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo interface Nve1].");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo interface Nve1].");
             return OVSDB_ERR;
         }
 
@@ -908,7 +909,7 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     {
         free(paReplyData);
         paReplyData = NULL;
-        OVSDB_PRINTF_DEBUG("[ERROR][interface Nve 1] doesn't exist.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR][interface Nve 1] doesn't exist.");
         return OVSDB_ERR;
     }
 
@@ -917,7 +918,7 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
 
 unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId, char* paIfname)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_port********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_port********************");
     unsigned int  uiRet                                   = 0;
     unsigned int  uiSubInterNum                           = 0;
     char          send_data[NETCONF_SEND_DATA_LEN]        = {0};
@@ -927,24 +928,24 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
 
     if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Vlan id %d id invalid", uiVlanId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vlan id %d id invalid", uiVlanId);
         return OVSDB_ERR;
     }
 
     if((uiVniId > MAX_VNI_ID)||(uiVniId < MIN_VNI_ID))
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Vni %d is invalid", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is invalid", uiVniId);
         return OVSDB_ERR;
     }
 
     if(!paIfname)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Port ifname name %s is NULL", paIfname);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Port ifname name %s is NULL", paIfname);
         return;
     }
 
-    OVSDB_PRINTF_DEBUG("[Info]Vlan id = %d, Vni = %d", uiVlanId, uiVniId );
-    OVSDB_PRINTF_DEBUG("[Info]Port name = %s", paIfname);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]Vlan id = %d, Vni = %d", uiVlanId, uiVniId );
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]Port name = %s", paIfname);
 
     /* 为子接口号赋值 */
     uiSubInterNum = uiVlanId + 1;
@@ -968,14 +969,14 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
     //printf("data out is %s\n", aReplyData);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
             paIfname, uiSubInterNum, paIfname, uiSubInterNum);
         return OVSDB_ERR;
     }
 
     if ('\0' != paReplyData[0])
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Interface %s.%d has existed", paIfname, uiSubInterNum);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Interface %s.%d has existed", paIfname, uiSubInterNum);
         free(paReplyData);
         paReplyData = NULL;
         return OVSDB_ERR;
@@ -1005,7 +1006,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [interface %s.%d mode l2]",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [interface %s.%d mode l2]",
             paIfname, uiSubInterNum);
         return OVSDB_ERR;
     }
@@ -1035,7 +1036,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [bridge-domain %d]", uiVniId);
         return OVSDB_ERR;
     }
 
@@ -1062,7 +1063,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
         uiRet = netconf_ce_set_config(send_data);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [encapsulation untag]");
             return OVSDB_ERR;
         }
     }
@@ -1096,7 +1097,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
         uiRet = netconf_ce_set_config(send_data);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [encapsulation untag]");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [encapsulation untag]");
             return OVSDB_ERR;
         }
     }
@@ -1107,7 +1108,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
 
 unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_port********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_port********************");
     unsigned int  uiRet                                   = 0;
     unsigned int  uiSubInterNum                           = 0;
     char          send_data[NETCONF_SEND_DATA_LEN]        = {0};
@@ -1115,18 +1116,18 @@ unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
 
     if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Vlan id %d id invalid", uiVlanId);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vlan id %d id invalid", uiVlanId);
         return OVSDB_ERR;
     }
 
     if(!paIfname)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Port ifname name %s is NULL", paIfname);
-        return;
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Port ifname name %s is NULL", paIfname);
+        return OVSDB_ERR;
     }
 
-    OVSDB_PRINTF_DEBUG("[Info]Vlan id = %d", uiVlanId);
-    OVSDB_PRINTF_DEBUG("[Info]Port name = %s", paIfname);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]Vlan id = %d", uiVlanId);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]Port name = %s", paIfname);
 
     /* 为子接口号赋值 */
     uiSubInterNum = uiVlanId + 1;
@@ -1150,14 +1151,14 @@ unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
     //printf("data out is %s\n", aReplyData);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
             paIfname, uiSubInterNum, paIfname, uiSubInterNum);
         return OVSDB_ERR;
     }
 
     if ('\0' == paReplyData[0])
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Interface %s.%d doesn't exist", paIfname, uiSubInterNum);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Interface %s.%d doesn't exist", paIfname, uiSubInterNum);
         free(paReplyData);
         paReplyData = NULL;
         return OVSDB_ERR;
@@ -1187,7 +1188,7 @@ unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
         return OVSDB_ERR;
     }
 
@@ -1196,32 +1197,32 @@ unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
 
 unsigned int netconf_ce_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_vxlan_tunnel********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_vxlan_tunnel********************");
     unsigned int uiLoop                           = 0;
     unsigned int uiRet                            = 0;
     char         send_data[NETCONF_SEND_DATA_LEN] = {0};
 
-    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_netconf");
-    OVSDB_PRINTF_DEBUG("[Info]vni=%d, dst ip=%s", uiVni, paDstIp);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]ce_config_vxlan_tunnel_netconf");
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]vni=%d, dst ip=%s", uiVni, paDstIp);
 
     /* 1.判断VNI是否合法 */
     if((uiVni > 32768)||(uiVni < 4096))
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Vni %d is not valid.", uiVni);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is not valid.", uiVni);
         return OVSDB_ERR;
     }
 
     /* 2.判断dst_ip是否为空 */
     if(!paDstIp)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Dst_ip is NULL.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Dst_ip is NULL.");
         return OVSDB_ERR;
     }
 
     /* 3.检查是否有隧道ip */
     if(!ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]TOR does not have a tunnel ip address.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]TOR does not have a tunnel ip address.");
         return OVSDB_ERR;
     }
     
@@ -1229,7 +1230,7 @@ unsigned int netconf_ce_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
     uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source before config VXLAN tunnel.");
+        OVSDB_PRINTF_DEBUG_WARN("Failed to config Nve 1 source before config VXLAN tunnel.");
     }
 
     /* 4.配置vni uiVni head-end peer-list paDstIp */
@@ -1262,7 +1263,7 @@ unsigned int netconf_ce_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [vni %d head-end peer-list %s]", uiVni, paDstIp);
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [vni %d head-end peer-list %s]", uiVni, paDstIp);
         return OVSDB_ERR;
     }
 
@@ -1290,9 +1291,9 @@ unsigned int netconf_ce_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
             /*为vxlan隧道的是否存在的标记位赋值*/
             switch_vxlan_tunnel[uiLoop].used_bit = 1;
 
-            OVSDB_PRINTF_DEBUG("[Info]insert entry to switch_vxlan_tunnel.k = %d, vni=%d.",
+            OVSDB_PRINTF_DEBUG_TRACE("[Info]insert entry to switch_vxlan_tunnel.k = %d, vni=%d.",
                                uiLoop, switch_vxlan_tunnel[uiLoop].vni);
-            OVSDB_PRINTF_DEBUG("[Info]source_ip = %s, dst_ip = %s.",
+            OVSDB_PRINTF_DEBUG_TRACE("[Info]source_ip = %s, dst_ip = %s.",
                                switch_vxlan_tunnel[uiLoop].source_ip, switch_vxlan_tunnel[uiLoop].dst_ip);
 
             break;
@@ -1304,31 +1305,23 @@ unsigned int netconf_ce_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
 
 unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_vxlan_tunnel********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_vxlan_tunnel********************");
     unsigned int uiRet                            = 0;
     char         send_data[NETCONF_SEND_DATA_LEN] = {0};
 
-    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_netconf.");
-    //OVSDB_PRINTF_DEBUG("[Info]vni=%d, dst ip=%s", uiVni, paDstIp);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]ce_config_vxlan_tunnel_netconf.");
 
     /* 1.判断VNI是否合法 */
     if((uiVni > 32768)||(uiVni < 4096))
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Vni %d is not valid.", uiVni);
-        return OVSDB_ERR;
-    }
-
-    /* 2.判断dst_ip是否为空 */
-    if(!paDstIp)
-    {
-        OVSDB_PRINTF_DEBUG("[ERROR]Dst_ip is NULL.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is not valid.", uiVni);
         return OVSDB_ERR;
     }
 
     /* 3.检查是否有隧道ip */
     if(!ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]TOR does not have a tunnel ip address.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]TOR does not have a tunnel ip address.");
         return OVSDB_ERR;
     }
 
@@ -1388,9 +1381,9 @@ unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDs
     if (OVSDB_OK != uiRet)
     {
         if (NULL != paDstIp)
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
         else
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo vni %d]", uiVni);
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo vni %d]", uiVni);
         /*有可能多条隧道对应同一个vni,这里不应该返回错误 */
         //return OVSDB_ERR;
     }
@@ -1401,30 +1394,30 @@ unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDs
 
 unsigned int netconf_ce_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_vxlan_tunnel_static_mac********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_vxlan_tunnel_static_mac********************");
     unsigned int uiLoop                           = 0;
     unsigned int uiRet                            = 0;
     char         send_data[NETCONF_SEND_DATA_LEN] = {0};
 
-    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_static_mac");
-    OVSDB_PRINTF_DEBUG("[Info]ce_mac=%s, source_ip=%s, dst_ip=%s,", paStaticMac, paSourceIp, paDstIp);
-    OVSDB_PRINTF_DEBUG("[Info]vni = %d", uiVniId);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]ce_config_vxlan_tunnel_static_mac");
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]ce_mac=%s, source_ip=%s, dst_ip=%s,", paStaticMac, paSourceIp, paDstIp);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]vni = %d", uiVniId);
 
     if(!paSourceIp)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]source_ip is NULL.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]source_ip is NULL.");
         return OVSDB_ERR;
     }
 
     if(!paDstIp)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]dst_ip is NULL.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]dst_ip is NULL.");
         return OVSDB_ERR;
     }
 
     if(!paStaticMac)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]ce_mac is NULL.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]ce_mac is NULL.");
         return OVSDB_ERR;
     }
 
@@ -1453,7 +1446,7 @@ unsigned int netconf_ce_config_vxlan_tunnel_static_mac(char* paStaticMac, char* 
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [mac-address static %s bridge-domain %d source %s peer %s vni %d]",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [mac-address static %s bridge-domain %d source %s peer %s vni %d]",
             paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
         return OVSDB_ERR;
     }
@@ -1494,29 +1487,29 @@ unsigned int netconf_ce_config_vxlan_tunnel_static_mac(char* paStaticMac, char* 
 
 unsigned int netconf_ce_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId)
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_vxlan_tunnel_static_mac********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_vxlan_tunnel_static_mac********************");
     unsigned int uiRet                            = 0;
     char         send_data[NETCONF_SEND_DATA_LEN] = {0};
 
-    OVSDB_PRINTF_DEBUG("[Info]ce_config_vxlan_tunnel_static_mac");
-    OVSDB_PRINTF_DEBUG("[Info]ce_mac=%s, source_ip=%s, dst_ip=%s,", paStaticMac, paSourceIp, paDstIp);
-    OVSDB_PRINTF_DEBUG("[Info]vni = %d", uiVniId);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]ce_config_vxlan_tunnel_static_mac");
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]ce_mac=%s, source_ip=%s, dst_ip=%s,", paStaticMac, paSourceIp, paDstIp);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]vni = %d", uiVniId);
 
     if(!paSourceIp)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]source_ip is NULL");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]source_ip is NULL");
         return OVSDB_ERR;
     }
 
     if(!paDstIp)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]dst_ip is NULL");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]dst_ip is NULL");
         return OVSDB_ERR;
     }
 
     if(!paStaticMac)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]ce_mac is NULL");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]ce_mac is NULL");
         return OVSDB_ERR;
     }
 
@@ -1545,7 +1538,7 @@ unsigned int netconf_ce_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, c
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo mac-address static %s bridge-domain %d source %s peer %s vni %d]",
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo mac-address static %s bridge-domain %d source %s peer %s vni %d]",
             paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
         return OVSDB_ERR;
     }
@@ -1556,7 +1549,7 @@ unsigned int netconf_ce_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, c
 
 unsigned int netconf_ce_config_drop_conflict_packet()
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_config_drop_conflict_packet********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_drop_conflict_packet********************");
     unsigned int    uiRet                            = 0;
     char            send_data[NETCONF_SEND_DATA_LEN] = {0};
 
@@ -1580,7 +1573,7 @@ unsigned int netconf_ce_config_drop_conflict_packet()
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo mac-address drop static-conflict enable]");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo mac-address drop static-conflict enable]");
         return OVSDB_ERR;
     }
 
@@ -1589,7 +1582,7 @@ unsigned int netconf_ce_config_drop_conflict_packet()
 
 unsigned int netconf_ce_undo_config_drop_conflict_packet()
 {
-    OVSDB_PRINTF_DEBUG("********************netconf_ce_undo_config_drop_conflict_packet********************");
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_drop_conflict_packet********************");
     unsigned int    uiRet                            = 0;
     char            send_data[NETCONF_SEND_DATA_LEN] = {0};
 
@@ -1613,7 +1606,7 @@ unsigned int netconf_ce_undo_config_drop_conflict_packet()
     uiRet = netconf_ce_set_config(send_data);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config [undo mac-address drop static-conflict enable]");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo mac-address drop static-conflict enable]");
         return OVSDB_ERR;
     }
 
@@ -1666,7 +1659,7 @@ unsigned int ovsdb_get_db_mac(char *paData)
 
     if (NULL == paData)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Reply data of db mac is NULL");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Reply data of db mac is NULL");
         return OVSDB_ERR;
     }
 
@@ -1736,7 +1729,7 @@ unsigned int netconf_ce_query_interface()
     uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query interface");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query interface");
         return OVSDB_ERR;
     }
 
@@ -1747,7 +1740,7 @@ unsigned int netconf_ce_query_interface()
 
         if (uiRet != OVSDB_OK)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to get interface from reply message");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to get interface from reply message");
             free(pReplyData);
             pReplyData = NULL;
             return OVSDB_ERR;
@@ -1782,7 +1775,7 @@ unsigned int netconf_ce_query_interface()
         uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to query next interface");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query next interface");
             return OVSDB_ERR;
         }
 
@@ -1844,7 +1837,7 @@ unsigned int netconf_ce_query_db_mac()
     uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to query db mac");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query db mac");
         return OVSDB_ERR;
     }
 
@@ -1855,7 +1848,7 @@ unsigned int netconf_ce_query_db_mac()
 
         if (uiRet != OVSDB_OK)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to get db mac from reply message");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to get db mac from reply message");
             free(pReplyData);
             pReplyData = NULL;
             return OVSDB_ERR;
@@ -1890,7 +1883,7 @@ unsigned int netconf_ce_query_db_mac()
         uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG("[ERROR]Failed to query next db mac");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query next db mac");
             return OVSDB_ERR;
         }
         uiLoop = 0;
@@ -1941,14 +1934,14 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
     }
 
     (void)uuid_from_string(&uuid_port, node_name);
-    OVSDB_PRINTF_DEBUG("vlan_binding update port uuid = "UUID_FMT, UUID_ARGS(&uuid_port));
+    OVSDB_PRINTF_DEBUG_TRACE("vlan_binding update port uuid = "UUID_FMT, UUID_ARGS(&uuid_port));
 
     new_vlan_binding = shash_find_data(json_object(new), "vlan_bindings");
     old_vlan_binding = shash_find_data(json_object(old), "vlan_bindings");
 
     if((!new_vlan_binding)||(!old_vlan_binding))    /*说明更新和vlan_binding无关，可能是更新的description之类的*/
     {
-        OVSDB_PRINTF_DEBUG("port table update has nothing to do with vlan_binding.");
+        OVSDB_PRINTF_DEBUG_TRACE("port table update has nothing to do with vlan_binding.");
         return;
     }
 
@@ -1960,17 +1953,18 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
     old_vlanbinding_elems_array = json_array(old_vlanbinding_elems);
     old_vlanbinding_elem_num = old_vlanbinding_elems_array->n;
 
-    OVSDB_PRINTF_DEBUG("new_vlanbinding_elem_num = %d, old_vlanbinding_elem_num = %d.", new_vlanbinding_elem_num, old_vlanbinding_elem_num);
+    OVSDB_PRINTF_DEBUG_TRACE("new_vlanbinding_elem_num = %d, old_vlanbinding_elem_num = %d.",
+                              new_vlanbinding_elem_num, old_vlanbinding_elem_num);
 
     if(new_vlanbinding_elem_num > old_vlanbinding_elem_num)
     {
         *update_type = ADD_VLAN_BINGDING;
-        OVSDB_PRINTF_DEBUG("update_type = ADD_VLAN_BINGDING");
+        OVSDB_PRINTF_DEBUG_TRACE("update_type = ADD_VLAN_BINGDING");
     }
     else if(new_vlanbinding_elem_num < old_vlanbinding_elem_num)
     {
         *update_type = DELETE_VLAN_BINGDING;
-        OVSDB_PRINTF_DEBUG("update_type = DELETE_VLAN_BINGDING");
+        OVSDB_PRINTF_DEBUG_TRACE("update_type = DELETE_VLAN_BINGDING");
     }
     else
     {
@@ -1987,7 +1981,7 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
                     strlen(ovsdb_vtep_db_table.table_physical_port[port_num].name)+1);
 
             /*below is temp to delete*/
-            OVSDB_PRINTF_DEBUG("ovsdb_vtep_db_table.table_physical_port[port_num].name=%s",
+            OVSDB_PRINTF_DEBUG_TRACE("ovsdb_vtep_db_table.table_physical_port[port_num].name=%s",
                     ovsdb_vtep_db_table.table_physical_port[port_num].name);
 
             break;
@@ -1996,11 +1990,11 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
 
     if(!port_name)
     {
-        OVSDB_PRINTF_DEBUG("do not find port name.");
+        OVSDB_PRINTF_DEBUG_ERROR("do not find port name.");
         return;
     }
 
-    OVSDB_PRINTF_DEBUG("vlan_binding update port name = %s.", port_name);
+    OVSDB_PRINTF_DEBUG_TRACE("vlan_binding update port name = %s.", port_name);
 
     if(*update_type == ADD_VLAN_BINGDING)
     {
@@ -2044,15 +2038,15 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
 
                     if((vlanid > 4093)||(vlanid<0))
                     {
-                        OVSDB_PRINTF_DEBUG("vlan_id is not valid, which is %d.", vlanid);
+                        OVSDB_PRINTF_DEBUG_TRACE("vlan_id is not valid, which is %d.", vlanid);
                     }
                     if(switch_vxlan_map[i].vlan_vni_map[vlanid].used_bit)
                     {
-                        OVSDB_PRINTF_DEBUG("vlan_id %d mapping is exist, do not process.", vlanid);
+                        OVSDB_PRINTF_DEBUG_TRACE("vlan_id %d mapping is exist, do not process.", vlanid);
                     }
                     else
                     {
-                        OVSDB_PRINTF_DEBUG("vlan_id %d mapping is absent, now do process.", vlanid);
+                        OVSDB_PRINTF_DEBUG_TRACE("vlan_id %d mapping is absent, now do process.", vlanid);
                         uuid_from_string(&uuid_ls, json_string(json_array(json_array(new_vlanbinding_elems_array->elems[j])->elems[1])->elems[1]));
                         for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
                         {
@@ -2074,7 +2068,7 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
                             uiRet = netconf_ce_config_port(vlanid, switch_vxlan_map[i].vlan_vni_map[vlanid].vni, port_name);
                             if (OVSDB_OK != uiRet)
                             {
-                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config subinterface when processing port vlanbinding.");
+                                OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config subinterface when processing port vlanbinding.");
                                 return;
                             }
 
@@ -2121,19 +2115,19 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
                             if(vlanid == j)
                             {
                                vlan_binding_exist=1;
-                               OVSDB_PRINTF_DEBUG("vlan_id %d mapping is not deleted, do not process.", j);
+                               OVSDB_PRINTF_DEBUG_TRACE("vlan_id %d mapping is not deleted, do not process.", j);
                             }
                         }
                         if(!vlan_binding_exist) /*在switch_vxlan_map中有，但是new中没有，说明在这次操作中被删除了*/
                         {
                             int port_mappint_exist=0;
-                            OVSDB_PRINTF_DEBUG("vlan_id %d mapping is now deleted, do process now.", j);
+                            OVSDB_PRINTF_DEBUG_TRACE("vlan_id %d mapping is now deleted, do process now.", j);
 
                             //ce_undo_config_port(j, switch_vxlan_map[i].vlan_vni_map[j].vni, port_name);
                             uiRet = netconf_ce_undo_config_port(j, port_name);
                             if (OVSDB_OK != uiRet)
                             {
-                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config undo subinterface when processing port vlanbinding.");
+                                OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config undo subinterface when processing port vlanbinding.");
                                 return;
                             }
 
@@ -2152,7 +2146,7 @@ void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, c
 
                             if(!port_mappint_exist)
                             {
-                                OVSDB_PRINTF_DEBUG("clear all mapping of port %s.", port_name);
+                                OVSDB_PRINTF_DEBUG_TRACE("clear all mapping of port %s.", port_name);
                                 memset(&switch_vxlan_map[i], 0, sizeof(struct port_vlan_to_vni_map));
                             }
 
@@ -2193,7 +2187,7 @@ void ovsdb_switch_update_management_ips_process(struct json *new, struct json *o
 
     if((!new_management_ips)||(!old_management_ips))    /*说明更新和managemenet ip无关，可能是更新的description之类的*/
     {
-        OVSDB_PRINTF_DEBUG("physical switch table update has nothing to do with management_ips.");
+        OVSDB_PRINTF_DEBUG_ERROR("physical switch table update has nothing to do with management_ips.");
         return;
     }
 
@@ -2206,7 +2200,7 @@ void ovsdb_switch_update_management_ips_process(struct json *new, struct json *o
                 ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]=malloc(strlen(json_string(new_management_ips))+1);
                 memcpy(ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0],
                     json_string(new_management_ips), strlen(json_string(new_management_ips))+1);
-                OVSDB_PRINTF_DEBUG("update management_ips of %s, which is %s.",
+                OVSDB_PRINTF_DEBUG_TRACE("update management_ips of %s, which is %s.",
                     ovsdb_vtep_db_table.table_physical_switch[i].name, ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]);
             }
             break;
@@ -2216,7 +2210,7 @@ void ovsdb_switch_update_management_ips_process(struct json *new, struct json *o
     uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source when updating management ips.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config Nve 1 source when updating management ips.");
         return;
     }
 
@@ -2242,7 +2236,7 @@ void ovsdb_switch_update_tunnel_ips_process(struct json *new, struct json *old, 
 
     if((!new_tunnel_ips)||(!old_tunnel_ips))    /*说明更新和tunnel ip无关，可能是更新的description之类的*/
     {
-        OVSDB_PRINTF_DEBUG("physical switch table update has nothing to do with tunnel_ips.");
+        OVSDB_PRINTF_DEBUG_TRACE("physical switch table update has nothing to do with tunnel_ips.");
         return;
     }
 
@@ -2255,7 +2249,7 @@ void ovsdb_switch_update_tunnel_ips_process(struct json *new, struct json *old, 
                 ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]=malloc(strlen(json_string(new_tunnel_ips))+1);
                 memcpy(ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0],
                     json_string(new_tunnel_ips), strlen(json_string(new_tunnel_ips))+1);
-                OVSDB_PRINTF_DEBUG("update tunnel_ips of %s, which is %s.",
+                OVSDB_PRINTF_DEBUG_TRACE("update tunnel_ips of %s, which is %s.",
                     ovsdb_vtep_db_table.table_physical_switch[i].name, ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]);
             }
             break;
@@ -2266,7 +2260,7 @@ void ovsdb_switch_update_tunnel_ips_process(struct json *new, struct json *old, 
     uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source when updating tunnel ips.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config Nve 1 source when updating tunnel ips.");
         return;
     }
 
@@ -2292,7 +2286,7 @@ void ovsdb_mcast_remote_update_locator_set_process(struct json *new, struct json
 
     if((!new_locator_set)||(!old_locator_set))    /*说明更新和locator_set无关*/
     {
-        OVSDB_PRINTF_DEBUG("mcast_remote table update has nothing to do with locator_set.");
+        OVSDB_PRINTF_DEBUG_TRACE("mcast_remote table update has nothing to do with locator_set.");
         return;
     }
 
@@ -2300,11 +2294,11 @@ void ovsdb_mcast_remote_update_locator_set_process(struct json *new, struct json
     {
         if(uuid_equals(&uuid_mcast_remote, &ovsdb_vtep_db_table.table_mcast_macs_remote[i].uuid_self))
         {
-            OVSDB_PRINTF_DEBUG("updated mcast_remote uuid ="UUID_FMT, UUID_ARGS(&uuid_mcast_remote));
-            OVSDB_PRINTF_DEBUG("old locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
+            OVSDB_PRINTF_DEBUG_TRACE("updated mcast_remote uuid ="UUID_FMT, UUID_ARGS(&uuid_mcast_remote));
+            OVSDB_PRINTF_DEBUG_TRACE("old locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
 
             uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set, json_string(json_array(new_locator_set)->elems[1]));
-            OVSDB_PRINTF_DEBUG("new locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
+            OVSDB_PRINTF_DEBUG_TRACE("new locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
 
             break;
         }
@@ -2331,7 +2325,7 @@ void ovsdb_mcast_local_update_locator_set_process(struct json *new, struct json 
 
     if((!new_locator_set)||(!old_locator_set))    /*说明更新和locator_set无关*/
     {
-        OVSDB_PRINTF_DEBUG("mcast_remote table update has nothing to do with locator_set.");
+        OVSDB_PRINTF_DEBUG_TRACE("mcast_remote table update has nothing to do with locator_set.");
         return;
     }
 
@@ -2339,11 +2333,11 @@ void ovsdb_mcast_local_update_locator_set_process(struct json *new, struct json 
     {
         if(uuid_equals(&uuid_mcast_local, &ovsdb_vtep_db_table.table_mcast_macs_local[i].uuid_self))
         {
-            OVSDB_PRINTF_DEBUG("updated mcast_local uuid ="UUID_FMT, UUID_ARGS(&uuid_mcast_local));
-            OVSDB_PRINTF_DEBUG("old locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
+            OVSDB_PRINTF_DEBUG_TRACE("updated mcast_local uuid ="UUID_FMT, UUID_ARGS(&uuid_mcast_local));
+            OVSDB_PRINTF_DEBUG_TRACE("old locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
 
             uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set, json_string(json_array(new_locator_set)->elems[1]));
-            OVSDB_PRINTF_DEBUG("new locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
+            OVSDB_PRINTF_DEBUG_TRACE("new locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
 
             break;
         }
@@ -2367,12 +2361,12 @@ void ovsdb_physical_locator_process(struct uuid *uuid_pl, char *pl_dst_ip)
     /*此处代码不健壮，只是针对测试场景的特殊处理，须考虑改进*/
     if(NULL == ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
     {
-        OVSDB_PRINTF_DEBUG("No tunnel ip in physical switch[0]!!!");
+        OVSDB_PRINTF_DEBUG_TRACE("No tunnel ip in physical switch[0]!!!");
         return;
     }
     else
     {
-        OVSDB_PRINTF_DEBUG("tunnel ip in physical switch[0] is %s.",
+        OVSDB_PRINTF_DEBUG_TRACE("tunnel ip in physical switch[0] is %s.",
             ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
     }
 
@@ -2388,7 +2382,7 @@ void ovsdb_physical_locator_process(struct uuid *uuid_pl, char *pl_dst_ip)
             {
                 if(string_equals(pl_dst_ip, ovsdb_vtep_db_table.table_physical_switch[id_ps].tunnel_ips[id_t]))
                 {
-                    OVSDB_PRINTF_DEBUG("source vtep ip, return.");
+                    OVSDB_PRINTF_DEBUG_TRACE("source vtep ip, return.");
                     return;    /*说明locator表中的dst ip是本端source ip，直接返回*/
                 }
             }
@@ -2425,7 +2419,7 @@ void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *p
             memcpy(&uuid_logical_switch, &ovsdb_vtep_db_table.table_ucast_macs_remote[l].logical_switch, sizeof(struct uuid));
 
             /*below is temp to delete*/
-            OVSDB_PRINTF_DEBUG("uuid_logical_switch = "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
+            OVSDB_PRINTF_DEBUG_TRACE("uuid_logical_switch = "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
 
             for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
             {
@@ -2433,13 +2427,13 @@ void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *p
                 {
                     if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key < 4096)
                     {
-                        OVSDB_PRINTF_DEBUG("tunnel key does not meet requirement, which is %d.",
+                        OVSDB_PRINTF_DEBUG_TRACE("tunnel key does not meet requirement, which is %d.",
                             ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
                     }
                     else
                     {
                         tunnel_key = ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key;
-                        OVSDB_PRINTF_DEBUG("tunnel key when condig vxlan tunnel is %d.", tunnel_key);
+                        OVSDB_PRINTF_DEBUG_TRACE("tunnel key when condig vxlan tunnel is %d.", tunnel_key);
                         break;
                     }
                 }
@@ -2452,7 +2446,7 @@ void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *p
     {
         return;
     }
-    OVSDB_PRINTF_DEBUG("tunnel_key=%d.", tunnel_key);
+    OVSDB_PRINTF_DEBUG_TRACE("tunnel_key=%d.", tunnel_key);
 
     /*将隧道信息写入待创建隧道全局变量，在第二阶段进行创建*/
     for(k = 0; k < HYPERVISOR_MAX; k++)
@@ -2501,98 +2495,92 @@ void  ovsdb_physical_locator_process_service_node_ip(struct uuid *uuid_pl, char 
     int tunnel_key=0;
 
     for(j=0; j<TABLE_PHYSICAL_LOCATOR_SET_NUM; j++)
-       {
-           uuid_zero(&uuid_locator_set);
+    {
+        uuid_zero(&uuid_locator_set);
 
-           if(uuid_is_zero(&ovsdb_vtep_db_table.table_physical_locator_set[j].uuid_self))
-           {
-               continue;
-           }
-           else
-           {
-               for(k=0; k<LOCATOR_NUM_IN_LOCATION_SET; k++)
-               {
-                   if(uuid_equals(uuid_pl, &ovsdb_vtep_db_table.table_physical_locator_set[j].locators[k]))
-                   {
-                       memcpy(&uuid_locator_set, &ovsdb_vtep_db_table.table_physical_locator_set[j].uuid_self, sizeof(struct uuid));
+        if(uuid_is_zero(&ovsdb_vtep_db_table.table_physical_locator_set[j].uuid_self))
+        {
+            continue;
+        }
 
-                       /*below is temp to delete*/
-                       OVSDB_PRINTF_DEBUG("uuid_locator_set = "UUID_FMT, UUID_ARGS(&uuid_locator_set));
+        for(k=0; k<LOCATOR_NUM_IN_LOCATION_SET; k++)
+        {
+            if(uuid_equals(uuid_pl, &ovsdb_vtep_db_table.table_physical_locator_set[j].locators[k]))
+            {
+                memcpy(&uuid_locator_set, &ovsdb_vtep_db_table.table_physical_locator_set[j].uuid_self, sizeof(struct uuid));
 
-                       for(l=0; l<TABLE_MCAST_MACS_REMOTE_NUM; l++)
-                       {
-                           if(uuid_equals(&uuid_locator_set, &ovsdb_vtep_db_table.table_mcast_macs_remote[l].locator_set))
-                           {
-                                memcpy(&uuid_logical_switch, &ovsdb_vtep_db_table.table_mcast_macs_remote[l].logical_switch, sizeof(struct uuid));
+                /*below is temp to delete*/
+                OVSDB_PRINTF_DEBUG_TRACE("uuid_locator_set = "UUID_FMT, UUID_ARGS(&uuid_locator_set));
 
-                               /*below is temp to delete*/
-                                OVSDB_PRINTF_DEBUG("uuid_logical_switch= "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
+                for(l=0; l<TABLE_MCAST_MACS_REMOTE_NUM; l++)
+                {
+                    if(uuid_equals(&uuid_locator_set, &ovsdb_vtep_db_table.table_mcast_macs_remote[l].locator_set))
+                    {
+                        memcpy(&uuid_logical_switch, &ovsdb_vtep_db_table.table_mcast_macs_remote[l].logical_switch, sizeof(struct uuid));
 
-                                for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
+                        /*below is temp to delete*/
+                        OVSDB_PRINTF_DEBUG_TRACE("uuid_logical_switch= "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
+
+                        for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
+                        {
+                            if(uuid_equals(&uuid_logical_switch, &ovsdb_vtep_db_table.table_logical_switch[m].uuid_self))
+                            {
+                                if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key > 4095)
                                 {
-                                    if(uuid_equals(&uuid_logical_switch, &ovsdb_vtep_db_table.table_logical_switch[m].uuid_self))
+                                    tunnel_key = ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key;
+                                    OVSDB_PRINTF_DEBUG_TRACE("tunnel key when config vxlan tunnel is %d.", tunnel_key);
+
+                                    /*将隧道信息写入待创建隧道全局变量，在第二阶段进行创建*/
+                                    for(i=0; i<SERVICE_NODE_MAX; i++)
                                     {
-                                        if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key > 4095)
+                                        if(service_node_vxlan_tunnel_to_be_created[i].used_bit)
                                         {
-                                            tunnel_key = ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key;
-                                            OVSDB_PRINTF_DEBUG("tunnel key when config vxlan tunnel is %d.", tunnel_key);
-
-
-                                            /*将隧道信息写入待创建隧道全局变量，在第二阶段进行创建*/
-                                            for(i=0; i<SERVICE_NODE_MAX; i++)
-                                            {
-                                                if(service_node_vxlan_tunnel_to_be_created[i].used_bit)
-                                                {
-                                                    continue;
-                                                }
-                                                else
-                                                {
-                                                    /*vni*/
-                                                    service_node_vxlan_tunnel_to_be_created[i].vni = tunnel_key;
-
-                                                    /*dst_ip*/
-                                                    service_node_vxlan_tunnel_to_be_created[i].dst_ip = malloc(strlen(pl_dst_ip)+1);
-                                                    memcpy(service_node_vxlan_tunnel_to_be_created[i].dst_ip, pl_dst_ip,
-                                                        strlen(pl_dst_ip)+1);
-
-                                                    /*source_ip*/
-                                                    service_node_vxlan_tunnel_to_be_created[i].source_ip = malloc(strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
-                                                    memcpy(service_node_vxlan_tunnel_to_be_created[i].source_ip, ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
-                                                        strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
-
-                                                    /*used_bit*/
-                                                    service_node_vxlan_tunnel_to_be_created[i].used_bit = 1;
-
-                                                    /*创建标志位，用于第二阶段*/
-                                                    vxlan_tunnel_to_be_create_flag = 1;
-
-
-
-                                                    break;
-                                                }
-                                            }
-
-
-                                            //ovsdb_physical_locator_process_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+                                            continue;
                                         }
                                         else
                                         {
-                                            OVSDB_PRINTF_DEBUG("tunnel key does not meet requirement,which is %d.", ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
+                                            /*vni*/
+                                            service_node_vxlan_tunnel_to_be_created[i].vni = tunnel_key;
+   
+                                            /*dst_ip*/
+                                            service_node_vxlan_tunnel_to_be_created[i].dst_ip = malloc(strlen(pl_dst_ip)+1);
+                                            memcpy(service_node_vxlan_tunnel_to_be_created[i].dst_ip, pl_dst_ip,
+                                                strlen(pl_dst_ip)+1);
+   
+                                            /*source_ip*/
+                                            service_node_vxlan_tunnel_to_be_created[i].source_ip = malloc(strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+                                            memcpy(service_node_vxlan_tunnel_to_be_created[i].source_ip, ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
+                                                strlen(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])+1);
+   
+                                            /*used_bit*/
+                                            service_node_vxlan_tunnel_to_be_created[i].used_bit = 1;
+   
+                                            /*创建标志位，用于第二阶段*/
+                                            vxlan_tunnel_to_be_create_flag = 1;
+   
+                                            break;
                                         }
-
-                                        break;
                                     }
+
+                                    //ovsdb_physical_locator_process_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+                                }
+                                else
+                                {
+                                    OVSDB_PRINTF_DEBUG_WARN("tunnel key does not meet requirement,which is %d.", ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
                                 }
 
                                 break;
-                           }
-                       }
+                            }
+                        }
 
-                       break;
-                   }
-               }
-           }
-       }
+                        break;
+                    }
+                }
+
+                break;
+            }
+        }
+    }
 
 }
 
@@ -2604,7 +2592,7 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char *pl
 
     if(tunnel_key < 4096)
     {
-        OVSDB_PRINTF_DEBUG("tunnel_key invalid in ovsdb_physical_locator_process_config_vxlan_tunnel.");
+        OVSDB_PRINTF_DEBUG_ERROR("tunnel_key %d invalid in ovsdb_physical_locator_process_config_vxlan_tunnel.", tunnel_key);
         return;
     }
 
@@ -2618,19 +2606,19 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char *pl
         else
         {
             /*temp to delete for debug*/
-            OVSDB_PRINTF_DEBUG("k=%d.", k);
-            OVSDB_PRINTF_DEBUG("tunnrl_key=%d.", tunnel_key);
-            OVSDB_PRINTF_DEBUG("switch_vxlan_tunnel[k].vni=%d.", switch_vxlan_tunnel[k].vni);
-            OVSDB_PRINTF_DEBUG("pl_dst_ip=%s.", pl_dst_ip);
-            OVSDB_PRINTF_DEBUG("switch_vxlan_tunnel[k].dst_ip=%s.", switch_vxlan_tunnel[k].dst_ip);
-            OVSDB_PRINTF_DEBUG("tunnel_key == switch_vxlan_tunnel[k].vni=%d.", (tunnel_key == switch_vxlan_tunnel[k].vni));
-            OVSDB_PRINTF_DEBUG("string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip=%d.", (string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)));
-            OVSDB_PRINTF_DEBUG("switch_vxlan_tunnel[k].source_ip=%s.", switch_vxlan_tunnel[k].source_ip);
-            OVSDB_PRINTF_DEBUG("ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]=%s.", ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
+            OVSDB_PRINTF_DEBUG_TRACE("k=%d.", k);
+            OVSDB_PRINTF_DEBUG_TRACE("tunnrl_key=%d.", tunnel_key);
+            OVSDB_PRINTF_DEBUG_TRACE("switch_vxlan_tunnel[k].vni=%d.", switch_vxlan_tunnel[k].vni);
+            OVSDB_PRINTF_DEBUG_TRACE("pl_dst_ip=%s.", pl_dst_ip);
+            OVSDB_PRINTF_DEBUG_TRACE("switch_vxlan_tunnel[k].dst_ip=%s.", switch_vxlan_tunnel[k].dst_ip);
+            OVSDB_PRINTF_DEBUG_TRACE("tunnel_key == switch_vxlan_tunnel[k].vni=%d.", (tunnel_key == switch_vxlan_tunnel[k].vni));
+            OVSDB_PRINTF_DEBUG_TRACE("string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip=%d.", (string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)));
+            OVSDB_PRINTF_DEBUG_TRACE("switch_vxlan_tunnel[k].source_ip=%s.", switch_vxlan_tunnel[k].source_ip);
+            OVSDB_PRINTF_DEBUG_TRACE("ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]=%s.", ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
 
             if((tunnel_key == switch_vxlan_tunnel[k].vni)&&(string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)))
             {
-                OVSDB_PRINTF_DEBUG("tunnel exist with dst_ip = %s and vni = %d.", pl_dst_ip, tunnel_key);
+                OVSDB_PRINTF_DEBUG_ERROR("tunnel exist with dst_ip = %s and vni = %d.", pl_dst_ip, tunnel_key);
                 return;
             }
         }
@@ -2640,12 +2628,10 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char *pl
     uiRet = netconf_ce_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config vxlan tunnel.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config vxlan tunnel.");
         return;
     }
 }
-
-VLOG_DEFINE_THIS_MODULE(ovsdb_client);
 
 enum args_needed {
     NEED_NONE,            /* No JSON-RPC connection or database name needed. */
@@ -3140,7 +3126,7 @@ monitor_print_row(struct json *row, const char *type, const char *uuid,
 
 void global_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------global_table_node, action=%s----------------", ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------global_table_node, action=%s----------------", ACTION_TYPE(action));
 
     switch(action)
         {
@@ -3151,7 +3137,7 @@ void global_table_process(struct jsonrpc *rpc, struct json *new, struct json *ol
                     {
                         (void)uuid_from_string(&ovsdb_vtep_db_table.table_global.uuid_self, node_name);
 
-                        OVSDB_PRINTF_DEBUG("global_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_global.uuid_self));
+                        OVSDB_PRINTF_DEBUG_TRACE("global_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_global.uuid_self));
 
                     }
 
@@ -3178,7 +3164,7 @@ void global_table_process(struct jsonrpc *rpc, struct json *new, struct json *ol
 
 void global_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------global_table_node_stage_2, action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------global_table_node_stage_2, action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
         {
@@ -3210,7 +3196,7 @@ void global_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *
 
 void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_switch_table_node, action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_switch_table_node, action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
     {
@@ -3260,9 +3246,9 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
                         ovsdb_vtep_db_table.table_physical_switch[i].description= malloc(strlen(json_string(des))+1) ;
                         memcpy(ovsdb_vtep_db_table.table_physical_switch[i].description, json_string(des), strlen(json_string(des))+1);
                         #if 1
-                        OVSDB_PRINTF_DEBUG("physical_switch_table i=%d, name=%s, description=%s.", i,
+                        OVSDB_PRINTF_DEBUG_TRACE("physical_switch_table i=%d, name=%s, description=%s.", i,
                              ovsdb_vtep_db_table.table_physical_switch[i].name, ovsdb_vtep_db_table.table_physical_switch[i].description);
-                        OVSDB_PRINTF_DEBUG("physical_switch_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_switch[i].uuid_self));
+                        OVSDB_PRINTF_DEBUG_TRACE("physical_switch_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_switch[i].uuid_self));
                         #endif
 
                         /*management_ips*/
@@ -3270,7 +3256,7 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
                         {
                             ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]= malloc(strlen(json_string(management_ips))+1) ;
                             memcpy(ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0], json_string(management_ips), strlen(json_string(management_ips))+1);
-                            OVSDB_PRINTF_DEBUG("\nonly one management_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]);
+                            OVSDB_PRINTF_DEBUG_TRACE("\nonly one management_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].management_ips[0]);
                         }
                         else if(JSON_ARRAY == management_ips->type) /*有多个management ip*/
                         {
@@ -3281,8 +3267,8 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
 
                             management_ips_set = json_array(management_ips);
                             management_ips_set_value = json_array(management_ips_set->elems[1]);    /*elems[0] is "set" string*/
-                            if(!management_ips_set_value->n) OVSDB_PRINTF_DEBUG("physical switch has no management ips.");
-                            else OVSDB_PRINTF_DEBUG("physical switch has more than one management ips.");
+                            if(!management_ips_set_value->n) OVSDB_PRINTF_DEBUG_TRACE("physical switch has no management ips.");
+                            else OVSDB_PRINTF_DEBUG_TRACE("physical switch has more than one management ips.");
                             for(; j < management_ips_set_value->n; j++)
                             {
                                 if(j >= PHYSICAL_SWITCH_MANAGE_IP_NUM)
@@ -3292,7 +3278,7 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
                                 ip_value = management_ips_set_value->elems[j];
                                 ovsdb_vtep_db_table.table_physical_switch[i].management_ips[j]= malloc(strlen(json_string(ip_value))+1) ;
                                 memcpy(ovsdb_vtep_db_table.table_physical_switch[i].management_ips[j], json_string(ip_value), strlen(json_string(ip_value))+1);
-                                OVSDB_PRINTF_DEBUG("management_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].management_ips[j]);
+                                OVSDB_PRINTF_DEBUG_TRACE("management_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].management_ips[j]);
                             }
                         }
 
@@ -3302,7 +3288,7 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
                         {
                             ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]= malloc(strlen(json_string(tunnel_ips))+1) ;
                             memcpy(ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0], json_string(tunnel_ips), strlen(json_string(tunnel_ips))+1);
-                            OVSDB_PRINTF_DEBUG("only one tunnel_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]);
+                            OVSDB_PRINTF_DEBUG_TRACE("only one tunnel_ips = %s", ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[0]);
                         }
                         else if(JSON_ARRAY == tunnel_ips->type) /*有多个tunnel ip*/
                         {
@@ -3315,11 +3301,11 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
                             tunnel_ips_set_value = json_array(tunnel_ips_set->elems[1]);    /*elems[0] is "set" string*/
                             if(!tunnel_ips_set_value->n)
                             {
-                                OVSDB_PRINTF_DEBUG("physical switch has no tunnel ips.");
+                                OVSDB_PRINTF_DEBUG_TRACE("physical switch has no tunnel ips.");
                             }
                             else
                             {
-                                OVSDB_PRINTF_DEBUG("physical switch has more than one tunnel ips.");
+                                OVSDB_PRINTF_DEBUG_TRACE("physical switch has more than one tunnel ips.");
                             }
 
                             for(; j < tunnel_ips_set_value->n; j++)
@@ -3331,7 +3317,7 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
                                 ip_value = tunnel_ips_set_value->elems[j];
                                 ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[j]= malloc(strlen(json_string(ip_value))+1) ;
                                 memcpy(ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[j], json_string(ip_value), strlen(json_string(ip_value))+1);
-                                OVSDB_PRINTF_DEBUG("tunnel_ips = %s.", ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[j]);
+                                OVSDB_PRINTF_DEBUG_TRACE("tunnel_ips = %s.", ovsdb_vtep_db_table.table_physical_switch[i].tunnel_ips[j]);
                             }
                         }
 
@@ -3339,7 +3325,7 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
                         uiRet = netconf_ce_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
                         if (OVSDB_OK != uiRet)
                         {
-                            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config Nve 1 source when processing physical switch table.");
+                            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config Nve 1 source when processing physical switch table.");
                             return;
                         }
 
@@ -3388,7 +3374,7 @@ void physical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct
 
 void physical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_switch_table_node_stage_2,action=%s----------------", ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_switch_table_node_stage_2,action=%s----------------", ACTION_TYPE(action));
     switch(action)
         {
             case TABLE_INITIAL:
@@ -3420,7 +3406,7 @@ void physical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, stru
 
 void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------logical_switch_table_node,action=%s----------------", ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------logical_switch_table_node,action=%s----------------", ACTION_TYPE(action));
 
     switch(action)
     {
@@ -3458,9 +3444,9 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
                         ovsdb_vtep_db_table.table_logical_switch[i].description= malloc(strlen(json_string(des))+1) ;
                         memcpy(ovsdb_vtep_db_table.table_logical_switch[i].description, json_string(des), strlen(json_string(des))+1);
                         #if 1
-                        OVSDB_PRINTF_DEBUG("logical_switch_table .i=%d, name = %s, des = %s", i,
+                        OVSDB_PRINTF_DEBUG_TRACE("logical_switch_table .i=%d, name = %s, des = %s", i,
                             ovsdb_vtep_db_table.table_logical_switch[i].name, ovsdb_vtep_db_table.table_logical_switch[i].description);
-                        OVSDB_PRINTF_DEBUG("logical_switch_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_logical_switch[i].uuid_self));
+                        OVSDB_PRINTF_DEBUG_TRACE("logical_switch_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_logical_switch[i].uuid_self));
                         #endif
 
                         /*tunnel_key*/
@@ -3469,14 +3455,14 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
                         if(JSON_INTEGER == tunnel_key->type)
                         {
                             ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key = json_integer(tunnel_key);
-                            OVSDB_PRINTF_DEBUG("tunnel key = %d.", ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key);
+                            OVSDB_PRINTF_DEBUG_TRACE("tunnel key = %d.", ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key);
 
                             /*是否需要添加以下功能:如果该bd已经创建了(因为有可能多个ls的vni相同，是不是就不创建bd了)*/
                             //ce_config_bd(ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key);
                             uiRet = netconf_ce_config_bd(ovsdb_vtep_db_table.table_logical_switch[i].tunnel_key);
                             if (OVSDB_OK != uiRet)
                             {
-                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config bridge-domain when inserting table in processing logical switch table");
+                                OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config bridge-domain when inserting table in processing logical switch table");
                                 return;
                             }
                         }
@@ -3496,14 +3482,14 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
 
                 uuid_zero(&deleted_ls_uuid);
                 (void)uuid_from_string(&deleted_ls_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("deleted logical_switch uuid = "UUID_FMT, UUID_ARGS(&deleted_ls_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("deleted logical_switch uuid = "UUID_FMT, UUID_ARGS(&deleted_ls_uuid));
 
                 for(j=0; j<TABLE_LOGICAL_SWITCH_NUM; j++)
                 {
                     if(uuid_equals(&deleted_ls_uuid, &ovsdb_vtep_db_table.table_logical_switch[j].uuid_self))
                     {
                        /*调试打印*/
-                       OVSDB_PRINTF_DEBUG("deleted logical_switch name = %s.", ovsdb_vtep_db_table.table_logical_switch[j].name);
+                       OVSDB_PRINTF_DEBUG_TRACE("deleted logical_switch name = %s.", ovsdb_vtep_db_table.table_logical_switch[j].name);
 
                        /*如果没有其他的ls的vni与当前删除的ls的vni相同，则undo bridge-domain*/
                        for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
@@ -3525,7 +3511,7 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
                            uiRet = netconf_ce_undo_config_bd(ovsdb_vtep_db_table.table_logical_switch[j].tunnel_key);
                            if (OVSDB_OK != uiRet)
                            {
-                               OVSDB_PRINTF_DEBUG("[ERROR]Failed to config undo bridge-domain when deleting table in processing logical switch table");
+                               OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config undo bridge-domain when deleting table in processing logical switch table");
                                return;
                            }
                        }
@@ -3563,7 +3549,7 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
 
                 uuid_zero(&updated_ls_uuid);
                 (void)uuid_from_string(&updated_ls_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("updated logical_switch uuid = "UUID_FMT, UUID_ARGS(&updated_ls_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("updated logical_switch uuid = "UUID_FMT, UUID_ARGS(&updated_ls_uuid));
 
                 tunnel_key = shash_find_data(json_object(new), "tunnel_key");
                 if(NULL == tunnel_key)
@@ -3581,15 +3567,15 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
 
                             if(ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key == tunnel_key_temp)
                             {
-                                OVSDB_PRINTF_DEBUG("logical_swutch %s's tunnel_key is not updated,tunnel_key = %d.",
+                                OVSDB_PRINTF_DEBUG_TRACE("logical_swutch %s's tunnel_key is not updated,tunnel_key = %d.",
                                     ovsdb_vtep_db_table.table_logical_switch[k].name, ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key);
                             }
                             else
                             {
-                                OVSDB_PRINTF_DEBUG("logical_swutch %s's tunnel_key is updated,old tunnel_key = %d.",
+                                OVSDB_PRINTF_DEBUG_TRACE("logical_swutch %s's tunnel_key is updated,old tunnel_key = %d.",
                                     ovsdb_vtep_db_table.table_logical_switch[k].name,
                                     ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key);
-                                OVSDB_PRINTF_DEBUG("new tunnel_key = %d.", tunnel_key_temp);
+                                OVSDB_PRINTF_DEBUG_TRACE("new tunnel_key = %d.", tunnel_key_temp);
 
                                 /*在TOR上进行相应的配置BD和删除BD操作*/
                                 if(tunnel_key_temp > 4095)  /*如果新的vni大于4095,则创建BD，暂时未考虑tor上已经创建了该BD的情况*/
@@ -3598,7 +3584,7 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
                                     uiRet = netconf_ce_config_bd(tunnel_key_temp);
                                     if (OVSDB_OK != uiRet)
                                     {
-                                        OVSDB_PRINTF_DEBUG("[ERROR]Failed to config bridge-domain when updating table in processing logical switch table");
+                                        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config bridge-domain when updating table in processing logical switch table");
                                         return;
                                     }
                                 }
@@ -3624,7 +3610,7 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
                                         uiRet = netconf_ce_undo_config_bd(ovsdb_vtep_db_table.table_logical_switch[k].tunnel_key);
                                         if (OVSDB_OK != uiRet)
                                         {
-                                            OVSDB_PRINTF_DEBUG("[ERROR]Failed to config undo bridge-domain when updating table in processing logical switch table");
+                                            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config undo bridge-domain when updating table in processing logical switch table");
                                             return;
                                         }
                                     }
@@ -3650,7 +3636,7 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
 
 void logical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------logical_switch_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------logical_switch_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
     switch(action)
         {
             case TABLE_INITIAL:
@@ -3682,7 +3668,7 @@ void logical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, struc
 
 void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_locator_table_node,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_locator_table_node,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
     {
@@ -3708,8 +3694,8 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                         ovsdb_vtep_db_table.table_physical_locator[i].dst_ip= malloc(strlen(json_string(dst_ip))+1) ;
                         memcpy(ovsdb_vtep_db_table.table_physical_locator[i].dst_ip, json_string(dst_ip), strlen(json_string(dst_ip))+1);
 
-                        OVSDB_PRINTF_DEBUG("physical locator i=%d, dst_ip=%s.", i, ovsdb_vtep_db_table.table_physical_locator[i].dst_ip);
-                        OVSDB_PRINTF_DEBUG("physical locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator[i].uuid_self));
+                        OVSDB_PRINTF_DEBUG_TRACE("physical locator i=%d, dst_ip=%s.", i, ovsdb_vtep_db_table.table_physical_locator[i].dst_ip);
+                        OVSDB_PRINTF_DEBUG_TRACE("physical locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator[i].uuid_self));
 
                         ovsdb_physical_locator_process(&ovsdb_vtep_db_table.table_physical_locator[i].uuid_self, ovsdb_vtep_db_table.table_physical_locator[i].dst_ip);
 
@@ -3728,7 +3714,7 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
 
                 uuid_zero(&deleted_pl_uuid);
                 (void)uuid_from_string(&deleted_pl_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("deleted physical_locator uuid = "UUID_FMT, UUID_ARGS(&deleted_pl_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("deleted physical_locator uuid = "UUID_FMT, UUID_ARGS(&deleted_pl_uuid));
 
                 for(j=0; j<TABLE_PHYSICAL_LOCATOR_NUM; j++)
                 {
@@ -3748,12 +3734,12 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                                     uiRet = netconf_ce_undo_config_vxlan_tunnel(switch_vxlan_tunnel[m].vni, switch_vxlan_tunnel[m].dst_ip);
                                     if (OVSDB_OK != uiRet)
                                     {
-                                        OVSDB_PRINTF_DEBUG("[ERROR]Failed to undo vxlan tunnel");
+                                        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to undo vxlan tunnel");
                                         return;
                                     }
 
-                                    OVSDB_PRINTF_DEBUG("delete entry to switch_vxlan_tunnel. m =%d, vni = %d,", m, switch_vxlan_tunnel[m].vni);
-                                    OVSDB_PRINTF_DEBUG("source_ip = %s, dst_ip = %s.", switch_vxlan_tunnel[m].source_ip, switch_vxlan_tunnel[m].dst_ip);
+                                    OVSDB_PRINTF_DEBUG_TRACE("delete entry to switch_vxlan_tunnel. m =%d, vni = %d,", m, switch_vxlan_tunnel[m].vni);
+                                    OVSDB_PRINTF_DEBUG_TRACE("source_ip = %s, dst_ip = %s.", switch_vxlan_tunnel[m].source_ip, switch_vxlan_tunnel[m].dst_ip);
 
                                     /*释放switch_vxlan_tunnel中的该条表项*/
                                     #if 1
@@ -3783,7 +3769,7 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                                 uiRet = netconf_ce_undo_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
                                 if (OVSDB_OK != uiRet)
                                 {
-                                    OVSDB_PRINTF_DEBUG("[ERROR]Failed to undo Nve 1.");
+                                    OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to undo Nve 1.");
                                 }
                             }
                         }
@@ -3805,10 +3791,6 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
         /*需要考虑1.先add-ucast-remote _nvp_internal XXXX 192.168.2.124,然后再add-ucast-remote ls0 YYYY 192.168.2.124*/
         /*需要考虑2.一个locator出现在多个locator_set中，从而对应多个vni，也就对应多个隧道*/
         /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
-         /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
-         /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
-         /*当前还有一个场景不支持:del-mcast-remote，导致locator对应的locator_set变少，这种情况需要删除隧道*/
-
         /*另外一种当前还不支持的场景；*/
             {
                 struct uuid updated_pl_uuid;
@@ -3816,7 +3798,7 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
 
                 uuid_zero(&updated_pl_uuid);
                 (void)uuid_from_string(&updated_pl_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("updated physical_locator uuid = "UUID_FMT, UUID_ARGS(&updated_pl_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("updated physical_locator uuid = "UUID_FMT, UUID_ARGS(&updated_pl_uuid));
 
                 for(k=0; k<TABLE_PHYSICAL_LOCATOR_NUM; k++)
                 {
@@ -3842,7 +3824,7 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
 
 void physical_locator_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_locator_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_locator_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
         {
@@ -4034,7 +4016,7 @@ void physical_locator_table_process_2(struct jsonrpc *rpc, struct json *new, str
 
 void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action) /*not completed yet*/
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_locator_set__table_node,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_locator_set__table_node,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
     {
@@ -4069,8 +4051,8 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
                         {
                             (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[0],
                                 json_string(locators_value->elems[1]));
-                                OVSDB_PRINTF_DEBUG("physical locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator_set[i].uuid_self));
-                                OVSDB_PRINTF_DEBUG("physical locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[0]));
+                                OVSDB_PRINTF_DEBUG_TRACE("physical locator set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator_set[i].uuid_self));
+                                OVSDB_PRINTF_DEBUG_TRACE("physical locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[0]));
 
                         }
                         /*然后考虑多个locator的情况*/
@@ -4082,7 +4064,7 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
                             for(k=0; k<locator_elems->n; k++)
                             {
                                 uuid_from_string(&locator_uuid, json_string(json_array(locator_elems->elems[k])->elems[1]));
-                                OVSDB_PRINTF_DEBUG("k=%d, physical locator uuid = "UUID_FMT, k, UUID_ARGS(&locator_uuid));
+                                OVSDB_PRINTF_DEBUG_TRACE("k=%d, physical locator uuid = "UUID_FMT, k, UUID_ARGS(&locator_uuid));
                                 if(k<LOCATOR_NUM_IN_LOCATION_SET)
                                 {
                                     uuid_from_string(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[k], json_string(json_array(locator_elems->elems[k])->elems[1]));
@@ -4105,7 +4087,7 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
 
                 uuid_zero(&deleted_pls_uuid);
                 (void)uuid_from_string(&deleted_pls_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("deleted physical_locator_set uuid = "UUID_FMT, UUID_ARGS(&deleted_pls_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("deleted physical_locator_set uuid = "UUID_FMT, UUID_ARGS(&deleted_pls_uuid));
 
                 for(j=0; j<TABLE_PHYSICAL_LOCATOR_SET_NUM; j++)
                 {
@@ -4137,7 +4119,7 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
 
 void physical_locator_set_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action) /*not completed yet*/
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_locator_set_table_node_stage_2,action=%s----------------", ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_locator_set_table_node_stage_2,action=%s----------------", ACTION_TYPE(action));
     switch(action)
         {
             case TABLE_INITIAL:
@@ -4169,7 +4151,7 @@ void physical_locator_set_table_process_2(struct jsonrpc *rpc, struct json *new,
 
 void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_port_table_node,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_port_table_node,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
     {
@@ -4200,17 +4182,17 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
                     {
                         /*uuid*/
                         (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self, node_name);
-                        OVSDB_PRINTF_DEBUG("port uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self));
+                        OVSDB_PRINTF_DEBUG_TRACE("port uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_physical_port[i].uuid_self));
 
                         /*name*/
                         ovsdb_vtep_db_table.table_physical_port[i].name = malloc(strlen(json_string(port_name))+1) ;
                         memcpy(ovsdb_vtep_db_table.table_physical_port[i].name, json_string(port_name), strlen(json_string(port_name))+1);
-                        OVSDB_PRINTF_DEBUG("port name is %s, i = %d", ovsdb_vtep_db_table.table_physical_port[i].name, i);
+                        OVSDB_PRINTF_DEBUG_TRACE("port name is %s, i = %d", ovsdb_vtep_db_table.table_physical_port[i].name, i);
 
                         /*description*/
                         ovsdb_vtep_db_table.table_physical_port[i].description = malloc(strlen(json_string(port_des))+1) ;
                         memcpy(ovsdb_vtep_db_table.table_physical_port[i].description, json_string(port_des), strlen(json_string(port_des))+1);
-                        OVSDB_PRINTF_DEBUG("port description is %s, i = %d", ovsdb_vtep_db_table.table_physical_port[i].description, i);
+                        OVSDB_PRINTF_DEBUG_TRACE("port description is %s, i = %d", ovsdb_vtep_db_table.table_physical_port[i].description, i);
 
                         /*vlan bingding*/
                         /*vlan bingding的处理逻辑不正确，有时间重写一下*/
@@ -4269,15 +4251,15 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
                                         
                                         if((vlanid > 4093)||(vlanid<0))
                                         {
-                                            OVSDB_PRINTF_DEBUG("vlan_id is not valid, which is %d.",vlanid);
+                                            OVSDB_PRINTF_DEBUG_TRACE("vlan_id is not valid, which is %d.",vlanid);
                                         }
                                         if(switch_vxlan_map[m].vlan_vni_map[vlanid].used_bit)
                                         {
-                                            OVSDB_PRINTF_DEBUG("vlan_id %d mapping is exist, do not process.",vlanid);
+                                            OVSDB_PRINTF_DEBUG_TRACE("vlan_id %d mapping is exist, do not process.",vlanid);
                                         }
                                         else
                                         {
-                                            OVSDB_PRINTF_DEBUG("vlan_id %d mapping is absent, now do process.", vlanid);
+                                            OVSDB_PRINTF_DEBUG_TRACE("vlan_id %d mapping is absent, now do process.", vlanid);
                                             uuid_from_string(&uuid_ls, json_string(json_array(json_array(new_vlanbinding_elems_array->elems[j])->elems[1])->elems[1]));
                                             for(k=0; k<TABLE_LOGICAL_SWITCH_NUM; k++)
                                             {
@@ -4299,7 +4281,7 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
                                                 uiRet = netconf_ce_config_port(vlanid, switch_vxlan_map[m].vlan_vni_map[vlanid].vni, ovsdb_vtep_db_table.table_physical_port[i].name);
                                                 if (OVSDB_OK != uiRet)
                                                 {
-                                                    OVSDB_PRINTF_DEBUG("[ERROR]Failed to config subinterface when processing port vlanbinding.");
+                                                    OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config subinterface when processing port vlanbinding.");
                                                     return;
                                                 }
                                                 
@@ -4319,7 +4301,7 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
                         /*port中没有vlan binding，记录日志，方便定位*/
                         else 
                         {
-                            OVSDB_PRINTF_DEBUG("init or insert port %s do not have vlan binding", ovsdb_vtep_db_table.table_physical_port[i].name);
+                            OVSDB_PRINTF_DEBUG_ERROR("init or insert port %s do not have vlan binding", ovsdb_vtep_db_table.table_physical_port[i].name);
                         }
                         
                         break;
@@ -4336,7 +4318,7 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
 
                 uuid_zero(&deleted_port_uuid);
                 (void)uuid_from_string(&deleted_port_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("deleted physical port uuid = "UUID_FMT, UUID_ARGS(&deleted_port_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("deleted physical port uuid = "UUID_FMT, UUID_ARGS(&deleted_port_uuid));
 
                 for(j=0; j<TABLE_PHYSICAL_PORT_NUM; j++)
                 {
@@ -4381,7 +4363,7 @@ void physical_port_table_process(struct jsonrpc *rpc, struct json *new, struct j
 
 void physical_port_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------physical_port_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------physical_port_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
     switch(action)
         {
             case TABLE_INITIAL:
@@ -4413,7 +4395,7 @@ void physical_port_table_process_2(struct jsonrpc *rpc, struct json *new, struct
 
 void ucast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------ucast_macs_local_table_node,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------ucast_macs_local_table_node,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
         {
@@ -4461,16 +4443,16 @@ void ucast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struc
                             /*不处理ipaddr*/
                             //ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr = malloc(strlen(json_string(ip_addr))+1) ;
                             //memcpy(ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr, json_string(ip_addr), strlen(json_string(ip_addr))+1);
-                            OVSDB_PRINTF_DEBUG("ucast_macs_local_table i=%d, MAC=%s, ipaddr=NULL.", i, ovsdb_vtep_db_table.table_ucast_macs_local[i].MAC);
-                            OVSDB_PRINTF_DEBUG("ucast_macs_local_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].uuid_self));
+                            OVSDB_PRINTF_DEBUG_TRACE("ucast_macs_local_table i=%d, MAC=%s, ipaddr=NULL.", i, ovsdb_vtep_db_table.table_ucast_macs_local[i].MAC);
+                            OVSDB_PRINTF_DEBUG_TRACE("ucast_macs_local_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].uuid_self));
 
                             /*uuid of Logical_Switch*/
                             (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_local[i].logical_switch, json_string(uuid_logic_switch));
-                            OVSDB_PRINTF_DEBUG("U Local table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].logical_switch));
+                            OVSDB_PRINTF_DEBUG_TRACE("U Local table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].logical_switch));
 
                             /*uuid of Physical_Locator*/
                             (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_local[i].locator, json_string(uuid_locator));
-                            OVSDB_PRINTF_DEBUG("U Local table Physical_Locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].locator));
+                            OVSDB_PRINTF_DEBUG_TRACE("U Local table Physical_Locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_local[i].locator));
 
                             break;
                         }
@@ -4485,7 +4467,7 @@ void ucast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struc
 
                     uuid_zero(&deleted_ucast_local_uuid);
                     (void)uuid_from_string(&deleted_ucast_local_uuid, node_name);
-                    OVSDB_PRINTF_DEBUG("deleted ucast local uuid = "UUID_FMT, UUID_ARGS(&deleted_ucast_local_uuid));
+                    OVSDB_PRINTF_DEBUG_TRACE("deleted ucast local uuid = "UUID_FMT, UUID_ARGS(&deleted_ucast_local_uuid));
 
                     for(j=0; j<TABLE_UCAST_MACS_LOCAL_NUM; j++)
                     {
@@ -4524,7 +4506,7 @@ void ucast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struc
 
 void ucast_macs_local_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------ucast_macs_local_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------ucast_macs_local_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
     switch(action)
         {
             case TABLE_INITIAL:
@@ -4557,7 +4539,7 @@ void ucast_macs_local_table_process_2(struct jsonrpc *rpc, struct json *new, str
 
 void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------ucast_macs_remote_table_node,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------ucast_macs_remote_table_node,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
         {
@@ -4604,16 +4586,16 @@ void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                             memcpy(ovsdb_vtep_db_table.table_ucast_macs_remote[i].MAC, json_string(MAC), strlen(json_string(MAC))+1);
                             /*ip_addr*/
                             /*不处理ipaddr，因为是空*/
-                            OVSDB_PRINTF_DEBUG("ucast_macs_remote_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_ucast_macs_remote[i].MAC);
-                            OVSDB_PRINTF_DEBUG("ucast_macs_remote_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].uuid_self));
+                            OVSDB_PRINTF_DEBUG_TRACE("ucast_macs_remote_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_ucast_macs_remote[i].MAC);
+                            OVSDB_PRINTF_DEBUG_TRACE("ucast_macs_remote_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].uuid_self));
 
                             /*uuid of Logical_Switch*/
                             (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].logical_switch, json_string(uuid_logic_switch));
-                            OVSDB_PRINTF_DEBUG("U Remote table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].logical_switch));
+                            OVSDB_PRINTF_DEBUG_TRACE("U Remote table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].logical_switch));
 
                             /*uuid of Physical_Locator*/
                             (void)uuid_from_string(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].locator, json_string(uuid_locator));
-                            OVSDB_PRINTF_DEBUG("U Remote table Physical_Locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].locator));
+                            OVSDB_PRINTF_DEBUG_TRACE("U Remote table Physical_Locator uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_ucast_macs_remote[i].locator));
 
                             break;
                         }
@@ -4635,7 +4617,7 @@ void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
 
                     uuid_zero(&deleted_ucast_remote_uuid);
                     (void)uuid_from_string(&deleted_ucast_remote_uuid, node_name);
-                    OVSDB_PRINTF_DEBUG("deleted ucast remote uuid = "UUID_FMT, UUID_ARGS(&deleted_ucast_remote_uuid));
+                    OVSDB_PRINTF_DEBUG_TRACE("deleted ucast remote uuid = "UUID_FMT, UUID_ARGS(&deleted_ucast_remote_uuid));
 
                     for(j=0; j<TABLE_UCAST_MACS_REMOTE_NUM; j++)
                     {
@@ -4700,7 +4682,7 @@ void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                                     ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
                                 if (OVSDB_OK != uiRet)
                                 {
-                                    OVSDB_PRINTF_DEBUG("[ERROR]Failed to undo static mac of vxlan tunnel");
+                                    OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to undo static mac of vxlan tunnel");
                                     if (mac_ce != NULL)
                                     {
                                         free(mac_ce);
@@ -4748,7 +4730,7 @@ void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
 
 void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------ucast_macs_remote_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------ucast_macs_remote_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
 
     unsigned int uiRet = 0;
     switch(action)
@@ -4807,7 +4789,7 @@ void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, st
                             /*3.判断隧道源IP是否存在*/
                             if(NULL == ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0])
                             {
-                                OVSDB_PRINTF_DEBUG("No tunnel ip in physical switch[0].");
+                                OVSDB_PRINTF_DEBUG_ERROR("No tunnel ip in physical switch[0].");
                                 break ;
                             }
 
@@ -4829,7 +4811,7 @@ void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, st
                                 tunnel_key);
                             if (OVSDB_OK != uiRet)
                             {
-                                OVSDB_PRINTF_DEBUG("[ERROR]Failed to config static mac of vxlan tunnel.");
+                                OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config static mac of vxlan tunnel.");
                                 if (mac_ce != NULL)
                                 {
                                     free(mac_ce);
@@ -4873,7 +4855,7 @@ void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, st
 
 void mcast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------mcast_macs_local_table_node,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------mcast_macs_local_table_node,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
     {
@@ -4921,16 +4903,16 @@ void mcast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struc
                         /*不处理ipaddr*/
                         //ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr = malloc(strlen(json_string(ip_addr))+1) ;
                         //memcpy(ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr, json_string(ip_addr), strlen(json_string(ip_addr))+1);
-                        OVSDB_PRINTF_DEBUG("mcast_macs_local_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_mcast_macs_local[i].MAC);
-                        OVSDB_PRINTF_DEBUG("mcast_macs_local_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].uuid_self));
+                        OVSDB_PRINTF_DEBUG_TRACE("mcast_macs_local_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_mcast_macs_local[i].MAC);
+                        OVSDB_PRINTF_DEBUG_TRACE("mcast_macs_local_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].uuid_self));
 
                         /*uuid of Logical_Switch*/
                         (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_local[i].logical_switch, json_string(uuid_logic_switch));
-                        OVSDB_PRINTF_DEBUG("M Local table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].logical_switch));
+                        OVSDB_PRINTF_DEBUG_TRACE("M Local table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].logical_switch));
 
                         /*uuid of Physical_Locator_Set*/
                         (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set, json_string(uuid_locator_set));
-                        OVSDB_PRINTF_DEBUG("M Local table Physical_Locator_Set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
+                        OVSDB_PRINTF_DEBUG_TRACE("M Local table Physical_Locator_Set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_local[i].locator_set));
 
                         break;
                     }
@@ -4950,7 +4932,7 @@ void mcast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struc
 
                 uuid_zero(&deleted_mcast_local_uuid);
                 (void)uuid_from_string(&deleted_mcast_local_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("deleted mcast local uuid = "UUID_FMT, UUID_ARGS(&deleted_mcast_local_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("deleted mcast local uuid = "UUID_FMT, UUID_ARGS(&deleted_mcast_local_uuid));
 
                 for(j=0; j<TABLE_MCAST_MACS_LOCAL_NUM; j++)
                 {
@@ -4992,7 +4974,7 @@ void mcast_macs_local_table_process(struct jsonrpc *rpc, struct json *new, struc
 
 void mcast_macs_local_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------mcast_macs_local_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------mcast_macs_local_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
     switch(action)
         {
             case TABLE_INITIAL:
@@ -5023,7 +5005,7 @@ void mcast_macs_local_table_process_2(struct jsonrpc *rpc, struct json *new, str
 
 void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------mcast_macs_remote_table_node,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------mcast_macs_remote_table_node,action=%s----------------",ACTION_TYPE(action));
 
     switch(action)
     {
@@ -5072,16 +5054,16 @@ void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                         /*不处理ipaddr*/
                         //ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr = malloc(strlen(json_string(ip_addr))+1) ;
                         //memcpy(ovsdb_vtep_db_table.table_ucast_macs_local[i].ipaddr, json_string(ip_addr), strlen(json_string(ip_addr))+1);
-                        OVSDB_PRINTF_DEBUG("mcast_macs_remote_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_mcast_macs_remote[i].MAC);
-                        OVSDB_PRINTF_DEBUG("mcast_macs_remote_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].uuid_self));
+                        OVSDB_PRINTF_DEBUG_TRACE("mcast_macs_remote_table i=%d, MAC=%s, ipaddr=NULL", i, ovsdb_vtep_db_table.table_mcast_macs_remote[i].MAC);
+                        OVSDB_PRINTF_DEBUG_TRACE("mcast_macs_remote_table uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].uuid_self));
 
                         /*uuid of Logical_Switch*/
                         (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].logical_switch, json_string(uuid_logic_switch));
-                        OVSDB_PRINTF_DEBUG("M Remote table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].logical_switch));
+                        OVSDB_PRINTF_DEBUG_TRACE("M Remote table Logical_Switch uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].logical_switch));
 
                         /*uuid of Physical_Locator_Set*/
                         (void)uuid_from_string(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set, json_string(uuid_locator_set));
-                        OVSDB_PRINTF_DEBUG("M Remote table Physical_Locator_Set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
+                        OVSDB_PRINTF_DEBUG_TRACE("M Remote table Physical_Locator_Set uuid = "UUID_FMT, UUID_ARGS(&ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set));
 
                         //:TODO:
                         /*此处添加remote mcast mac表变化处理*/
@@ -5101,7 +5083,7 @@ void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                             if((!(uuid_is_zero(&ovsdb_vtep_db_table.table_logical_switch[id_ls].uuid_self)))&&(ovsdb_vtep_db_table.table_logical_switch[id_ls].tunnel_key >0))
                             {
                                 tunnel_key = ovsdb_vtep_db_table.table_logical_switch[id_ls].tunnel_key;
-                                OVSDB_PRINTF_DEBUG("vni in remote mcast mac is %d.", tunnel_key);
+                                OVSDB_PRINTF_DEBUG_TRACE("vni in remote mcast mac is %d.", tunnel_key);
                             }
                         }
 
@@ -5115,7 +5097,7 @@ void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                             }
                             else if(uuid_equals(&ovsdb_vtep_db_table.table_physical_locator_set[id_pls].uuid_self, &ovsdb_vtep_db_table.table_mcast_macs_remote[i].locator_set))
                             {
-                                OVSDB_PRINTF_DEBUG("table_physical_locator_set id = %d.", id_pls);
+                                OVSDB_PRINTF_DEBUG_TRACE("table_physical_locator_set id = %d.", id_pls);
                                 break;  /*获取到id_pls*/
                                 /*认为table_physical_locator_set[id_pls].locators[0]就是要找的Physical_Locator*/
                             }
@@ -5130,7 +5112,7 @@ void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                             }
                             else if(uuid_equals(&ovsdb_vtep_db_table.table_physical_locator_set[id_pls].locators[0], &ovsdb_vtep_db_table.table_physical_locator[id_pl].uuid_self))
                             {
-                                OVSDB_PRINTF_DEBUG("table_physical_locator id = %d.", id_pl);
+                                OVSDB_PRINTF_DEBUG_TRACE("table_physical_locator id = %d.", id_pl);
                                 break;  /*获取到id_pl*/
                             }
                         }
@@ -5155,7 +5137,7 @@ void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
 
                 uuid_zero(&deleted_mcast_remote_uuid);
                 (void)uuid_from_string(&deleted_mcast_remote_uuid, node_name);
-                OVSDB_PRINTF_DEBUG("deleted mcast remote uuid = "UUID_FMT, UUID_ARGS(&deleted_mcast_remote_uuid));
+                OVSDB_PRINTF_DEBUG_TRACE("deleted mcast remote uuid = "UUID_FMT, UUID_ARGS(&deleted_mcast_remote_uuid));
 
                 for(j=0; j<TABLE_MCAST_MACS_REMOTE_NUM; j++)
                 {
@@ -5197,7 +5179,7 @@ void mcast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
 
 void mcast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, struct json *old, char* node_name, int action)
 {
-    OVSDB_PRINTF_DEBUG("----------------mcast_macs_remote_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
+    OVSDB_PRINTF_DEBUG_TRACE("----------------mcast_macs_remote_table_node_stage_2,action=%s----------------",ACTION_TYPE(action));
     switch(action)
         {
             case TABLE_INITIAL:
@@ -5536,7 +5518,7 @@ void do_table_process(struct jsonrpc *rpc, struct json *table_updates,
             int table_id = 0;
             struct shash_node *node;
 
-            OVSDB_PRINTF_DEBUG("#################begin to process table [%s]#################", table_func_map[i].table_name);
+            OVSDB_PRINTF_DEBUG_TRACE("#################begin to process table [%s]#################", table_func_map[i].table_name);
 
             if (table_update->type != JSON_OBJECT) {
                 ovs_error(0, "<table-update> for table %s is not object", table_func_map[i].table_name);
@@ -5596,7 +5578,7 @@ void do_table_process_2(struct jsonrpc *rpc, struct json *table_updates,
             int table_id = 0;
             struct shash_node *node;
 
-            OVSDB_PRINTF_DEBUG("#################begin to process table [%s]#################", table_func_map_2[i].table_name);
+            OVSDB_PRINTF_DEBUG_TRACE("#################begin to process table [%s]#################", table_func_map_2[i].table_name);
 
             if (table_update->type != JSON_OBJECT) {
                 ovs_error(0, "<table-update> for table %s is not object", table_func_map_2[i].table_name);
@@ -5733,10 +5715,10 @@ do_monitor(struct jsonrpc *rpc, const char *database,
                 monitor_print(msg->result, mts, n_mts, true);
 
 
-                OVSDB_PRINTF_DEBUG("Begin to print monitor INIT json.");
+                OVSDB_PRINTF_DEBUG_TRACE("Begin to print monitor INIT json.");
                 print_json(msg->result);
                 putchar('\n');
-                OVSDB_PRINTF_DEBUG("End to print monitor INIT json.");
+                OVSDB_PRINTF_DEBUG_TRACE("End to print monitor INIT json.");
                 
 
                 fflush(stdout);
@@ -5750,10 +5732,10 @@ do_monitor(struct jsonrpc *rpc, const char *database,
                     monitor_print(params->u.array.elems[1], mts, n_mts, false);
 
 
-                    OVSDB_PRINTF_DEBUG("Begin to print monitor NOTIFY json.");
+                    OVSDB_PRINTF_DEBUG_TRACE("Begin to print monitor NOTIFY json.");
                     print_json(params->u.array.elems[1]);
                     putchar('\n');
-                    OVSDB_PRINTF_DEBUG("End to print monitor NOTIFY json.");
+                    OVSDB_PRINTF_DEBUG_TRACE("End to print monitor NOTIFY json.");
 
 
                     fflush(stdout);
@@ -6037,7 +6019,7 @@ do_transact_temp_query_global(struct jsonrpc *rpc, int* global_uuid_num, struct 
     *global_uuid_num = rows_elem->n;
     if(!*global_uuid_num)
     {
-        OVSDB_PRINTF_DEBUG("global table is not present.\n");
+        OVSDB_PRINTF_DEBUG_TRACE("global table is not present.\n");
     }
 
     if(*global_uuid_num)
@@ -6084,7 +6066,7 @@ do_transact_temp_query_logical_switch(struct jsonrpc *rpc, int *ls_num, struct l
     rows_elem_num = rows_elem->n;
     if(!rows_elem_num)
     {
-        OVSDB_PRINTF_DEBUG("No logical switch present.");
+        OVSDB_PRINTF_DEBUG_TRACE("No logical switch present.");
     }
     else   /*rows_elem_num >= 1*/
     {
@@ -6102,12 +6084,12 @@ do_transact_temp_query_logical_switch(struct jsonrpc *rpc, int *ls_num, struct l
 
             if(JSON_ARRAY == tunnel_key->type)  /*which means this ls does not have a tunnel_key*/
             {
-                OVSDB_PRINTF_DEBUG("This logical_Switch does not have a tunnel_key.");
+                OVSDB_PRINTF_DEBUG_TRACE("This logical_Switch does not have a tunnel_key.");
                 continue;
             }
             else if(JSON_INTEGER == tunnel_key->type)
             {
-                OVSDB_PRINTF_DEBUG("This logical_Switch has a tunnel_key.");
+                OVSDB_PRINTF_DEBUG_TRACE("This logical_Switch has a tunnel_key.");
                 *ls_num=*ls_num + 1;
                 for(j=0; j<TABLE_LOGICAL_SWITCH_NUM; j++)
                 {
@@ -6165,7 +6147,7 @@ void do_transact_temp_query_logical_switch_has_mcast_local_record(struct jsonrpc
     if(!rows_elem_num)
     {
         *ls_has_mcast_local_record = 0;
-        OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
+        OVSDB_PRINTF_DEBUG_ERROR("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
     }
     else
     {
@@ -6174,7 +6156,7 @@ void do_transact_temp_query_logical_switch_has_mcast_local_record(struct jsonrpc
         struct json_array* uuid_array;
         
         *ls_has_mcast_local_record = 1;
-        OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has mcast local record.", UUID_ARGS(ls_uuid));
+        OVSDB_PRINTF_DEBUG_TRACE("logical switch with uuid = "UUID_FMT"has mcast local record.", UUID_ARGS(ls_uuid));
         
         /*理论上只会有一条记录*/
         mac_instance = rows_elem->elems[0];
@@ -6218,12 +6200,12 @@ void do_transact_temp_query_logical_switch_has_ucast_remote_record(struct jsonrp
     if(!rows_elem_num)
     {
         *ls_has_mcast_local_record = 0;
-        OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has no ucast remote record.", UUID_ARGS(ls_uuid));
+        OVSDB_PRINTF_DEBUG_TRACE("logical switch with uuid = "UUID_FMT"has no ucast remote record.", UUID_ARGS(ls_uuid));
     }
     else
     {
         *ls_has_mcast_local_record = 1;
-        OVSDB_PRINTF_DEBUG("logical switch with uuid = "UUID_FMT"has ucast remote record.", UUID_ARGS(ls_uuid));
+        OVSDB_PRINTF_DEBUG_TRACE("logical switch with uuid = "UUID_FMT"has ucast remote record.", UUID_ARGS(ls_uuid));
     }
 
 
@@ -6392,7 +6374,7 @@ do_transact_temp_query_port_binding_logical_switch(struct jsonrpc *rpc, char *js
 
     if(!rows_elem_num)
     {
-        OVSDB_PRINTF_DEBUG("No such port present.");
+        OVSDB_PRINTF_DEBUG_TRACE("No such port present.");
         *ls_num = 0;
     }
 
@@ -6402,12 +6384,12 @@ do_transact_temp_query_port_binding_logical_switch(struct jsonrpc *rpc, char *js
         vlan_bindings_elems = json_array(json_array(vlan_bindings)->elems[1]);  /*elems[0] is "map" string*/
         *ls_num= vlan_bindings_elems->n;
 
-        OVSDB_PRINTF_DEBUG("vlan_bindings_elems num =%d.", vlan_bindings_elems->n);
+        OVSDB_PRINTF_DEBUG_TRACE("vlan_bindings_elems num =%d.", vlan_bindings_elems->n);
 
         for(i=0; i < vlan_bindings_elems->n; i++)
         {
             uuid_from_string(&ls_uuids[i],  json_string(json_array(json_array(vlan_bindings_elems->elems[i])->elems[1])->elems[1]));
-            OVSDB_PRINTF_DEBUG("No.%d logical switch uuid = "UUID_FMT, i, UUID_ARGS(&ls_uuids[i]));
+            OVSDB_PRINTF_DEBUG_TRACE("No.%d logical switch uuid = "UUID_FMT, i, UUID_ARGS(&ls_uuids[i]));
         }
     }
 
@@ -6446,7 +6428,7 @@ do_transact_temp_query_mac_local_uuid(struct jsonrpc *rpc, char *json_char ,int 
 
     if(!rows_elem_num)
     {
-        OVSDB_PRINTF_DEBUG("No such mac table present.");
+        OVSDB_PRINTF_DEBUG_TRACE("No such mac table present.");
         *uuid_num = 0;
     }
 
@@ -6461,48 +6443,6 @@ do_transact_temp_query_mac_local_uuid(struct jsonrpc *rpc, char *json_char ,int 
     }
 
     jsonrpc_msg_destroy(reply);
-}
-
-
-int do_check_mac_info_from_fei(unsigned char *aucMacAddr, unsigned char *aucIfname, unsigned int add_or_delete_flag, unsigned int dyn_or_static_flag, unsigned int ulBDID)
-{
-    if(!aucMacAddr)
-    {
-        OVSDB_PRINTF_DEBUG("Error! aucMacAddr is NULL.");
-        return FEI_MAC_CHECK_ERROR;
-    }
-
-    if(strlen(aucMacAddr) != strlen("01:02:33:44:55:66"))
-    {
-        OVSDB_PRINTF_DEBUG("Error! aucMacAddr fomat is valid.");
-        return FEI_MAC_CHECK_ERROR;
-    }
-
-    if(!aucIfname)
-    {
-        OVSDB_PRINTF_DEBUG("Error! aucIfname is NULL.");
-        return FEI_MAC_CHECK_ERROR;
-    }
-
-    if((ntohl(add_or_delete_flag)>2)||(ntohl(add_or_delete_flag)<1))
-    {
-        OVSDB_PRINTF_DEBUG("Error! add_or_delete_flag is invalid.");
-        return FEI_MAC_CHECK_ERROR;
-    }
-
-    if((ntohl(dyn_or_static_flag)>2)||(ntohl(add_or_delete_flag)<1))
-    {
-        OVSDB_PRINTF_DEBUG("Error! dyn_or_static_flag is invalid.");
-        return FEI_MAC_CHECK_ERROR;
-    }
-
-    if(ntohl(ulBDID) < 4096)
-    {
-        OVSDB_PRINTF_DEBUG("Error! ulBDID is invalid.");
-        return FEI_MAC_CHECK_ERROR;
-    }
-
-    return FEI_MAC_CHECK_OK;
 }
 
 
@@ -6535,7 +6475,7 @@ do_transact_temp_query_logical_switch_tunnel_key(struct jsonrpc *rpc, char *json
 
     if(!rows_elem->n)
     {
-        OVSDB_PRINTF_DEBUG("No such logical switch.");
+        OVSDB_PRINTF_DEBUG_TRACE("No such logical switch.");
         *tunnel_key_exist = 0;
     }
     else
@@ -6548,8 +6488,8 @@ do_transact_temp_query_logical_switch_tunnel_key(struct jsonrpc *rpc, char *json
             *tunnel_key_exist = 1;
             *tunnel_key = json_integer(tunnel_key_json);
 
-            OVSDB_PRINTF_DEBUG("json_integer(tunnel_key_json) = %d.", json_integer(tunnel_key_json));
-            OVSDB_PRINTF_DEBUG("tunnel_key=%d.", *tunnel_key);
+            OVSDB_PRINTF_DEBUG_TRACE("json_integer(tunnel_key_json) = %d.", json_integer(tunnel_key_json));
+            OVSDB_PRINTF_DEBUG_TRACE("tunnel_key=%d.", *tunnel_key);
         }
 
     }
@@ -6587,7 +6527,7 @@ do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_c
 
     if(!rows_elem->n)
     {
-        OVSDB_PRINTF_DEBUG("No such physical locator.");
+        OVSDB_PRINTF_DEBUG_TRACE("No such physical locator.");
 
     }
     else
@@ -6598,8 +6538,8 @@ do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_c
         if(JSON_STRING == dst_ip_json->type)
         {
             dst_ip = malloc(strlen(json_string(dst_ip_json))+1) ;
-            memcpy(dst_ip, json_string(dst_ip_json),strlen(json_string(dst_ip_json))+1);
-            OVSDB_PRINTF_DEBUG("dst ip in physical locator is %s.", dst_ip);
+            memcpy(dst_ip, json_string(dst_ip_json), strlen(json_string(dst_ip_json)));
+            OVSDB_PRINTF_DEBUG_TRACE("dst ip in physical locator is %s.", dst_ip);
         }
 
     }
@@ -6980,7 +6920,7 @@ int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
     ls_uuid_s= (struct uuid*)malloc(TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
     if(!ls_uuid_s)
     {
-        OVSDB_PRINTF_DEBUG("Error, malloc memory failed.");
+        OVSDB_PRINTF_DEBUG_ERROR("Error, malloc memory failed.");
         return -1;
     }
     (void)memset(ls_uuid_s, 0, TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
@@ -7012,9 +6952,9 @@ int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
             UUID_ARGS(&ls_uuid_s[i]));
 
         do_transact_temp_query_logical_switch_tunnel_key(rpc, json_query, &tunnel_key_exist, &tunnel_key);
-        OVSDB_PRINTF_DEBUG("No.%d tunnel_key_exist = %d.", i , tunnel_key_exist);
+        OVSDB_PRINTF_DEBUG_TRACE("No.%d tunnel_key_exist = %d.", i , tunnel_key_exist);
         (void)snprintf(tunnel_key_string, 8, "%d", tunnel_key);
-        OVSDB_PRINTF_DEBUG("tunnel_key = %s.", tunnel_key_string);
+        OVSDB_PRINTF_DEBUG_TRACE("tunnel_key = %s.", tunnel_key_string);
 
         if((tunnel_key_exist)&&(0 == strcmp(bd, tunnel_key_string)))
         {
@@ -7032,13 +6972,13 @@ int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
             if(uuid_is_zero(&phyical_locator_uuid))
             {
                 #if 0
-                OVSDB_PRINTF_DEBUG("Error! Does not find physical_locator uuid with ip %s.", tunnel_ip);
+                OVSDB_PRINTF_DEBUG_TRACE("Error! Does not find physical_locator uuid with ip %s.", tunnel_ip);
                 free(ls_uuid_s);
                 ls_uuid_s = NULL;
                 return -1;
                 #endif
 
-                OVSDB_PRINTF_DEBUG("Add MAC. The first local one");
+                OVSDB_PRINTF_DEBUG_TRACE("Add MAC. The first local one");
                 
                 (void)snprintf(json_query, 1000,
                     "[\"hardware_vtep\",{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
@@ -7048,12 +6988,12 @@ int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
                     UUID_ARGS(&ls_uuid_s[i]), mac, tunnel_ip);
 
                 do_transact_temp(rpc, json_query);
-                OVSDB_PRINTF_DEBUG("write a new ucast local table.");
+                OVSDB_PRINTF_DEBUG_TRACE("write a new ucast local table.");
             }
             
             else
             {
-                OVSDB_PRINTF_DEBUG("Add MAC.");
+                OVSDB_PRINTF_DEBUG_TRACE("Add MAC.");
 
                 (void)snprintf(json_query, 1000,
                     "[\"hardware_vtep\",{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
@@ -7064,7 +7004,7 @@ int ovsdb_add_mac(char *mac, char *bd, char *interface, int mac_type)
                 do_transact_temp(rpc, json_query);
 
                 /*temp to delete*/
-                OVSDB_PRINTF_DEBUG("write a new ucast local table.");
+                OVSDB_PRINTF_DEBUG_TRACE("write a new ucast local table.");
             }
 
             break;
@@ -7088,7 +7028,7 @@ void ovsdb_delete_mac(char *mac, char *bd, char *interface, int mac_type)
     ucast_local_uuid_s= (struct uuid*)malloc(TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
     if(!ucast_local_uuid_s)
     {
-        OVSDB_PRINTF_DEBUG("Error, malloc memory failed.");
+        OVSDB_PRINTF_DEBUG_ERROR("Error, malloc memory failed.");
     }
     (void)memset(ucast_local_uuid_s, 0, TABLE_LOGICAL_SWITCH_NUM * sizeof(struct uuid));
 
@@ -7098,7 +7038,7 @@ void ovsdb_delete_mac(char *mac, char *bd, char *interface, int mac_type)
         mac);
 
     /*temp to delete*/
-    OVSDB_PRINTF_DEBUG("json_query_mac_local_uuid=%s.", json_query_mac_local_uuid);
+    OVSDB_PRINTF_DEBUG_TRACE("json_query_mac_local_uuid=%s.", json_query_mac_local_uuid);
 
     do_transact_temp_query_mac_local_uuid(rpc, json_query_mac_local_uuid, &uuid_num, ucast_local_uuid_s);
 
@@ -7111,7 +7051,7 @@ void ovsdb_delete_mac(char *mac, char *bd, char *interface, int mac_type)
             UUID_ARGS(&ucast_local_uuid_s[j]));
         do_transact_temp(rpc, json_query_mac_local_uuid);
 
-        OVSDB_PRINTF_DEBUG("delete a old ucast local table.");
+        OVSDB_PRINTF_DEBUG_TRACE("delete a old ucast local table.");
     }
 
     return;
@@ -7211,7 +7151,7 @@ ovsdb_query_mac_initial(struct jsonrpc *rpc)
             
             entry = add_entry(OVSDB_SUB_TABLE_MAC, (char *)&key, (char *)&data);
             if (NULL == entry) {
-                OVSDB_PRINTF_DEBUG("Initial add MAC failed, mac: %s", key.macAdd);
+                OVSDB_PRINTF_DEBUG_ERROR("Initial add MAC failed, mac: %s", key.macAdd);
             }
         }
         
@@ -7259,7 +7199,7 @@ ovsdb_query_port_initial(struct jsonrpc *rpc)
             (void)strncpy(key.interface, interface, OVSDB_SUB_INTERFACE_LEN);
             entry = add_entry(OVSDB_SUB_TABLE_INTERFACE, (char *)&key, NULL);
             if (NULL == entry) {
-                OVSDB_PRINTF_DEBUG("Initial add interface failed, interface: %s", interface);
+                OVSDB_PRINTF_DEBUG_ERROR("Initial add interface failed, interface: %s", interface);
             }
         }
     }
@@ -7289,20 +7229,20 @@ void ovsdb_write_mcast_local(void *args)
 
     if(!rpc)
     {
-        OVSDB_PRINTF_DEBUG("rpc is NULL.");
+        OVSDB_PRINTF_DEBUG_ERROR("rpc is NULL.");
         return;
     }
 
     if(!tunnel_ip)
     {
-        OVSDB_PRINTF_DEBUG("tunnel_ip is NULL.");
+        OVSDB_PRINTF_DEBUG_ERROR("tunnel_ip is NULL.");
         return;
     }
 
     ls_info = (struct logical_switch_uuid_and_vni*)malloc(TABLE_LOGICAL_SWITCH_NUM * sizeof(struct logical_switch_uuid_and_vni));
     if(!ls_info)
     {
-        OVSDB_PRINTF_DEBUG("Error, malloc memorf failed.");
+        OVSDB_PRINTF_DEBUG_ERROR("Error, malloc memorf failed.");
         return;
     }
 
@@ -7387,7 +7327,7 @@ void ovsdb_write_mcast_local(void *args)
                     UUID_ARGS(&ls_info[i].uuid_ls),tunnel_ip);
                 do_transact_temp(rpc, json_insert_mcast_local);
 
-                OVSDB_PRINTF_DEBUG("write a new mcast local entry. nve ip is without locator before");
+                OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is without locator before");
             }
             /* 有nve ip对应的locator */
             else
@@ -7399,11 +7339,9 @@ void ovsdb_write_mcast_local(void *args)
                         "\"locator_set\":[\"named-uuid\",\"aa\"],\"MAC\":\"unknown-dst\"},\"table\":\"Mcast_Macs_Local\","
                         "\"uuid-name\":\"mcast_local_name\",\"op\":\"insert\"}]",
                         UUID_ARGS(&phyical_locator_uuid), UUID_ARGS(&ls_info[i].uuid_ls));
-                    do_transact_temp(rpc, json_insert_mcast_local);
+                do_transact_temp(rpc, json_insert_mcast_local);
 
-                    OVSDB_PRINTF_DEBUG("write a new mcast local entry. nve ip is with locator before.");
-                }
-                
+                OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is with locator before.");
             }
             
             /* 删除一条mcast local表 */
@@ -7415,7 +7353,7 @@ void ovsdb_write_mcast_local(void *args)
                         "\"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"delete\"}]",
                         UUID_ARGS(&uuid_mac));
                 do_transact_temp(rpc, json_delete_mcast_local);
-                OVSDB_PRINTF_DEBUG("delete a mcast local entry.");
+                OVSDB_PRINTF_DEBUG_TRACE("delete a mcast local entry.");
             }
         }
     }
@@ -7432,7 +7370,7 @@ do_vtep(struct jsonrpc *rpc, const char *database,
 {
     int ret = 0;
 
-    OVSDB_PRINTF_DEBUG("Enter ovsdb-client do_vtep.");
+    OVSDB_PRINTF_DEBUG_TRACE("Enter ovsdb-client do_vtep.");
     
     if (0 != ovsdb_client_init_cfg())
         return;
@@ -7441,18 +7379,18 @@ do_vtep(struct jsonrpc *rpc, const char *database,
     ret = netconf_ce_config_init();
     if (0 != ret)
     {
-        OVSDB_PRINTF_DEBUG("[ERROR]Session connect failed.");
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Session connect failed.");
         return;
     }
 
     if(!strcmp(argv[0], "monitor"))
     {
-        OVSDB_PRINTF_DEBUG("ovsdb-client monitor.");
+        OVSDB_PRINTF_DEBUG_TRACE("ovsdb-client monitor.");
         do_vtep_monitor(rpc, database, argc, argv);
     }
     else if(!strcmp(argv[0], "transact"))
     {
-        OVSDB_PRINTF_DEBUG("ovsdb-client transact.");
+        OVSDB_PRINTF_DEBUG_TRACE("ovsdb-client transact.");
         do_vtep_transact(rpc, database, argc, argv);
     }
 
@@ -7474,7 +7412,7 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
     /*1.检测到Global 有数据，将physical_switch Physical_Port信息写入OVSDB*/
     /*检测Global表是否存在.这种方法是否靠谱?是否要改成Manager表?*/
     /*3.16最好改成manager表，因为发现增加一个ls，global表也会有*/
-    OVSDB_PRINTF_DEBUG("Detect whether controller is connected.");
+    OVSDB_PRINTF_DEBUG_TRACE("Detect whether controller is connected.");
 
     int global_uuid_num;
     int physical_switch_exist = 0;
@@ -7495,35 +7433,35 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
         do_transact_temp_query_global(rpc, &global_uuid_num, &uuid_global);
         if(global_uuid_num)
         {
-            OVSDB_PRINTF_DEBUG("Global Table is present.");
+            OVSDB_PRINTF_DEBUG_TRACE("Global Table is present.");
             break;
         }
     }
 
-        /*首先检查是否已有physical switch，*/
+    /*首先检查是否已有physical switch，*/
 
-        do_transact_temp_query_physical_switch_exist(rpc, &physical_switch_exist, tunnel_ip);
-        if(!physical_switch_exist)
-        {
-            /*写Physical_Switch表*/
-            OVSDB_PRINTF_DEBUG("Write Physical_Switch info to OVSDB.");
-            OVSDB_PRINTF_DEBUG("global table uuid ="UUID_FMT, UUID_ARGS(&uuid_global));
-            snprintf(json_insert_ps, 1000,
-                "[\"hardware_vtep\",{\"op\":\"insert\", \"table\":\"Physical_Switch\", "
-                "\"row\":{\"name\":\"%s\",\"description\":\"%s\",\"tunnel_ips\":\"%s\",\"management_ips\":\"%s\"}, "
-                "\"uuid-name\":\"anotheritem\" }, "
-                "{\"op\":\"mutate\", \"table\":\"Global\", \"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]], "
-                "\"mutations\":[[\"switches\", \"insert\", [\"set\",[[\"named-uuid\", \"anotheritem\"]]]]] }]",
-                OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_SWITCHNAME),
-                OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_DESCRIPTION),
-                OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP),
-                OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_SWITCHMANAGEIP),
-                UUID_ARGS(&uuid_global));
-            OVSDB_PRINTF_DEBUG("json_insert_ps=%s.", json_insert_ps);
-            do_transact_temp(rpc, json_insert_ps);
-        
-            snprintf(tunnel_ip, 128, "%s", OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP));
-        }
+    do_transact_temp_query_physical_switch_exist(rpc, &physical_switch_exist, tunnel_ip);
+    if(!physical_switch_exist)
+    {
+        /*写Physical_Switch表*/
+        OVSDB_PRINTF_DEBUG_TRACE("Write Physical_Switch info to OVSDB.");
+        OVSDB_PRINTF_DEBUG_TRACE("global table uuid ="UUID_FMT, UUID_ARGS(&uuid_global));
+        snprintf(json_insert_ps, 1000,
+            "[\"hardware_vtep\",{\"op\":\"insert\", \"table\":\"Physical_Switch\", "
+            "\"row\":{\"name\":\"%s\",\"description\":\"%s\",\"tunnel_ips\":\"%s\",\"management_ips\":\"%s\"}, "
+            "\"uuid-name\":\"anotheritem\" }, "
+            "{\"op\":\"mutate\", \"table\":\"Global\", \"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]], "
+            "\"mutations\":[[\"switches\", \"insert\", [\"set\",[[\"named-uuid\", \"anotheritem\"]]]]] }]",
+            OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_SWITCHNAME),
+            OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_DESCRIPTION),
+            OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP),
+            OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_SWITCHMANAGEIP),
+            UUID_ARGS(&uuid_global));
+        OVSDB_PRINTF_DEBUG_TRACE("json_insert_ps=%s.", json_insert_ps);
+        do_transact_temp(rpc, json_insert_ps);
+    
+        snprintf(tunnel_ip, 128, "%s", OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP));
+    }
 
     args.rpc = rpc;
     args.tunnel_ip = tunnel_ip;
@@ -7726,16 +7664,16 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
                        && json_equal(msg->id, request_id)) {
                 monitor_print(msg->result, mts, n_mts, true);
 
-                OVSDB_PRINTF_DEBUG("begin print msg->result.");
+                OVSDB_PRINTF_DEBUG_TRACE("begin print msg->result.");
                 print_json(msg->result);
                 putchar('\n');
-                OVSDB_PRINTF_DEBUG("end print msg->result.");
+                OVSDB_PRINTF_DEBUG_TRACE("end print msg->result.");
 
-                OVSDB_PRINTF_DEBUG("begin do_table_process.");
+                OVSDB_PRINTF_DEBUG_TRACE("begin do_table_process.");
                 do_table_process(rpc, msg->result, mts, n_mts, true);
                 do_table_process_2(rpc, msg->result, mts, n_mts, true);
 
-                OVSDB_PRINTF_DEBUG("end do_table_processn");
+                OVSDB_PRINTF_DEBUG_TRACE("end do_table_processn");
 
                 fflush(stdout);
                 daemonize_complete();
@@ -7747,16 +7685,16 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
                     && params->u.array.elems[0]->type == JSON_NULL) {
                     monitor_print(params->u.array.elems[1], mts, n_mts, false);
 
-                    OVSDB_PRINTF_DEBUG("begin print params->u.array.elems[1].");
+                    OVSDB_PRINTF_DEBUG_TRACE("begin print params->u.array.elems[1].");
                     print_json(params->u.array.elems[1]);
                     putchar('\n');
-                    OVSDB_PRINTF_DEBUG("end print params->u.array.elems[1].");
+                    OVSDB_PRINTF_DEBUG_TRACE("end print params->u.array.elems[1].");
 
-                    OVSDB_PRINTF_DEBUG("begin do_table_process.");
+                    OVSDB_PRINTF_DEBUG_TRACE("begin do_table_process.");
                     do_table_process(rpc, params->u.array.elems[1], mts, n_mts, false);
                     do_table_process_2(rpc, params->u.array.elems[1], mts, n_mts, false);
 
-                    OVSDB_PRINTF_DEBUG("end do_table_processn.");
+                    OVSDB_PRINTF_DEBUG_TRACE("end do_table_processn.");
 
                     fflush(stdout);
                 }
@@ -7778,9 +7716,6 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     }
 
 }
-
-
-
 
 
 static void

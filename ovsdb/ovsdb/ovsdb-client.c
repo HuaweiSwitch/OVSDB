@@ -714,12 +714,45 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
     return uiRet;
 }
 
+unsigned int netconf_ce_query_nve_port(char* pcNveName, unsigned int * puiExist)
+{
+    unsigned int uiRet                             = 0;
+    char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
+    char         *paReplyData                      = NULL;
+
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface>"\
+                  "<ifName>%s</ifName>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</filter>"\
+        "</get>", pcNveName);
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    if (OVSDB_OK != uiRet) {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query nve port before config [interface %s].", pcNveName);
+        return OVSDB_ERR;
+    }
+
+    *puiExist = ('\0' == paReplyData[0]) ? 0 : 1;
+
+    free(paReplyData);
+    paReplyData = NULL;
+
+    return OVSDB_OK;
+}
+
 unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
 {
     OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_nve1_source********************");
     unsigned int uiRet                             = 0;
+    unsigned int uiExist                           = 0;
     char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
-    char         *paReplyData                      = NULL;
 
     /* 1.判断nve1的source ip是否已配置 */
     if(nve1_source_ip_configured)
@@ -729,27 +762,14 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
     }
 
     /* 2.查询interface nve 1 是否存在*/
-    snprintf(send_data, sizeof(send_data),
-        "<get>"\
-          "<filter type=\"subtree\">"\
-            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<interfaces>"\
-                "<interface>"\
-                  "<ifName>Nve1</ifName>"\
-                "</interface>"\
-              "</interfaces>"\
-            "</ifm>"\
-          "</filter>"\
-        "</get>");
-
-    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    uiRet = netconf_ce_query_nve_port("Nve1", &uiExist);
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query nve1 before config [interface nve 1].");
         return OVSDB_ERR;
     }
 
-    if ('\0' == paReplyData[0])
+    if (0 == uiExist)
     {
         /* 3.配置interface nve 1 */
         snprintf(send_data, sizeof(send_data),
@@ -772,14 +792,9 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
         if (OVSDB_OK != uiRet)
         {
             OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [interface Nve1].");
-            free(paReplyData);
-            paReplyData = NULL;
             return OVSDB_ERR;
         }
     }
-
-    free(paReplyData);
-    paReplyData = NULL;
 
     /* 4.配置source 1.1.1.1 */
     /* 4.1先删除source配置 */
@@ -842,8 +857,8 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
 {
     OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_nve1_source********************");
     unsigned int uiRet                             = 0;
+    unsigned int uiExist                           = 0;
     char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
-    char         *paReplyData                      = NULL;
 
     /* 1.判断nve1的source ip是否已配置 */
     if(!nve1_source_ip_configured)
@@ -853,31 +868,15 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     }
 
     /* 2.查询interface nve 1 是否存在*/
-    snprintf(send_data, sizeof(send_data),
-        "<get>"\
-          "<filter type=\"subtree\">"\
-            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<interfaces>"\
-                "<interface>"\
-                  "<ifName>Nve1</ifName>"\
-                "</interface>"\
-              "</interfaces>"\
-            "</ifm>"\
-          "</filter>"\
-        "</get>");
-
-    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    uiRet = netconf_ce_query_nve_port("Nve1", &uiExist);
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query nve1 before config [undo interface nve 1].");
         return OVSDB_ERR;
     }
 
-    if ('\0' != paReplyData[0])
+    if (0 == uiExist)
     {
-        free(paReplyData);
-        paReplyData = NULL;
-
         /* 3.删除interface nve 1 */
         snprintf(send_data, sizeof(send_data),
             "<edit-config>"\
@@ -907,8 +906,6 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     }
     else
     {
-        free(paReplyData);
-        paReplyData = NULL;
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR][interface Nve 1] doesn't exist.");
         return OVSDB_ERR;
     }
@@ -7647,9 +7644,17 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
 
     for (;;) {
         unixctl_server_run(unixctl);
+        int uiExist = 0;
         while (!blocked) {
             struct jsonrpc_msg *msg;
             int error;
+
+            /* netconf连接保活 */
+            if (0 == uiExist) {
+                (void)netconf_ce_query_nve_port("Nve1", &uiExist);
+                uiExist = 10;
+            }
+            uiExist--;
 
             error = jsonrpc_recv(rpc, &msg);
             if (error == EAGAIN) {

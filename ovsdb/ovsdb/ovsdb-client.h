@@ -52,11 +52,11 @@ else                                    \
 }
 
 #define OVSDB_PRINTF_DEBUG_TRACE(szfmt, args...)\
-//do{\
-//    printf(\
-//        ">>>func: %s, line: %d. Trace: "szfmt"\r\n",\
-//        __FUNCTION__, __LINE__, ##args);\
-//}while(0)
+do{\
+    VLOG_DBG(\
+        ">>>func: %s, line: %d. Debug: "szfmt"\r\n",\
+        __FUNCTION__, __LINE__, ##args);\
+}while(0)
 
 #define OVSDB_PRINTF_DEBUG_WARN(szfmt, args...)\
 do{\

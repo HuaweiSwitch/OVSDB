@@ -8,9 +8,11 @@ start_ovsdb()
     ovsdb-server --bootstrap-ca-cert=/etc/openvswitch/vswitchd3.cacert -p /etc/openvswitch/vtep-privkey.pem -c /etc/openvswitch/vtep-cert.pem /usr/local/etc/openvswitch/conf.db -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --remote=punix:/usr/local/var/run/openvswitch/db.sock --remote=db:hardware_vtep,Global,managers --no-chdir --log-file=/usr/local/var/log/openvswitch/ovsdb-server.log --pidfile=/usr/local/var/run/openvswitch/ovsdb-server.pid --detach --monitor --remote=ptcp:8111
     ssh-keygen -f "/root/.ssh/known_hosts" -R $manage
     echo `date +'%Y-%m-%d %H:%M:%S'` start server OK >> /var/log/ovsdb-init.log
-    ovsdb-client vtep monitor &
+    #ovsdb-client vtep monitor &
+    ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-monitor.log vtep monitor &
     echo `date +'%Y-%m-%d %H:%M:%S'` start monitor OK >> /var/log/ovsdb-init.log
-    ovsdb-client vtep transact &
+    #ovsdb-client vtep transact &
+    ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-transact.log vtep transact &
     echo `date +'%Y-%m-%d %H:%M:%S'` start transact OK >> /var/log/ovsdb-init.log
     exit 0
 }

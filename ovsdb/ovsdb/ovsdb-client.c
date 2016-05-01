@@ -7465,9 +7465,7 @@ void ovsdb_set_manager(struct jsonrpc *rpc)
         OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_CONTROLLERIP),
         OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_CONTROLLERPORT),
         c_manager, c_manager, c_global);
-    
-    printf("\r\n%s\r\n", json_char);
-    
+
     do_transact_temp(rpc, json_char);
     
     return;

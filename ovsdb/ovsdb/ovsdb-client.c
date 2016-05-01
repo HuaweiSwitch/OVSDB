@@ -2400,44 +2400,9 @@ void ovsdb_physical_locator_process(struct uuid *uuid_pl, char *pl_dst_ip)
 }
 
 
-void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *pl_dst_ip)
+void  ovsdb_physical_locator_process_hypervisor_ip_set_list(int tunnel_key, char *pl_dst_ip)
 {
-    int l=0;
-    int m=0;
     int k=0;
-    struct uuid uuid_logical_switch;
-    int tunnel_key=0;
-
-    for(l=0; l<TABLE_UCAST_MACS_REMOTE_NUM; l++)
-    {
-        uuid_zero(&uuid_logical_switch);
-        if(uuid_equals(uuid_pl, &ovsdb_vtep_db_table.table_ucast_macs_remote[l].locator))
-        {
-            memcpy(&uuid_logical_switch, &ovsdb_vtep_db_table.table_ucast_macs_remote[l].logical_switch, sizeof(struct uuid));
-
-            /*below is temp to delete*/
-            OVSDB_PRINTF_DEBUG_TRACE("uuid_logical_switch = "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
-
-            for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
-            {
-                if(uuid_equals(&uuid_logical_switch, &ovsdb_vtep_db_table.table_logical_switch[m].uuid_self))
-                {
-                    if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key < 4096)
-                    {
-                        OVSDB_PRINTF_DEBUG_TRACE("tunnel key does not meet requirement, which is %d.",
-                            ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
-                    }
-                    else
-                    {
-                        tunnel_key = ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key;
-                        OVSDB_PRINTF_DEBUG_TRACE("tunnel key when condig vxlan tunnel is %d.", tunnel_key);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
 
     if(tunnel_key < 4096)
     {
@@ -2448,7 +2413,6 @@ void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *p
     /*将隧道信息写入待创建隧道全局变量，在第二阶段进行创建*/
     for(k = 0; k < HYPERVISOR_MAX; k++)
     {
-
         if(hypervisor_vxlan_tunnel_to_be_created[k].used_bit)
         {
             continue;
@@ -2477,7 +2441,48 @@ void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *p
             break;
         }
     }
+    
+    return;
+}
 
+void ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *pl_dst_ip)
+{
+    int l=0;
+    int m=0;
+    struct uuid uuid_logical_switch;
+    int tunnel_key=0;
+
+    for(l=0; l<TABLE_UCAST_MACS_REMOTE_NUM; l++)
+    {
+        uuid_zero(&uuid_logical_switch);
+        if(uuid_equals(uuid_pl, &ovsdb_vtep_db_table.table_ucast_macs_remote[l].locator))
+        {
+            memcpy(&uuid_logical_switch, &ovsdb_vtep_db_table.table_ucast_macs_remote[l].logical_switch, sizeof(struct uuid));
+
+            /*below is temp to delete*/
+            OVSDB_PRINTF_DEBUG_TRACE("uuid_logical_switch = "UUID_FMT, UUID_ARGS(&uuid_logical_switch));
+
+            for(m=0; m<TABLE_LOGICAL_SWITCH_NUM; m++)
+            {
+                if(uuid_equals(&uuid_logical_switch, &ovsdb_vtep_db_table.table_logical_switch[m].uuid_self))
+                {
+                    if(ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key < 4096)
+                    {
+                        OVSDB_PRINTF_DEBUG_TRACE("tunnel key does not meet requirement, which is %d.",
+                            ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
+                    }
+                    else
+                    {
+                        tunnel_key = ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key;
+                        OVSDB_PRINTF_DEBUG_TRACE("tunnel key when condig vxlan tunnel is %d.", tunnel_key);
+                        ovsdb_physical_locator_process_hypervisor_ip_set_list(tunnel_key, pl_dst_ip);
+                    }
+                }
+            }
+        }
+    }
+
+    return;
 }
 
 void  ovsdb_physical_locator_process_service_node_ip(struct uuid *uuid_pl, char *pl_dst_ip)
@@ -3827,6 +3832,7 @@ void physical_locator_table_process_2(struct jsonrpc *rpc, struct json *new, str
         {
             case TABLE_INITIAL:
             case TABLE_INSERT:
+            case TABLE_UPDATE:
                 {
                     int i =0;
 
@@ -3915,91 +3921,6 @@ void physical_locator_table_process_2(struct jsonrpc *rpc, struct json *new, str
             case TABLE_DELETE:
                 {
 
-                    break;
-                }
-
-            case TABLE_UPDATE:
-                {
-                    int i =0;
-
-                    /*只有在标志位置起的时候才会创建隧道*/
-                    /*多个locator对应的隧道一起创建*/
-                    /*先创建service node的隧道，再创建hypervisror的隧道*/
-                    if(vxlan_tunnel_to_be_create_flag)
-                    {
-                        /*service node隧道创建*/
-                        for(i=0; i<SERVICE_NODE_MAX; i++)
-                        {
-                            if(service_node_vxlan_tunnel_to_be_created[i].used_bit)
-                            {
-                                ovsdb_physical_locator_process_config_vxlan_tunnel(
-                                    service_node_vxlan_tunnel_to_be_created[i].vni,
-                                    service_node_vxlan_tunnel_to_be_created[i].dst_ip
-                                    );
-                            }
-
-                            /*清除缓冲区数据*/
-                            #if 1
-                            if(service_node_vxlan_tunnel_to_be_created[i].dst_ip)
-                            {
-                                free(service_node_vxlan_tunnel_to_be_created[i].dst_ip);
-                            }
-
-                            if(service_node_vxlan_tunnel_to_be_created[i].source_ip)
-                            {
-                                free(service_node_vxlan_tunnel_to_be_created[i].source_ip);
-                            }
-
-                            service_node_vxlan_tunnel_to_be_created[i].vni = 0;
-
-                            service_node_vxlan_tunnel_to_be_created[i].used_bit = 0;
-
-                            service_node_vxlan_tunnel_to_be_created[i].dst_ip = NULL;
-
-                            service_node_vxlan_tunnel_to_be_created[i].source_ip = NULL;
-                            #endif
-                            memset(&service_node_vxlan_tunnel_to_be_created[i], 0 , sizeof(struct hw_vtep_vxlan_tunnel));
-
-                        }
-
-                        /*hypervisor隧道创建*/
-                        for(i=0; i<HYPERVISOR_MAX; i++)
-                        {
-                            if(hypervisor_vxlan_tunnel_to_be_created[i].used_bit)
-                            {
-                                ovsdb_physical_locator_process_config_vxlan_tunnel(
-                                    hypervisor_vxlan_tunnel_to_be_created[i].vni,
-                                    hypervisor_vxlan_tunnel_to_be_created[i].dst_ip
-                                    );
-                            }
-
-                            /*清除缓冲区数据*/
-                            #if 1
-                            if(hypervisor_vxlan_tunnel_to_be_created[i].dst_ip)
-                            {
-                                free(hypervisor_vxlan_tunnel_to_be_created[i].dst_ip);
-                            }
-
-                            if(hypervisor_vxlan_tunnel_to_be_created[i].source_ip)
-                            {
-                                free(hypervisor_vxlan_tunnel_to_be_created[i].source_ip);
-                            }
-
-                            hypervisor_vxlan_tunnel_to_be_created[i].vni = 0;
-
-                            hypervisor_vxlan_tunnel_to_be_created[i].used_bit = 0;
-
-                            hypervisor_vxlan_tunnel_to_be_created[i].dst_ip = NULL;
-
-                            hypervisor_vxlan_tunnel_to_be_created[i].source_ip = NULL;
-                            #endif
-
-                            memset(&hypervisor_vxlan_tunnel_to_be_created[i], 0 , sizeof(struct hw_vtep_vxlan_tunnel));
-                        }
-
-                        /*创建完标志位清零*/
-                        vxlan_tunnel_to_be_create_flag= 0;
-                    }
                     break;
                 }
 
@@ -4734,6 +4655,7 @@ void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, st
         {
             case TABLE_INITIAL:
             case TABLE_INSERT:
+            case TABLE_UPDATE:
                 {
                     int i = 0;
                     int j =0;
@@ -4806,15 +4728,6 @@ void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, st
                                 ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
                                 ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
                                 tunnel_key);
-                            if (OVSDB_OK != uiRet)
-                            {
-                                OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config static mac of vxlan tunnel.");
-                                if (mac_ce != NULL)
-                                {
-                                    free(mac_ce);
-                                }
-                                return;
-                            }
 
                             /*6.释放内存*/
                             if(mac_ce)
@@ -4822,6 +4735,11 @@ void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, st
                                 free(mac_ce);
                             }
 
+                            if (OVSDB_OK != uiRet)
+                            {
+                                OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config static mac of vxlan tunnel.");
+                                return;
+                            }
 
                             break;
                         }
@@ -4831,12 +4749,6 @@ void ucast_macs_remote_table_process_2(struct jsonrpc *rpc, struct json *new, st
                 }
 
             case TABLE_DELETE:
-                {
-
-                    break;
-                }
-
-            case TABLE_UPDATE:
                 {
 
                     break;

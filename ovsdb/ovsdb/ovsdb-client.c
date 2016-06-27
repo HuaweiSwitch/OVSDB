@@ -439,13 +439,33 @@ unsigned int netconf_ce_set_config(char* send_data)
     unsigned int    uiRet  = 0;
     nc_rpc          *rpc   = NULL;
     nc_reply        *reply = NULL;
+    NC_MSG_TYPE     sessionRet = NC_MSG_REPLY;
+    unsigned int    uiTry  = 0;
 
     OVSDB_NULL_RETURN(send_data);
 
+RETRY:
     rpc = nc_rpc_generic(send_data);
 
+    if (NULL == rpc)
+        return OVSDB_ERR;
+
     /* netconf下发配置*/
-    nc_session_send_recv(gst_netconf_session, rpc, &reply);
+    sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
+
+    if (sessionRet != NC_MSG_REPLY){
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to set configuration, error message is %s.",
+            nc_reply_get_errormsg(reply));
+        nc_reply_free(reply);
+        if (3 <= uiTry) {
+            return OVSDB_ERR;
+        }
+        // 链接断开重连
+        netconf_ce_config_destory();
+        (void)netconf_ce_config_init();
+        uiTry++;
+        goto RETRY;
+    }
 
     nc_rpc_free(rpc);
     rpc = NULL;
@@ -468,12 +488,14 @@ unsigned int netconf_ce_query_config_data(char* send_data, char ** ppcReplyData)
     NC_MSG_TYPE     sessionRet   = NC_MSG_REPLY;
     NC_REPLY_TYPE   replyRet     = NC_REPLY_DATA;
     unsigned int    uiLen        = 0;
+    unsigned int    uiTry        = 0;
     nc_rpc          *rpc         = NULL;
     nc_reply        *reply       = NULL;
     char            *paReplyData = NULL;
 
     OVSDB_NULL_RETURN(send_data);
 
+RETRY:
     rpc = nc_rpc_generic(send_data);
 
     if (NULL == rpc)
@@ -488,6 +510,15 @@ unsigned int netconf_ce_query_config_data(char* send_data, char ** ppcReplyData)
     if (sessionRet != NC_MSG_REPLY){
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query configuration, error message is %s.",
             nc_reply_get_errormsg(reply));
+        nc_reply_free(reply);
+        if (3 <= uiTry) {
+            return OVSDB_ERR;
+        }
+        // 链接断开重连
+        netconf_ce_config_destory();
+        (void)netconf_ce_config_init();
+        uiTry++;
+        goto RETRY;
     }
 
     replyRet = nc_reply_get_type(reply);
@@ -523,12 +554,14 @@ unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
     NC_MSG_TYPE     sessionRet   = NC_MSG_REPLY;
     NC_REPLY_TYPE   replyRet     = NC_REPLY_DATA;
     unsigned int    uiLen        = 0;
+    unsigned int    uiTry        = 0;
     nc_rpc          *rpc         = NULL;
     nc_reply        *reply       = NULL;
     char            *paReplyData = NULL;
 
     OVSDB_NULL_RETURN(send_data);
 
+RETRY:
     rpc = nc_rpc_generic(send_data);
 
     if (NULL == rpc)
@@ -543,6 +576,15 @@ unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
     if (sessionRet != NC_MSG_REPLY){
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query configuration, error message is %s.",
             nc_reply_get_errormsg(reply));
+        nc_reply_free(reply);
+        if (3 <= uiTry) {
+            return OVSDB_ERR;
+        }
+        // 链接断开重连
+        netconf_ce_config_destory();
+        (void)netconf_ce_config_init();
+        uiTry++;
+        goto RETRY;
     }
 
     replyRet = nc_reply_get_type(reply);
@@ -643,6 +685,7 @@ unsigned int netconf_ce_config_bd(unsigned int uiVniId)
 unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
 {
     OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_bd********************");
+    unsigned int    uiLoop                            = 0;
     unsigned int    uiRet                             = 0;
     char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
     char            *paReplyData                      = NULL;
@@ -687,6 +730,23 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
 
     /* 1.1 删除此VNI对应的隧道列表 */
     (void)netconf_ce_undo_config_vxlan_tunnel(uiVniId, NULL);
+
+    for (uiLoop = 0; uiLoop < VXLAN_TUNNEL_NUM_MAX; uiLoop++) {
+        if (switch_vxlan_tunnel[uiLoop].vni != uiVniId)
+            continue;
+        
+        /*释放switch_vxlan_tunnel中的该条表项*/
+        if(switch_vxlan_tunnel[uiLoop].source_ip)
+        {
+            free(switch_vxlan_tunnel[uiLoop].source_ip);
+        }
+        if(switch_vxlan_tunnel[uiLoop].dst_ip)
+        {
+            free(switch_vxlan_tunnel[uiLoop].dst_ip);
+        }
+
+        memset(&switch_vxlan_tunnel[uiLoop], 0, sizeof(struct hw_vtep_vxlan_tunnel));
+    }
 
     /* 2.config [undo bridge-domain uiVniId] */
     snprintf(send_data, sizeof(send_data),
@@ -913,6 +973,95 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     return OVSDB_OK;
 }
 
+unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
+{
+    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_port********************");
+    unsigned int  uiRet                                   = 0;
+    unsigned int  uiSubInterNum                           = 0;
+    char          send_data[NETCONF_SEND_DATA_LEN]        = {0};
+    char          *paReplyData                            = NULL;
+
+    if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vlan id %d id invalid", uiVlanId);
+        return OVSDB_ERR;
+    }
+
+    if(!paIfname)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Port ifname name %s is NULL", paIfname);
+        return OVSDB_ERR;
+    }
+
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]Vlan id = %d", uiVlanId);
+    OVSDB_PRINTF_DEBUG_TRACE("[Info]Port name = %s", paIfname);
+
+    /* 为子接口号赋值 */
+    uiSubInterNum = uiVlanId + 1;
+
+    /* 查询interface paIfname.uiSubInterNum mode l2是否存在 */
+    snprintf(send_data, sizeof(send_data),
+        "<get>"\
+          "<filter type=\"subtree\">"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface>"\
+                  "<ifName>%s.%d</ifName>"\
+                  "<l2SubIfFlag>true</l2SubIfFlag>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</filter>"\
+        "</get>", paIfname, uiSubInterNum);
+
+    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
+    //printf("data out is %s\n", aReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
+            paIfname, uiSubInterNum, paIfname, uiSubInterNum);
+        return OVSDB_ERR;
+    }
+
+    if ('\0' == paReplyData[0])
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Interface %s.%d doesn't exist", paIfname, uiSubInterNum);
+        free(paReplyData);
+        paReplyData = NULL;
+        return OVSDB_ERR;
+    }
+
+    free(paReplyData);
+    paReplyData = NULL;
+
+    /* 删除interface paIfname.uiSubInterNum mode l2 */
+    snprintf(send_data, sizeof(send_data),
+        "<edit-config>"\
+          "<target><running/></target>"\
+          "<default-operation>merge</default-operation>"\
+          "<error-option>rollback-on-error</error-option>"\
+          "<config>"\
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface operation=\"delete\">"\
+                  "<ifName>%s.%d</ifName>"\
+                  "<l2SubIfFlag>true</l2SubIfFlag>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>"\
+          "</config>"\
+        "</edit-config>", paIfname, uiSubInterNum);
+
+    uiRet = netconf_ce_set_config(send_data);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
 unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId, char* paIfname)
 {
     OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_port********************");
@@ -974,9 +1123,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
     if ('\0' != paReplyData[0])
     {
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Interface %s.%d has existed", paIfname, uiSubInterNum);
-        free(paReplyData);
-        paReplyData = NULL;
-        return OVSDB_ERR;
+        (void)netconf_ce_undo_config_port(uiVlanId, paIfname);
     }
 
     free(paReplyData);
@@ -1097,96 +1244,6 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
             OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [encapsulation untag]");
             return OVSDB_ERR;
         }
-    }
-
-    return OVSDB_OK;
-}
-
-
-unsigned int netconf_ce_undo_config_port(unsigned int uiVlanId, char* paIfname)
-{
-    OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_port********************");
-    unsigned int  uiRet                                   = 0;
-    unsigned int  uiSubInterNum                           = 0;
-    char          send_data[NETCONF_SEND_DATA_LEN]        = {0};
-    char          *paReplyData                            = NULL;
-
-    if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vlan id %d id invalid", uiVlanId);
-        return OVSDB_ERR;
-    }
-
-    if(!paIfname)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Port ifname name %s is NULL", paIfname);
-        return OVSDB_ERR;
-    }
-
-    OVSDB_PRINTF_DEBUG_TRACE("[Info]Vlan id = %d", uiVlanId);
-    OVSDB_PRINTF_DEBUG_TRACE("[Info]Port name = %s", paIfname);
-
-    /* 为子接口号赋值 */
-    uiSubInterNum = uiVlanId + 1;
-
-    /* 查询interface paIfname.uiSubInterNum mode l2是否存在 */
-    snprintf(send_data, sizeof(send_data),
-        "<get>"\
-          "<filter type=\"subtree\">"\
-            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<interfaces>"\
-                "<interface>"\
-                  "<ifName>%s.%d</ifName>"\
-                  "<l2SubIfFlag>true</l2SubIfFlag>"\
-                "</interface>"\
-              "</interfaces>"\
-            "</ifm>"\
-          "</filter>"\
-        "</get>", paIfname, uiSubInterNum);
-
-    uiRet = netconf_ce_query_config_data(send_data, &paReplyData);
-    //printf("data out is %s\n", aReplyData);
-    if (OVSDB_OK != uiRet)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query %s.%d before config [interface %s.%d mode l2]",
-            paIfname, uiSubInterNum, paIfname, uiSubInterNum);
-        return OVSDB_ERR;
-    }
-
-    if ('\0' == paReplyData[0])
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Interface %s.%d doesn't exist", paIfname, uiSubInterNum);
-        free(paReplyData);
-        paReplyData = NULL;
-        return OVSDB_ERR;
-    }
-
-    free(paReplyData);
-    paReplyData = NULL;
-
-    /* 删除interface paIfname.uiSubInterNum mode l2 */
-    snprintf(send_data, sizeof(send_data),
-        "<edit-config>"\
-          "<target><running/></target>"\
-          "<default-operation>merge</default-operation>"\
-          "<error-option>rollback-on-error</error-option>"\
-          "<config>"\
-            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<interfaces>"\
-                "<interface operation=\"delete\">"\
-                  "<ifName>%s.%d</ifName>"\
-                  "<l2SubIfFlag>true</l2SubIfFlag>"\
-                "</interface>"\
-              "</interfaces>"\
-            "</ifm>"\
-          "</config>"\
-        "</edit-config>", paIfname, uiSubInterNum);
-
-    uiRet = netconf_ce_set_config(send_data);
-    if (OVSDB_OK != uiRet)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
-        return OVSDB_ERR;
     }
 
     return OVSDB_OK;
@@ -3744,7 +3801,6 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                                     OVSDB_PRINTF_DEBUG_TRACE("source_ip = %s, dst_ip = %s.", switch_vxlan_tunnel[m].source_ip, switch_vxlan_tunnel[m].dst_ip);
 
                                     /*释放switch_vxlan_tunnel中的该条表项*/
-                                    #if 1
                                     if(switch_vxlan_tunnel[m].source_ip)
                                     {
                                         free(switch_vxlan_tunnel[m].source_ip);
@@ -3753,10 +3809,8 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                                     {
                                         free(switch_vxlan_tunnel[m].dst_ip);
                                     }
-                                    #endif
 
                                     memset(&switch_vxlan_tunnel[m], 0, sizeof(struct hw_vtep_vxlan_tunnel));
-
 
                                     break;
                                 }

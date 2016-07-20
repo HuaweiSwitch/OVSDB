@@ -107,32 +107,9 @@ int vxlan_tunnel_to_be_create_flag = 0; /*是否有隧道需要创建的标识位，用于locato
 
 struct vxlan_tunnel_static_mac switch_vxlan_static_mac[VXLAN_TUNNEL_MAC_MAX] = {0};
 struct port_vlan_to_vni_map switch_vxlan_map[TABLE_PHYSICAL_PORT_NUM] = {0};
-int nve1_source_ip_configured = 0;
 
 /*global used for vtep transact*/
 struct logical_switch_uuid_and_vni logical_switch_info[TABLE_LOGICAL_SWITCH_NUM] = {0};
-
-
-/*用于判断字符串内容是否相等,如果相等,返回1,否则返回0*/
-int string_equals(char *stringA, char *stringB)
-{
-    if((!stringA)||(!stringB))
-    {
-        return 0;
-    }
-
-    if(strlen(stringA) != strlen(stringB))
-    {
-        return 0;
-    }
-
-    if(!memcmp(stringA, stringB, strlen(stringA)))
-    {
-        return 1;
-    }
-
-    return 0;
-}
 
 
 /*MAC_ovsdb: 01:02:33:44:55:66  MAC_CE: 0102-3344-5566*/
@@ -172,7 +149,7 @@ void mac_translate_ovsdb_to_ce(char* mac_ovsdb, char* mac_ce)
     mac_ce[14] = 0;
 }
 
-#if 1
+#if OVSDB_DESC("配置管理")
 
 struct ovsdb_client_cfg_map gast_ovsdb_client_cfg_map[OVSDB_CLIENT_CFG_MAX] =
 {
@@ -245,7 +222,7 @@ int ovsdb_client_init_cfg(void)
 
 #endif
 
-#if 1
+#if OVSDB_DESC("netconf")
 /*netconf session id*/
 struct nc_session* gst_netconf_session = NULL;
 struct nc_cpblts*  gst_cpblts          = NULL;
@@ -814,13 +791,6 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
     unsigned int uiExist                           = 0;
     char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
 
-    /* 1.判断nve1的source ip是否已配置 */
-    if(nve1_source_ip_configured)
-    {
-        OVSDB_PRINTF_DEBUG_WARN("[ERROR]Nve 1 source ip is configured");
-        return OVSDB_OK;
-    }
-
     /* 2.查询interface nve 1 是否存在*/
     uiRet = netconf_ce_query_nve_port("Nve1", &uiExist);
     if (OVSDB_OK != uiRet)
@@ -907,9 +877,6 @@ unsigned int netconf_ce_config_nve1_source(char* paVtepIp)
         return OVSDB_ERR;
     }
 
-    /* 5.将nve1_source_ip_configured标记位置为1 */
-    nve1_source_ip_configured = 1;
-
     return OVSDB_OK;
 }
 
@@ -920,13 +887,6 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
     unsigned int uiExist                           = 0;
     char         send_data[NETCONF_SEND_DATA_LEN]  = {0};
 
-    /* 1.判断nve1的source ip是否已配置 */
-    if(!nve1_source_ip_configured)
-    {
-        OVSDB_PRINTF_DEBUG_WARN("[ERROR]Nve 1 source ip is not configured.");
-        return OVSDB_ERR;
-    }
-
     /* 2.查询interface nve 1 是否存在*/
     uiRet = netconf_ce_query_nve_port("Nve1", &uiExist);
     if (OVSDB_OK != uiRet)
@@ -935,7 +895,7 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
         return OVSDB_ERR;
     }
 
-    if (0 == uiExist)
+    if (0 != uiExist)
     {
         /* 3.删除interface nve 1 */
         snprintf(send_data, sizeof(send_data),
@@ -960,9 +920,6 @@ unsigned int netconf_ce_undo_config_nve1_source(char* paVtepIp)
             OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo interface Nve1].");
             return OVSDB_ERR;
         }
-
-        /* 4.将nve1_source_ip_configured标记位置为0 */
-        nve1_source_ip_configured = 0;
     }
     else
     {
@@ -2434,7 +2391,7 @@ void ovsdb_physical_locator_process(struct uuid *uuid_pl, char *pl_dst_ip)
             }
             else
             {
-                if(string_equals(pl_dst_ip, ovsdb_vtep_db_table.table_physical_switch[id_ps].tunnel_ips[id_t]))
+                if(0 == strcmp(pl_dst_ip, ovsdb_vtep_db_table.table_physical_switch[id_ps].tunnel_ips[id_t]))
                 {
                     OVSDB_PRINTF_DEBUG_TRACE("source vtep ip, return.");
                     return;    /*说明locator表中的dst ip是本端source ip，直接返回*/
@@ -2675,7 +2632,7 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char *pl
             OVSDB_PRINTF_DEBUG_TRACE("switch_vxlan_tunnel[k].source_ip=%s.", switch_vxlan_tunnel[k].source_ip);
             OVSDB_PRINTF_DEBUG_TRACE("ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]=%s.", ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
 
-            if((tunnel_key == switch_vxlan_tunnel[k].vni)&&(string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)))
+            if((tunnel_key == switch_vxlan_tunnel[k].vni)&&(0 == strcmp(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)))
             {
                 OVSDB_PRINTF_DEBUG_ERROR("tunnel exist with dst_ip = %s and vni = %d.", pl_dst_ip, tunnel_key);
                 return;
@@ -3783,7 +3740,7 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                         /*首先在switch_vxlan_tunnel全局变量中找对应的隧道*/
                         for(m=0; m<VXLAN_TUNNEL_NUM_MAX; m++)
                         {
-                            if(string_equals(switch_vxlan_tunnel[m].dst_ip, ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
+                            if(0 == strcmp(switch_vxlan_tunnel[m].dst_ip, ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
                             {
                                 if((switch_vxlan_tunnel[m].used_bit)&&(switch_vxlan_tunnel[m].vni>4095))
                                 {
@@ -3820,7 +3777,7 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                         /*如果是本端的vtep ip，则删除Nve接口*/
                         if((ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]) && (ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
                         {
-                            if(string_equals(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0], ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
+                            if(0 == strcmp(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0], ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
                             {
                                 uiRet = netconf_ce_undo_config_nve1_source(ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
                                 if (OVSDB_OK != uiRet)
@@ -4019,7 +3976,7 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
                         /*locators*/
                         /*需要考虑一个locator_set中只有一个locator以及多个locator的情况*/
                         /*首先考虑只有1个locator的情况*/
-                        if(string_equals(json_string(locators_value->elems[0]), "uuid"))
+                        if(0 == strcmp(json_string(locators_value->elems[0]), "uuid"))
                         {
                             (void)uuid_from_string(&ovsdb_vtep_db_table.table_physical_locator_set[i].locators[0],
                                 json_string(locators_value->elems[1]));
@@ -4028,7 +3985,7 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
 
                         }
                         /*然后考虑多个locator的情况*/
-                        else if(string_equals(json_string(locators_value->elems[0]), "set"))
+                        else if(0 == strcmp(json_string(locators_value->elems[0]), "set"))
                         {
                             struct json_array *locator_elems;
                             locator_elems = json_array(locators_value->elems[1]);
@@ -5228,7 +5185,7 @@ void arp_sources_remote_table_process_2(struct jsonrpc *rpc, struct json *new, s
 
 
 
-void
+static void
 monitor_print_table(struct json *table_update,
                     const struct monitored_table *mt, char *caption,
                     bool initial)
@@ -6110,7 +6067,7 @@ void do_transact_temp_query_logical_switch_has_mcast_local_record(struct jsonrpc
     if(!rows_elem_num)
     {
         *ls_has_mcast_local_record = 0;
-        OVSDB_PRINTF_DEBUG_ERROR("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
+        OVSDB_PRINTF_DEBUG_WARN("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
     }
     else
     {
@@ -6510,6 +6467,7 @@ do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_c
     jsonrpc_msg_destroy(reply);
 }
 
+#if OVSDB_DESC("add MAC & interface")
 struct ovsdb_write_mcast_local_args * g_args_local = NULL;
 
 struct ovsdb_sub_table g_aucTBL[OVSDB_SUB_TABLE_MAX] =
@@ -7326,6 +7284,7 @@ void ovsdb_write_mcast_local(void *args)
     ls_info = NULL;
 
 }
+#endif
 
 /*以do monitor函数为主体*/
 void

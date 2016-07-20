@@ -4,6 +4,9 @@
 
 #include "uthash.h"
 
+#undef  OVSDB_DESC
+#define OVSDB_DESC()                  (1)
+
 /* 错误码 */
 #define OVSDB_OK                      (0)
 #define OVSDB_ERR                     (0x00021000)             /* OVSDB错误的变量基准值, OVSDB内部统一分配 */
@@ -576,7 +579,6 @@ void arp_sources_remote_table_process_2(struct jsonrpc*,struct json*, struct jso
 
 
 
-int string_equals(char *stringA, char *stringB);
 void mac_translate_ovsdb_to_ce(char*, char*);
 
 #define CE_MAC_FORM "1122-3344-5566"

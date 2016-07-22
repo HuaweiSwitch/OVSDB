@@ -16,13 +16,14 @@
 
 #include <config.h>
 #include "ovs-rcu.h"
+#include "fatal-signal.h"
 #include "guarded-list.h"
 #include "list.h"
 #include "ovs-thread.h"
 #include "poll-loop.h"
 #include "seq.h"
 #include "timeval.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(ovs_rcu);
 
@@ -32,13 +33,13 @@ struct ovsrcu_cb {
 };
 
 struct ovsrcu_cbset {
-    struct list list_node;
+    struct ovs_list list_node;
     struct ovsrcu_cb cbs[16];
     int n_cbs;
 };
 
 struct ovsrcu_perthread {
-    struct list list_node;      /* In global list. */
+    struct ovs_list list_node;  /* In global list. */
 
     struct ovs_mutex mutex;
     uint64_t seqno;
@@ -49,25 +50,24 @@ struct ovsrcu_perthread {
 static struct seq *global_seqno;
 
 static pthread_key_t perthread_key;
-static struct list ovsrcu_threads;
+static struct ovs_list ovsrcu_threads;
 static struct ovs_mutex ovsrcu_threads_mutex;
 
 static struct guarded_list flushed_cbsets;
 static struct seq *flushed_cbsets_seq;
 
-static void ovsrcu_init(void);
+static void ovsrcu_init_module(void);
 static void ovsrcu_flush_cbset(struct ovsrcu_perthread *);
 static void ovsrcu_unregister__(struct ovsrcu_perthread *);
 static bool ovsrcu_call_postponed(void);
 static void *ovsrcu_postpone_thread(void *arg OVS_UNUSED);
-static void ovsrcu_synchronize(void);
 
 static struct ovsrcu_perthread *
 ovsrcu_perthread_get(void)
 {
     struct ovsrcu_perthread *perthread;
 
-    ovsrcu_init();
+    ovsrcu_init_module();
 
     perthread = pthread_getspecific(perthread_key);
     if (!perthread) {
@@ -121,7 +121,7 @@ ovsrcu_quiesce_start(void)
 {
     struct ovsrcu_perthread *perthread;
 
-    ovsrcu_init();
+    ovsrcu_init_module();
     perthread = pthread_getspecific(perthread_key);
     if (perthread) {
         pthread_setspecific(perthread_key, NULL);
@@ -132,12 +132,20 @@ ovsrcu_quiesce_start(void)
 }
 
 /* Indicates a momentary quiescent state.  See "Details" near the top of
- * ovs-rcu.h. */
+ * ovs-rcu.h.
+ *
+ * Provides a full memory barrier via seq_change().
+ */
 void
 ovsrcu_quiesce(void)
 {
-    ovsrcu_init();
-    ovsrcu_perthread_get()->seqno = seq_read(global_seqno);
+    struct ovsrcu_perthread *perthread;
+
+    perthread = ovsrcu_perthread_get();
+    perthread->seqno = seq_read(global_seqno);
+    if (perthread->cbset) {
+        ovsrcu_flush_cbset(perthread);
+    }
     seq_change(global_seqno);
 
     ovsrcu_quiesced();
@@ -146,11 +154,11 @@ ovsrcu_quiesce(void)
 bool
 ovsrcu_is_quiescent(void)
 {
-    ovsrcu_init();
+    ovsrcu_init_module();
     return pthread_getspecific(perthread_key) == NULL;
 }
 
-static void
+void
 ovsrcu_synchronize(void)
 {
     unsigned int warning_threshold = 1000;
@@ -204,6 +212,19 @@ ovsrcu_synchronize(void)
 /* Registers 'function' to be called, passing 'aux' as argument, after the
  * next grace period.
  *
+ * The call is guaranteed to happen after the next time all participating
+ * threads have quiesced at least once, but there is no quarantee that all
+ * registered functions are called as early as possible, or that the functions
+ * registered by different threads would be called in the order the
+ * registrations took place.  In particular, even if two threads provably
+ * register a function each in a specific order, the functions may still be
+ * called in the opposite order, depending on the timing of when the threads
+ * call ovsrcu_quiesce(), how many functions they postpone, and when the
+ * ovs-rcu thread happens to grab the functions to be called.
+ *
+ * All functions registered by a single thread are guaranteed to execute in the
+ * registering order, however.
+ *
  * This function is more conveniently called through the ovsrcu_postpone()
  * macro, which provides a type-safe way to allow 'function''s parameter to be
  * any pointer type. */
@@ -232,8 +253,8 @@ ovsrcu_postpone__(void (*function)(void *aux), void *aux)
 static bool
 ovsrcu_call_postponed(void)
 {
-    struct ovsrcu_cbset *cbset, *next_cbset;
-    struct list cbsets;
+    struct ovsrcu_cbset *cbset;
+    struct ovs_list cbsets;
 
     guarded_list_pop_all(&flushed_cbsets, &cbsets);
     if (list_is_empty(&cbsets)) {
@@ -242,13 +263,12 @@ ovsrcu_call_postponed(void)
 
     ovsrcu_synchronize();
 
-    LIST_FOR_EACH_SAFE (cbset, next_cbset, list_node, &cbsets) {
+    LIST_FOR_EACH_POP (cbset, list_node, &cbsets) {
         struct ovsrcu_cb *cb;
 
         for (cb = cbset->cbs; cb < &cbset->cbs[cbset->n_cbs]; cb++) {
             cb->function(cb->aux);
         }
-        list_remove(&cbset->list_node);
         free(cbset);
     }
 
@@ -307,13 +327,26 @@ ovsrcu_thread_exit_cb(void *perthread)
     ovsrcu_unregister__(perthread);
 }
 
+/* Cancels the callback to ovsrcu_thread_exit_cb().
+ *
+ * Cancelling the call to the destructor during the main thread exit
+ * is needed while using pthreads-win32 library in Windows. It has been
+ * observed that in pthreads-win32, a call to the destructor during
+ * main thread exit causes undefined behavior. */
 static void
-ovsrcu_init(void)
+ovsrcu_cancel_thread_exit_cb(void *aux OVS_UNUSED)
+{
+    pthread_setspecific(perthread_key, NULL);
+}
+
+static void
+ovsrcu_init_module(void)
 {
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
     if (ovsthread_once_start(&once)) {
         global_seqno = seq_create();
         xpthread_key_create(&perthread_key, ovsrcu_thread_exit_cb);
+        fatal_signal_add_hook(ovsrcu_cancel_thread_exit_cb, NULL, NULL, true);
         list_init(&ovsrcu_threads);
         ovs_mutex_init(&ovsrcu_threads_mutex);
 

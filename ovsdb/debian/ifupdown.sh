@@ -29,6 +29,10 @@ if (ovs_vsctl --version) > /dev/null 2>&1; then :; else
     exit 0
 fi
 
+if /etc/init.d/openvswitch-switch status > /dev/null 2>&1; then :; else
+    /etc/init.d/openvswitch-switch start
+fi
+
 if [ "${MODE}" = "start" ]; then
     eval OVS_EXTRA=\"${IF_OVS_EXTRA}\"
 
@@ -66,6 +70,12 @@ if [ "${MODE}" = "start" ]; then
                     ifconfig "${slave}" up
                 done
                 ;;
+        OVSPatchPort)
+                ovs_vsctl -- --may-exist add-port "${IF_OVS_BRIDGE}"\
+                    "${IFACE}" ${IF_OVS_OPTIONS} -- set Interface "${IFACE}" \
+                    type=patch options:peer="${IF_OVS_PATCH_PEER}" \
+                    ${OVS_EXTRA+-- $OVS_EXTRA}
+                ;;
         OVSTunnel)
                 ovs_vsctl -- --may-exist add-port "${IF_OVS_BRIDGE}"\
                     "${IFACE}" ${IF_OVS_OPTIONS} -- set Interface "${IFACE}" \
@@ -85,7 +95,7 @@ elif [ "${MODE}" = "stop" ]; then
 
                 ovs_vsctl -- --if-exists del-br "${IFACE}"
                 ;;
-        OVSPort|OVSIntPort|OVSBond|OVSTunnel)
+        OVSPort|OVSIntPort|OVSBond|OVSPatchPort|OVSTunnel)
                 ovs_vsctl -- --if-exists del-port "${IF_OVS_BRIDGE}" "${IFACE}"
                 ;;
         *)

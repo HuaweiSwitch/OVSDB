@@ -16,8 +16,6 @@
  * 02110-1301, USA
  */
 
-#include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -36,21 +34,22 @@
 
 #include "compat.h"
 #include "gso.h"
+#include "vport-netdev.h"
 
-int iptunnel_xmit(struct rtable *rt,
-		  struct sk_buff *skb,
-		  __be32 src, __be32 dst, __u8 proto,
-		  __u8 tos, __u8 ttl, __be16 df, bool xnet)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
+int rpl_iptunnel_xmit(struct sock *sk, struct rtable *rt, struct sk_buff *skb,
+                      __be32 src, __be32 dst, __u8 proto, __u8 tos, __u8 ttl,
+                      __be16 df, bool xnet)
 {
 	int pkt_len = skb->len;
 	struct iphdr *iph;
 	int err;
 
-	nf_reset(skb);
-	secpath_reset(skb);
+	skb_scrub_packet(skb, xnet);
+
 	skb_clear_hash(skb);
-	skb_dst_drop(skb);
 	skb_dst_set(skb, &rt_dst(rt));
+
 #if 0
 	/* Do not clear ovs_skb_cb.  It will be done in gso code. */
 	memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
@@ -70,15 +69,77 @@ int iptunnel_xmit(struct rtable *rt,
 	iph->daddr	=	dst;
 	iph->saddr	=	src;
 	iph->ttl	=	ttl;
+
+#ifdef HAVE_IP_SELECT_IDENT_USING_DST_ENTRY
 	__ip_select_ident(iph, &rt_dst(rt), (skb_shinfo(skb)->gso_segs ?: 1) - 1);
+#elif defined(HAVE_IP_SELECT_IDENT_USING_NET)
+	__ip_select_ident(dev_net(rt->dst.dev), iph,
+			  skb_shinfo(skb)->gso_segs ?: 1);
+#else
+	__ip_select_ident(iph, skb_shinfo(skb)->gso_segs ?: 1);
+#endif
 
 	err = ip_local_out(skb);
 	if (unlikely(net_xmit_eval(err)))
 		pkt_len = 0;
 	return pkt_len;
 }
+EXPORT_SYMBOL_GPL(rpl_iptunnel_xmit);
 
-int iptunnel_pull_header(struct sk_buff *skb, int hdr_len, __be16 inner_proto)
+struct sk_buff *ovs_iptunnel_handle_offloads(struct sk_buff *skb,
+					     bool csum_help, int gso_type_mask,
+					     void (*fix_segment)(struct sk_buff *))
+{
+	int err;
+
+	if (likely(!skb_is_encapsulated(skb))) {
+		skb_reset_inner_headers(skb);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,8,0)
+		skb->encapsulation = 1;
+#endif
+	} else if (skb_is_gso(skb)) {
+		err = -ENOSYS;
+		goto error;
+	}
+
+	if (gso_type_mask)
+		fix_segment = NULL;
+
+	OVS_GSO_CB(skb)->fix_segment = fix_segment;
+
+	if (skb_is_gso(skb)) {
+		err = skb_unclone(skb, GFP_ATOMIC);
+		if (unlikely(err))
+			goto error;
+		skb_shinfo(skb)->gso_type |= gso_type_mask;
+		return skb;
+	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,8,0)
+	/* If packet is not gso and we are resolving any partial checksum,
+	 * clear encapsulation flag. This allows setting CHECKSUM_PARTIAL
+	 * on the outer header without confusing devices that implement
+	 * NETIF_F_IP_CSUM with encapsulation.
+	 */
+	if (csum_help)
+		skb->encapsulation = 0;
+#endif
+
+	if (skb->ip_summed == CHECKSUM_PARTIAL && csum_help) {
+		err = skb_checksum_help(skb);
+		if (unlikely(err))
+			goto error;
+	} else if (skb->ip_summed != CHECKSUM_PARTIAL)
+		skb->ip_summed = CHECKSUM_NONE;
+
+	return skb;
+error:
+	kfree_skb(skb);
+	return ERR_PTR(err);
+}
+EXPORT_SYMBOL_GPL(ovs_iptunnel_handle_offloads);
+
+int rpl_iptunnel_pull_header(struct sk_buff *skb, int hdr_len, __be16 inner_proto)
 {
 	if (unlikely(!pskb_may_pull(skb, hdr_len)))
 		return -ENOMEM;
@@ -111,5 +172,96 @@ int iptunnel_pull_header(struct sk_buff *skb, int hdr_len, __be16 inner_proto)
 	skb->pkt_type = PACKET_HOST;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(rpl_iptunnel_pull_header);
 
-#endif /* 3.12 */
+#endif
+
+bool ovs_skb_is_encapsulated(struct sk_buff *skb)
+{
+	/* checking for inner protocol should be sufficient on newer kernel, but
+	 * old kernel just set encapsulation bit.
+	 */
+	return ovs_skb_get_inner_protocol(skb) || skb_encapsulation(skb);
+}
+EXPORT_SYMBOL_GPL(ovs_skb_is_encapsulated);
+
+/* derived from ip_tunnel_rcv(). */
+void ovs_ip_tunnel_rcv(struct net_device *dev, struct sk_buff *skb,
+		       struct metadata_dst *tun_dst)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
+	struct pcpu_sw_netstats *tstats;
+
+	tstats = this_cpu_ptr((struct pcpu_sw_netstats __percpu *)dev->tstats);
+	u64_stats_update_begin(&tstats->syncp);
+	tstats->rx_packets++;
+	tstats->rx_bytes += skb->len;
+	u64_stats_update_end(&tstats->syncp);
+#endif
+
+	skb_reset_mac_header(skb);
+	skb_scrub_packet(skb, false);
+	skb->protocol = eth_type_trans(skb, dev);
+	skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
+
+	ovs_skb_dst_set(skb, (struct dst_entry *)tun_dst);
+
+#ifndef HAVE_METADATA_DST
+	netdev_port_receive(skb, &tun_dst->u.tun_info);
+#else
+	netif_rx(skb);
+#endif
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
+#ifndef HAVE_PCPU_SW_NETSTATS
+#define netdev_stats_to_stats64 rpl_netdev_stats_to_stats64
+static void netdev_stats_to_stats64(struct rtnl_link_stats64 *stats64,
+				    const struct net_device_stats *netdev_stats)
+{
+#if BITS_PER_LONG == 64
+	BUILD_BUG_ON(sizeof(*stats64) != sizeof(*netdev_stats));
+	memcpy(stats64, netdev_stats, sizeof(*stats64));
+#else
+	size_t i, n = sizeof(*stats64) / sizeof(u64);
+	const unsigned long *src = (const unsigned long *)netdev_stats;
+	u64 *dst = (u64 *)stats64;
+
+	BUILD_BUG_ON(sizeof(*netdev_stats) / sizeof(unsigned long) !=
+		     sizeof(*stats64) / sizeof(u64));
+	for (i = 0; i < n; i++)
+		dst[i] = src[i];
+#endif
+}
+
+struct rtnl_link_stats64 *rpl_ip_tunnel_get_stats64(struct net_device *dev,
+						struct rtnl_link_stats64 *tot)
+{
+	int i;
+
+	netdev_stats_to_stats64(tot, &dev->stats);
+
+	for_each_possible_cpu(i) {
+		const struct pcpu_sw_netstats *tstats =
+						   per_cpu_ptr((struct pcpu_sw_netstats __percpu *)dev->tstats, i);
+		u64 rx_packets, rx_bytes, tx_packets, tx_bytes;
+		unsigned int start;
+
+		do {
+			start = u64_stats_fetch_begin_irq(&tstats->syncp);
+			rx_packets = tstats->rx_packets;
+			tx_packets = tstats->tx_packets;
+			rx_bytes = tstats->rx_bytes;
+			tx_bytes = tstats->tx_bytes;
+		} while (u64_stats_fetch_retry_irq(&tstats->syncp, start));
+
+		tot->rx_packets += rx_packets;
+		tot->tx_packets += tx_packets;
+		tot->rx_bytes   += rx_bytes;
+		tot->tx_bytes   += tx_bytes;
+	}
+
+	return tot;
+}
+#endif
+#endif

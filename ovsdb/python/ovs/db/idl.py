@@ -26,8 +26,12 @@ vlog = ovs.vlog.Vlog("idl")
 
 __pychecker__ = 'no-classattr no-objattrs'
 
+ROW_CREATE = "create"
+ROW_UPDATE = "update"
+ROW_DELETE = "delete"
 
-class Idl:
+
+class Idl(object):
     """Open vSwitch Database Interface Definition Language (OVSDB IDL).
 
     The OVSDB IDL maintains an in-memory replica of a database.  It issues RPC
@@ -103,6 +107,7 @@ class Idl:
         schema = schema.get_idl_schema()
 
         self.tables = schema.tables
+        self.readonly = schema.readonly
         self._db = schema
         self._session = ovs.jsonrpc.Session.open(remote)
         self._monitor_request_id = None
@@ -264,6 +269,17 @@ class Idl:
             self.lock_name = lock_name
             self.__send_lock_request()
 
+    def notify(self, event, row, updates=None):
+        """Hook for implementing create/update/delete notifications
+
+        :param event:   The event that was triggered
+        :type event:    ROW_CREATE, ROW_UPDATE, or ROW_DELETE
+        :param row:     The row as it is after the operation has occured
+        :type row:      Row
+        :param updates: For updates, a Row object with just the changed columns
+        :type updates:  Row
+        """
+
     def __clear(self):
         changed = False
 
@@ -316,14 +332,20 @@ class Idl:
             and type(params) in (list, tuple)
             and params
             and params[0] == self.lock_name):
-            self.__update_has_lock(self, new_has_lock)
+            self.__update_has_lock(new_has_lock)
             if not new_has_lock:
                 self.is_lock_contended = True
 
     def __send_monitor_request(self):
         monitor_requests = {}
         for table in self.tables.itervalues():
-            monitor_requests[table.name] = {"columns": table.columns.keys()}
+            columns = []
+            for column in table.columns.keys():
+                if ((table.name not in self.readonly) or
+                    (table.name in self.readonly) and
+                    (column not in self.readonly[table.name])):
+                    columns.append(column)
+            monitor_requests[table.name] = {"columns": columns}
         msg = ovs.jsonrpc.Message.create_request(
             "monitor", [self._db.name, None, monitor_requests])
         self._monitor_request_id = msg.id
@@ -386,6 +408,7 @@ class Idl:
             if row:
                 del table.rows[uuid]
                 changed = True
+                self.notify(ROW_DELETE, row)
             else:
                 # XXX rate-limit
                 vlog.warn("cannot delete missing row %s from table %s"
@@ -401,15 +424,19 @@ class Idl:
                           % (uuid, table.name))
             if self.__row_update(table, row, new):
                 changed = True
+                self.notify(ROW_CREATE, row)
         else:
+            op = ROW_UPDATE
             if not row:
                 row = self.__create_row(table, uuid)
                 changed = True
+                op = ROW_CREATE
                 # XXX rate-limit
                 vlog.warn("cannot modify missing row %s in table %s"
                           % (uuid, table.name))
             if self.__row_update(table, row, new):
                 changed = True
+                self.notify(op, row, Row.from_json(self, table, uuid, old))
         return changed
 
     def __row_update(self, table, row, row_json):
@@ -551,13 +578,22 @@ class Row(object):
             if self._data is None:
                 raise AttributeError("%s instance has no attribute '%s'" %
                                      (self.__class__.__name__, column_name))
-            datum = self._data[column_name]
+            if column_name in self._data:
+                datum = self._data[column_name]
+            else:
+                raise AttributeError("%s instance has no attribute '%s'" %
+                                     (self.__class__.__name__, column_name))
 
         return datum.to_python(_uuid_to_row)
 
     def __setattr__(self, column_name, value):
         assert self._changes is not None
         assert self._idl.txn
+
+        if ((self._table.name in self._idl.readonly) and
+            (column_name in self._idl.readonly[self._table.name])):
+            vlog.warn("attempting to write to readonly column %s" % column_name)
+            return
 
         column = self._table.columns[column_name]
         try:
@@ -569,6 +605,26 @@ class Row(object):
                      % (column_name, e))
             return
         self._idl.txn._write(self, column, datum)
+
+    @classmethod
+    def from_json(cls, idl, table, uuid, row_json):
+        data = {}
+        for column_name, datum_json in row_json.iteritems():
+            column = table.columns.get(column_name)
+            if not column:
+                # XXX rate-limit
+                vlog.warn("unknown column %s in table %s"
+                          % (column_name, table.name))
+                continue
+            try:
+                datum = ovs.db.data.Datum.from_json(column.type, datum_json)
+            except error.Error, e:
+                # XXX rate-limit
+                vlog.warn("error parsing column %s in table %s: %s"
+                          % (column_name, table.name, e))
+                continue
+            data[column_name] = datum
+        return cls(idl, table, uuid, data)
 
     def verify(self, column_name):
         """Causes the original contents of column 'column_name' in this row to
@@ -614,6 +670,9 @@ class Row(object):
             self._idl.txn._txn_rows[self.uuid] = self
         self.__dict__["_changes"] = None
         del self._table.rows[self.uuid]
+
+    def fetch(self, column_name):
+        self._idl.txn._fetch(self, column_name)
 
     def increment(self, column_name):
         """Causes the transaction, when committed, to increment the value of
@@ -737,10 +796,12 @@ class Transaction(object):
         self._inc_row = None
         self._inc_column = None
 
+        self._fetch_requests = []
+
         self._inserted_rows = {}  # Map from UUID to _InsertedRow
 
     def add_comment(self, comment):
-        """Appens 'comment' to the comments that will be passed to the OVSDB
+        """Appends 'comment' to the comments that will be passed to the OVSDB
         server when this transaction is committed.  (The comment will be
         committed to the OVSDB log, which "ovsdb-tool show-log" can print in a
         relatively human-readable form.)"""
@@ -835,7 +896,7 @@ class Transaction(object):
             return self._status
 
         # If we need a lock but don't have it, give up quickly.
-        if self.idl.lock_name and not self.idl.has_lock():
+        if self.idl.lock_name and not self.idl.has_lock:
             self._status = Transaction.NOT_LOCKED
             self.__disassemble()
             return self._status
@@ -906,6 +967,16 @@ class Transaction(object):
 
                 if row._data is None or row_json:
                     operations.append(op)
+
+        if self._fetch_requests:
+            for fetch in self._fetch_requests:
+                fetch["index"] = len(operations) - 1
+                operations.append({"op": "select",
+                                   "table": fetch["row"]._table.name,
+                                   "where": self._substitute_uuids(
+                                       _where_uuid_equals(fetch["row"].uuid)),
+                                   "columns": [fetch["column_name"]]})
+            any_updates = True
 
         # Add increment.
         if self._inc_row and any_updates:
@@ -1017,6 +1088,9 @@ class Transaction(object):
         self._inc_row = row
         self._inc_column = column
 
+    def _fetch(self, row, column_name):
+        self._fetch_requests.append({"row":row, "column_name":column_name})
+
     def _write(self, row, column, datum):
         assert row._changes is not None
 
@@ -1034,7 +1108,7 @@ class Transaction(object):
         # transaction only does writes of existing values, without making any
         # real changes, we will drop the whole transaction later in
         # ovsdb_idl_txn_commit().)
-        if not column.alert and row._data.get(column.name) == datum:
+        if not column.alert and row._data and row._data.get(column.name) == datum:
             new_value = row._changes.get(column.name)
             if new_value is None or new_value == datum:
                 return
@@ -1099,6 +1173,11 @@ class Transaction(object):
             if not soft_errors and not hard_errors and not lock_errors:
                 if self._inc_row and not self.__process_inc_reply(ops):
                     hard_errors = True
+                if self._fetch_requests:
+                    if self.__process_fetch_reply(ops):
+                        self.idl.change_seqno += 1
+                    else:
+                        hard_errors = True
 
                 for insert in self._inserted_rows.itervalues():
                     if not self.__process_insert_reply(insert, ops):
@@ -1125,6 +1204,38 @@ class Transaction(object):
             return False
         else:
             return True
+
+    def __process_fetch_reply(self, ops):
+        update = False
+        for fetch_request in self._fetch_requests:
+            row = fetch_request["row"]
+            column_name = fetch_request["column_name"]
+            index = fetch_request["index"]
+            table = row._table
+
+            select = ops[index]
+            fetched_rows = select.get("rows")
+            if not Transaction.__check_json_type(fetched_rows, (list, tuple),
+                                                 '"select" reply "rows"'):
+                return False
+            if len(fetched_rows) != 1:
+                # XXX rate-limit
+                vlog.warn('"select" reply "rows" has %d elements '
+                          'instead of 1' % len(rows))
+                continue
+            fetched_row = fetched_rows[0]
+            if not Transaction.__check_json_type(fetched_row, (dict,),
+                                                 '"select" reply row'):
+                continue
+
+            column = table.columns.get(column_name)
+            datum_json = fetched_row.get(column_name)
+            datum = ovs.db.data.Datum.from_json(column.type, datum_json)
+
+            row._data[column_name] = datum
+            update = True
+
+        return update
 
     def __process_inc_reply(self, ops):
         if self._inc_index + 2 > len(ops):
@@ -1221,16 +1332,21 @@ class SchemaHelper(object):
 
         self.schema_json = schema_json
         self._tables = {}
+        self._readonly = {}
         self._all = False
 
-    def register_columns(self, table, columns):
+    def register_columns(self, table, columns, readonly=[]):
         """Registers interest in the given 'columns' of 'table'.  Future calls
         to get_idl_schema() will include 'table':column for each column in
         'columns'. This function automatically avoids adding duplicate entries
         to the schema.
+        A subset of 'columns' can be specified as 'readonly'. The readonly
+        columns are not replicated but can be fetched on-demand by the user
+        with Row.fetch().
 
         'table' must be a string.
         'columns' must be a list of strings.
+        'readonly' must be a list of strings.
         """
 
         assert type(table) is str
@@ -1238,6 +1354,7 @@ class SchemaHelper(object):
 
         columns = set(columns) | self._tables.get(table, set())
         self._tables[table] = columns
+        self._readonly[table] = readonly
 
     def register_table(self, table):
         """Registers interest in the given all columns of 'table'. Future calls
@@ -1267,6 +1384,7 @@ class SchemaHelper(object):
                     self._keep_table_columns(schema, table, columns))
 
             schema.tables = schema_tables
+        schema.readonly = self._readonly
         return schema
 
     def _keep_table_columns(self, schema, table_name, columns):

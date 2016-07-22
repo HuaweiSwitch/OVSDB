@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,16 @@
 #include "ovs-thread.h"
 #include <errno.h>
 #include <poll.h>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 #include <stdlib.h>
 #include <unistd.h>
 #include "compiler.h"
+#include "fatal-signal.h"
 #include "hash.h"
+#include "list.h"
+#include "netdev-dpdk.h"
 #include "ovs-rcu.h"
 #include "poll-loop.h"
 #include "seq.h"
@@ -34,7 +40,7 @@
  * cut-and-paste.  Since "sparse" is just a checker, not a compiler, it
  * doesn't matter that we don't define them. */
 #else
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(ovs_thread);
 
@@ -174,6 +180,10 @@ XPTHREAD_FUNC2(pthread_key_create, pthread_key_t *, destructor_func *);
 XPTHREAD_FUNC1(pthread_key_delete, pthread_key_t);
 XPTHREAD_FUNC2(pthread_setspecific, pthread_key_t, const void *);
 
+#ifndef _WIN32
+XPTHREAD_FUNC3(pthread_sigmask, int, const sigset_t *, sigset_t *);
+#endif
+
 static void
 ovs_mutex_init__(const struct ovs_mutex *l_, int type)
 {
@@ -258,7 +268,7 @@ void
 ovs_barrier_init(struct ovs_barrier *barrier, uint32_t size)
 {
     barrier->size = size;
-    atomic_init(&barrier->count, 0);
+    atomic_count_init(&barrier->count, 0);
     barrier->seq = seq_create();
 }
 
@@ -270,24 +280,30 @@ ovs_barrier_destroy(struct ovs_barrier *barrier)
 }
 
 /* Makes the calling thread block on the 'barrier' until all
- * 'barrier->size' threads hit the barrier. */
+ * 'barrier->size' threads hit the barrier.
+ * ovs_barrier provides the necessary acquire-release semantics to make
+ * the effects of prior memory accesses of all the participating threads
+ * visible on return and to prevent the following memory accesses to be
+ * reordered before the ovs_barrier_block(). */
 void
 ovs_barrier_block(struct ovs_barrier *barrier)
 {
     uint64_t seq = seq_read(barrier->seq);
     uint32_t orig;
 
-    atomic_add(&barrier->count, 1, &orig);
+    orig = atomic_count_inc(&barrier->count);
     if (orig + 1 == barrier->size) {
-        atomic_store(&barrier->count, 0);
+        atomic_count_set(&barrier->count, 0);
+        /* seq_change() serves as a release barrier against the other threads,
+         * so the zeroed count is visible to them as they continue. */
         seq_change(barrier->seq);
-    }
-
-    /* To prevent thread from waking up by other event,
-     * keeps waiting for the change of 'barrier->seq'. */
-    while (seq == seq_read(barrier->seq)) {
-        seq_wait(barrier->seq, seq);
-        poll_block();
+    } else {
+        /* To prevent thread from waking up by other event,
+         * keeps waiting for the change of 'barrier->seq'. */
+        while (seq == seq_read(barrier->seq)) {
+            seq_wait(barrier->seq, seq);
+            poll_block();
+        }
     }
 }
 
@@ -302,13 +318,13 @@ struct ovsthread_aux {
 static void *
 ovsthread_wrapper(void *aux_)
 {
-    static atomic_uint next_id = ATOMIC_VAR_INIT(1);
+    static atomic_count next_id = ATOMIC_COUNT_INIT(1);
 
     struct ovsthread_aux *auxp = aux_;
     struct ovsthread_aux aux;
     unsigned int id;
 
-    atomic_add(&next_id, 1, &id);
+    id = atomic_count_inc(&next_id);
     *ovsthread_id_get() = id;
 
     aux = *auxp;
@@ -316,7 +332,9 @@ ovsthread_wrapper(void *aux_)
 
     /* The order of the following calls is important, because
      * ovsrcu_quiesce_end() saves a copy of the thread name. */
-    set_subprogram_name("%s%u", aux.name, id);
+    char *subprogram_name = xasprintf("%s%u", aux.name, id);
+    set_subprogram_name(subprogram_name);
+    free(subprogram_name);
     ovsrcu_quiesce_end();
 
     return aux.start(aux.arg);
@@ -351,17 +369,23 @@ bool
 ovsthread_once_start__(struct ovsthread_once *once)
 {
     ovs_mutex_lock(&once->mutex);
-    if (!ovsthread_once_is_done__(once)) {
-        return false;
+    /* Mutex synchronizes memory, so we get the current value of 'done'. */
+    if (!once->done) {
+        return true;
     }
     ovs_mutex_unlock(&once->mutex);
-    return true;
+    return false;
 }
 
 void
 ovsthread_once_done(struct ovsthread_once *once)
 {
-    atomic_store(&once->done, true);
+    /* We need release semantics here, so that the following store may not
+     * be moved ahead of any of the preceding initialization operations.
+     * A release atomic_thread_fence provides that prior memory accesses
+     * will not be reordered to take place after the following store. */
+    atomic_thread_fence(memory_order_release);
+    once->done = true;
     ovs_mutex_unlock(&once->mutex);
 }
 
@@ -510,11 +534,11 @@ parse_cpuinfo(long int *n_cores)
                 break;
             }
 
-            if (cpu & (1 << id)) {
+            if (cpu & (1ULL << id)) {
                 /* We've already counted this package's cores. */
                 continue;
             }
-            cpu |= 1 << id;
+            cpu |= 1ULL << id;
 
             /* Find the number of cores for this package. */
             while (fgets(line, sizeof line, stream)) {
@@ -560,6 +584,15 @@ count_cpu_cores(void)
 
     return n_cores > 0 ? n_cores : 0;
 }
+
+/* Returns 'true' if current thread is PMD thread. */
+bool
+thread_is_pmd(void)
+{
+    const char *name = get_subprogram_name();
+    return !strncmp(name, "pmd", 3);
+}
+
 
 /* ovsthread_key. */
 
@@ -569,7 +602,7 @@ count_cpu_cores(void)
 
 /* A piece of thread-specific data. */
 struct ovsthread_key {
-    struct list list_node;      /* In 'inuse_keys' or 'free_keys'. */
+    struct ovs_list list_node;  /* In 'inuse_keys' or 'free_keys'. */
     void (*destructor)(void *); /* Called at thread exit. */
 
     /* Indexes into the per-thread array in struct ovsthread_key_slots.
@@ -579,7 +612,7 @@ struct ovsthread_key {
 
 /* Per-thread data structure. */
 struct ovsthread_key_slots {
-    struct list list_node;      /* In 'slots_list'. */
+    struct ovs_list list_node;  /* In 'slots_list'. */
     void **p1[L1_SIZE];
 };
 
@@ -598,15 +631,15 @@ static struct ovs_mutex key_mutex = OVS_MUTEX_INITIALIZER;
  *
  * Together, 'inuse_keys' and 'free_keys' hold an ovsthread_key for every index
  * from 0 to n_keys - 1, inclusive. */
-static struct list inuse_keys OVS_GUARDED_BY(key_mutex)
-    = LIST_INITIALIZER(&inuse_keys);
-static struct list free_keys OVS_GUARDED_BY(key_mutex)
-    = LIST_INITIALIZER(&free_keys);
+static struct ovs_list inuse_keys OVS_GUARDED_BY(key_mutex)
+    = OVS_LIST_INITIALIZER(&inuse_keys);
+static struct ovs_list free_keys OVS_GUARDED_BY(key_mutex)
+    = OVS_LIST_INITIALIZER(&free_keys);
 static unsigned int n_keys OVS_GUARDED_BY(key_mutex);
 
 /* All existing struct ovsthread_key_slots. */
-static struct list slots_list OVS_GUARDED_BY(key_mutex)
-    = LIST_INITIALIZER(&slots_list);
+static struct ovs_list slots_list OVS_GUARDED_BY(key_mutex)
+    = OVS_LIST_INITIALIZER(&slots_list);
 
 static void *
 clear_slot(struct ovsthread_key_slots *slots, unsigned int index)
@@ -641,10 +674,22 @@ ovsthread_key_destruct__(void *slots_)
     n = n_keys;
     ovs_mutex_unlock(&key_mutex);
 
-    for (i = 0; i < n / L2_SIZE; i++) {
+    for (i = 0; i < DIV_ROUND_UP(n, L2_SIZE); i++) {
         free(slots->p1[i]);
     }
     free(slots);
+}
+
+/* Cancels the callback to ovsthread_key_destruct__().
+ *
+ * Cancelling the call to the destructor during the main thread exit
+ * is needed while using pthreads-win32 library in Windows. It has been
+ * observed that in pthreads-win32, a call to the destructor during
+ * main thread exit causes undefined behavior. */
+static void
+ovsthread_cancel_ovsthread_key_destruct__(void *aux OVS_UNUSED)
+{
+    pthread_setspecific(tsd_key, NULL);
 }
 
 /* Initializes '*keyp' as a thread-specific data key.  The data items are
@@ -663,6 +708,8 @@ ovsthread_key_create(ovsthread_key_t *keyp, void (*destructor)(void *))
 
     if (ovsthread_once_start(&once)) {
         xpthread_key_create(&tsd_key, ovsthread_key_destruct__);
+        fatal_signal_add_hook(ovsthread_cancel_ovsthread_key_destruct__,
+                              NULL, NULL, true);
         ovsthread_once_done(&once);
     }
 

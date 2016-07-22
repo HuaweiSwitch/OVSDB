@@ -15,7 +15,7 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
 #include "stp.h"
 #include <assert.h>
 #include <ctype.h>
@@ -23,10 +23,11 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include "dp-packet.h"
 #include "ofpbuf.h"
-#include "packets.h"
-#include "vlog.h"
 #include "ovstest.h"
+#include "packets.h"
+#include "openvswitch/vlog.h"
 
 struct bpdu {
     int port_no;
@@ -85,7 +86,7 @@ new_test_case(void)
 }
 
 static void
-send_bpdu(struct ofpbuf *pkt, int port_no, void *b_)
+send_bpdu(struct dp_packet *pkt, int port_no, void *b_)
 {
     struct bridge *b = b_;
     struct lan *lan;
@@ -93,8 +94,8 @@ send_bpdu(struct ofpbuf *pkt, int port_no, void *b_)
     assert(port_no < b->n_ports);
     lan = b->ports[port_no];
     if (lan) {
-        const void *data = ofpbuf_l3(pkt);
-        size_t size = (char *) ofpbuf_tail(pkt) - (char *) data;
+        const void *data = dp_packet_l3(pkt);
+        size_t size = (char *) dp_packet_tail(pkt) - (char *) data;
         int i;
 
         for (i = 0; i < lan->n_conns; i++) {
@@ -109,7 +110,7 @@ send_bpdu(struct ofpbuf *pkt, int port_no, void *b_)
             }
         }
     }
-    ofpbuf_delete(pkt);
+    dp_packet_delete(pkt);
 }
 
 static struct bridge *
@@ -316,10 +317,9 @@ simulate(struct test_case *tc, int granularity)
     }
 }
 
-static void
+OVS_NO_RETURN static void
 err(const char *message, ...)
-    PRINTF_FORMAT(1, 2)
-    NO_RETURN;
+    OVS_PRINTF_FORMAT(1, 2);
 
 static void
 err(const char *message, ...)
@@ -337,7 +337,7 @@ err(const char *message, ...)
 
 static void
 warn(const char *message, ...)
-    PRINTF_FORMAT(1, 2);
+    OVS_PRINTF_FORMAT(1, 2);
 
 static void
 warn(const char *message, ...)
@@ -666,6 +666,7 @@ test_stp_main(int argc, char *argv[])
         free(bridge);
     }
     free(tc);
+    fclose(input_file);
 }
 
 OVSTEST_REGISTER("test-stp", test_stp_main);

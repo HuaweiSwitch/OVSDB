@@ -1,4 +1,4 @@
-/* Copyright (c) 2013 Nicira, Inc.
+/* Copyright (c) 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,19 +25,21 @@
  * These functions emulate tunnel virtual ports based on the outer
  * header information from the kernel. */
 
+struct ovs_action_push_tnl;
 struct ofport_dpif;
 struct netdev;
 
+void ofproto_tunnel_init(void);
 bool tnl_port_reconfigure(const struct ofport_dpif *, const struct netdev *,
-                          odp_port_t);
+                          odp_port_t, bool native_tnl, const char name[]);
 
-void tnl_port_add(const struct ofport_dpif *, const struct netdev *,
-                  odp_port_t odp_port);
+int tnl_port_add(const struct ofport_dpif *, const struct netdev *,
+                 odp_port_t odp_port, bool native_tnl, const char name[]);
 void tnl_port_del(const struct ofport_dpif *);
 
 const struct ofport_dpif *tnl_port_receive(const struct flow *);
-bool tnl_xlate_init(const struct flow *base_flow, struct flow *flow,
-                    struct flow_wildcards *);
+void tnl_wc_init(struct flow *, struct flow_wildcards *);
+bool tnl_process_ecn(struct flow *);
 odp_port_t tnl_port_send(const struct ofport_dpif *, struct flow *,
                          struct flow_wildcards *wc);
 
@@ -45,7 +47,14 @@ odp_port_t tnl_port_send(const struct ofport_dpif *, struct flow *,
 static inline bool
 tnl_port_should_receive(const struct flow *flow)
 {
-    return flow->tunnel.ip_dst != 0;
+    return flow_tnl_dst_is_set(&flow->tunnel);
 }
+
+int tnl_port_build_header(const struct ofport_dpif *ofport,
+                          const struct flow *tnl_flow,
+                          const struct eth_addr dmac,
+                          const struct eth_addr smac,
+                          const struct in6_addr *ipv6_src,
+                          struct ovs_action_push_tnl *data);
 
 #endif /* tunnel.h */

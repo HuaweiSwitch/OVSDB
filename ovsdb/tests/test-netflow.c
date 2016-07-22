@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,27 +15,26 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
+#include "netflow.h"
 #include <errno.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
-
 #include "command-line.h"
 #include "daemon.h"
 #include "dynamic-string.h"
-#include "netflow.h"
 #include "ofpbuf.h"
+#include "ovstest.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "socket-util.h"
 #include "unixctl.h"
 #include "util.h"
-#include "vlog.h"
-#include "ovstest.h"
+#include "openvswitch/vlog.h"
 
-static void usage(void) NO_RETURN;
+OVS_NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[]);
 
 static unixctl_cb_func test_netflow_exit;
@@ -162,8 +161,8 @@ print_netflow(struct ofpbuf *buf)
         putchar('\n');
     }
 
-    if (ofpbuf_size(buf)) {
-        printf("%"PRIu32" extra bytes after last record\n", ofpbuf_size(buf));
+    if (buf->size) {
+        printf("%"PRIu32" extra bytes after last record\n", buf->size);
     }
 }
 
@@ -179,8 +178,9 @@ test_netflow_main(int argc, char *argv[])
     int sock;
     int n;
 
-    proctitle_init(argc, argv);
+    ovs_cmdl_proctitle_init(argc, argv);
     set_program_name(argv[0]);
+    service_start(&argc, &argv);
     parse_options(argc, argv);
 
     if (argc - optind != 1) {
@@ -189,13 +189,13 @@ test_netflow_main(int argc, char *argv[])
     }
     target = argv[optind];
 
-    sock = inet_open_passive(SOCK_DGRAM, target, 0, NULL, 0);
+    sock = inet_open_passive(SOCK_DGRAM, target, 0, NULL, 0, true);
     if (sock < 0) {
         ovs_fatal(0, "%s: failed to open (%s)", argv[1], ovs_strerror(-sock));
     }
 
     daemon_save_fd(STDOUT_FILENO);
-    daemonize_start();
+    daemonize_start(false);
 
     error = unixctl_server_create(NULL, &server);
     if (error) {
@@ -214,7 +214,7 @@ test_netflow_main(int argc, char *argv[])
 
         ofpbuf_clear(&buf);
         do {
-            retval = read(sock, ofpbuf_data(&buf), buf.allocated);
+            retval = recv(sock, buf.data, buf.allocated, 0);
         } while (retval < 0 && errno == EINTR);
         if (retval > 0) {
             ofpbuf_put_uninit(&buf, retval);
@@ -248,7 +248,7 @@ parse_options(int argc, char *argv[])
         VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
 
     for (;;) {
         int c = getopt_long(argc, argv, short_options, long_options, NULL);

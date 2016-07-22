@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,11 @@
 #include "flow.h"
 #include "meta-flow.h"
 #include "netflow.h"
+#include "rstp.h"
+#include "smap.h"
 #include "sset.h"
 #include "stp.h"
+#include "lacp.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -44,15 +47,19 @@ struct ofproto;
 struct shash;
 struct simap;
 struct smap;
+struct netdev_stats;
+struct ovs_list;
+struct lldp_status;
+struct aa_settings;
+struct aa_mapping_settings;
+
+/* Needed for the lock annotations. */
+extern struct ovs_mutex ofproto_mutex;
 
 struct ofproto_controller_info {
     bool is_connected;
     enum ofp12_controller_role role;
-    struct {
-        const char *keys[4];
-        const char *values[4];
-        size_t n;
-    } pairs;
+    struct smap pairs;
 };
 
 struct ofproto_sflow_options {
@@ -72,6 +79,9 @@ struct ofproto_ipfix_bridge_exporter_options {
     uint32_t obs_point_id;  /* Bridge-wide Observation Point ID. */
     uint32_t cache_active_timeout;
     uint32_t cache_max_flows;
+    bool enable_tunnel_sampling;
+    bool enable_input_sampling;
+    bool enable_output_sampling;
 };
 
 struct ofproto_ipfix_flow_exporter_options {
@@ -79,6 +89,52 @@ struct ofproto_ipfix_flow_exporter_options {
     struct sset targets;
     uint32_t cache_active_timeout;
     uint32_t cache_max_flows;
+};
+
+struct ofproto_rstp_status {
+    bool enabled;               /* If false, ignore other members. */
+    rstp_identifier root_id;
+    rstp_identifier bridge_id;
+    rstp_identifier designated_id;
+    uint32_t root_path_cost;
+    uint16_t designated_port_id;
+    uint16_t bridge_port_id;
+};
+
+struct ofproto_rstp_settings {
+    rstp_identifier address;
+    uint16_t priority;
+    uint32_t ageing_time;
+    enum rstp_force_protocol_version force_protocol_version;
+    uint16_t bridge_forward_delay;
+    uint16_t bridge_max_age;
+    uint16_t transmit_hold_count;
+};
+
+struct ofproto_port_rstp_status {
+    bool enabled;               /* If false, ignore other members. */
+    uint16_t port_id;
+    enum rstp_port_role role;
+    enum rstp_state state;
+    rstp_identifier designated_bridge_id;
+    uint16_t designated_port_id;
+    uint32_t designated_path_cost;
+    int tx_count;               /* Number of BPDUs transmitted. */
+    int rx_count;               /* Number of valid BPDUs received. */
+    int error_count;            /* Number of bad BPDUs received. */
+    int uptime;
+};
+
+struct ofproto_port_rstp_settings {
+    bool enable;
+    uint16_t port_num;           /* In the range 1-4095, inclusive. */
+    uint8_t priority;
+    uint32_t path_cost;
+    bool admin_edge_port;
+    bool auto_edge;
+    bool mcheck;
+    uint8_t admin_p2p_mac_state;
+    bool admin_port_state;
 };
 
 struct ofproto_stp_settings {
@@ -121,6 +177,20 @@ struct ofproto_port_stp_stats {
 struct ofproto_port_queue {
     uint32_t queue;             /* Queue ID. */
     uint8_t dscp;               /* DSCP bits (e.g. [0, 63]). */
+};
+
+struct ofproto_mcast_snooping_settings {
+    bool flood_unreg;           /* If true, flood unregistered packets to all
+                                   all ports. If false, send only to ports
+                                   connected to multicast routers. */
+    unsigned int idle_time;     /* Entry is removed after the idle time
+                                 * in seconds. */
+    unsigned int max_entries;   /* Size of the multicast snooping table. */
+};
+
+struct ofproto_mcast_snooping_port_settings {
+    bool flood;                 /* If true, flood multicast traffic */
+    bool flood_reports;         /* If true, flood Reports traffic */
 };
 
 /* How the switch should act if the controller cannot be contacted. */
@@ -169,7 +239,7 @@ void ofproto_type_wait(const char *datapath_type);
 
 int ofproto_create(const char *datapath, const char *datapath_type,
                    struct ofproto **ofprotop);
-void ofproto_destroy(struct ofproto *);
+void ofproto_destroy(struct ofproto *, bool del);
 int ofproto_delete(const char *name, const char *type);
 
 int ofproto_run(struct ofproto *);
@@ -214,7 +284,7 @@ int ofproto_port_dump_done(struct ofproto_port_dump *);
         )
 
 #define OFPROTO_FLOW_LIMIT_DEFAULT 200000
-#define OFPROTO_MAX_IDLE_DEFAULT 1500
+#define OFPROTO_MAX_IDLE_DEFAULT 10000 /* ms */
 
 const char *ofproto_port_open_type(const char *datapath_type,
                                    const char *port_type);
@@ -241,7 +311,13 @@ void ofproto_set_max_idle(unsigned max_idle);
 void ofproto_set_forward_bpdu(struct ofproto *, bool forward_bpdu);
 void ofproto_set_mac_table_config(struct ofproto *, unsigned idle_time,
                                   size_t max_entries);
+int ofproto_set_mcast_snooping(struct ofproto *ofproto,
+                              const struct ofproto_mcast_snooping_settings *s);
+int ofproto_port_set_mcast_snooping(struct ofproto *ofproto, void *aux,
+                          const struct ofproto_mcast_snooping_port_settings *s);
 void ofproto_set_threads(int n_handlers, int n_revalidators);
+void ofproto_set_n_dpdk_rxqs(int n_rxqs);
+void ofproto_set_cpu_mask(const char *cmask);
 void ofproto_set_dp_desc(struct ofproto *, const char *dp_desc);
 int ofproto_set_snoops(struct ofproto *, const struct sset *snoops);
 int ofproto_set_netflow(struct ofproto *,
@@ -256,6 +332,9 @@ bool ofproto_get_flow_restore_wait(void);
 int ofproto_set_stp(struct ofproto *, const struct ofproto_stp_settings *);
 int ofproto_get_stp_status(struct ofproto *, struct ofproto_stp_status *);
 
+int ofproto_set_rstp(struct ofproto *, const struct ofproto_rstp_settings *);
+int ofproto_get_rstp_status(struct ofproto *, struct ofproto_rstp_status *);
+
 /* Configuration of ports. */
 void ofproto_port_unregister(struct ofproto *, ofp_port_t ofp_port);
 
@@ -264,9 +343,11 @@ void ofproto_port_set_cfm(struct ofproto *, ofp_port_t ofp_port,
                           const struct cfm_settings *);
 void ofproto_port_set_bfd(struct ofproto *, ofp_port_t ofp_port,
                           const struct smap *cfg);
+bool ofproto_port_bfd_status_changed(struct ofproto *, ofp_port_t ofp_port);
 int ofproto_port_get_bfd_status(struct ofproto *, ofp_port_t ofp_port,
-                                bool force, struct smap *);
+                                struct smap *);
 int ofproto_port_is_lacp_current(struct ofproto *, ofp_port_t ofp_port);
+int ofproto_port_get_lacp_stats(const struct ofport *, struct lacp_slave_stats *);
 int ofproto_port_set_stp(struct ofproto *, ofp_port_t ofp_port,
                          const struct ofproto_port_stp_settings *);
 int ofproto_port_get_stp_status(struct ofproto *, ofp_port_t ofp_port,
@@ -276,6 +357,11 @@ int ofproto_port_get_stp_stats(struct ofproto *, ofp_port_t ofp_port,
 int ofproto_port_set_queues(struct ofproto *, ofp_port_t ofp_port,
                             const struct ofproto_port_queue *,
                             size_t n_queues);
+int ofproto_port_get_rstp_status(struct ofproto *, ofp_port_t ofp_port,
+                                struct ofproto_port_rstp_status *);
+
+int ofproto_port_set_rstp(struct ofproto *, ofp_port_t ofp_port,
+        const struct ofproto_port_rstp_settings *);
 
 /* The behaviour of the port regarding VLAN handling */
 enum port_vlan_mode {
@@ -355,6 +441,16 @@ int ofproto_mirror_unregister(struct ofproto *, void *aux);
 int ofproto_mirror_get_stats(struct ofproto *, void *aux,
                              uint64_t *packets, uint64_t *bytes);
 
+void ofproto_port_set_lldp(struct ofproto *ofproto, ofp_port_t ofp_port,
+                           const struct smap *cfg);
+int ofproto_set_aa(struct ofproto *ofproto, void *aux,
+                   const struct aa_settings *s);
+int ofproto_aa_mapping_register(struct ofproto *ofproto, void *aux,
+                             const struct aa_mapping_settings *s);
+int ofproto_aa_mapping_unregister(struct ofproto *ofproto, void *aux);
+int ofproto_aa_vlan_get_queued(struct ofproto *ofproto, struct ovs_list *list);
+unsigned int ofproto_aa_vlan_get_queue_size(struct ofproto *ofproto);
+
 int ofproto_set_flood_vlans(struct ofproto *, unsigned long *flood_vlans);
 bool ofproto_is_mirror_output_bundle(const struct ofproto *, void *aux);
 
@@ -363,14 +459,18 @@ struct ofproto_table_settings {
     char *name;                 /* Name exported via OpenFlow or NULL. */
     unsigned int max_flows;     /* Maximum number of flows or UINT_MAX. */
 
-    /* These members determine the handling of an attempt to add a flow that
-     * would cause the table to have more than 'max_flows' flows.
+    /* These members, together with OpenFlow OFPT_TABLE_MOD, determine the
+     * handling of an attempt to add a flow that would cause the table to have
+     * more than 'max_flows' flows:
      *
-     * If 'groups' is NULL, overflows will be rejected with an error.
+     *    - If 'enable_eviction' is false and OFPT_TABLE_MOD does not enable
+     *      eviction, overflows will be rejected with an error.
      *
-     * If 'groups' is nonnull, an overflow will cause a flow to be removed.
-     * The flow to be removed is chosen to give fairness among groups
-     * distinguished by different values for the subfields within 'groups'. */
+     *    - If 'enable_eviction' is true or OFPT_TABLE_MOD enables eviction, an
+     *      overflow will cause a flow to be removed.  The flow to be removed
+     *      is chosen to give fairness among groups distinguished by different
+     *      values for the 'n_groups' subfields within 'groups'. */
+    bool enable_eviction;
     struct mf_subfield *groups;
     size_t n_groups;
 
@@ -380,6 +480,9 @@ struct ofproto_table_settings {
     unsigned int n_prefix_fields;
     enum mf_field_id prefix_fields[CLS_MAX_TRIES];
 };
+
+extern const enum mf_field_id default_prefix_fields[2];
+BUILD_ASSERT_DECL(ARRAY_SIZE(default_prefix_fields) <= CLS_MAX_TRIES);
 
 int ofproto_get_n_tables(const struct ofproto *);
 uint8_t ofproto_get_n_visible_tables(const struct ofproto *);
@@ -396,32 +499,11 @@ void ofproto_get_netflow_ids(const struct ofproto *,
 void ofproto_get_ofproto_controller_info(const struct ofproto *, struct shash *);
 void ofproto_free_ofproto_controller_info(struct shash *);
 
-/* CFM status query. */
-struct ofproto_cfm_status {
-    /* 0 if not faulted, otherwise a combination of one or more reasons. */
-    enum cfm_fault_reason faults;
-
-    /* 0 if the remote CFM endpoint is operationally down,
-     * 1 if the remote CFM endpoint is operationally up,
-     * -1 if we don't know because the remote CFM endpoint is not in extended
-     * mode. */
-    int remote_opstate;
-
-    uint64_t flap_count;
-
-    /* Ordinarily a "health status" in the range 0...100 inclusive, with 0
-     * being worst and 100 being best, or -1 if the health status is not
-     * well-defined. */
-    int health;
-
-    /* MPIDs of remote maintenance points whose CCMs have been received. */
-    uint64_t *rmps;
-    size_t n_rmps;
-};
+bool ofproto_port_cfm_status_changed(struct ofproto *, ofp_port_t ofp_port);
 
 int ofproto_port_get_cfm_status(const struct ofproto *,
-                                ofp_port_t ofp_port, bool force,
-                                struct ofproto_cfm_status *);
+                                ofp_port_t ofp_port,
+                                struct cfm_status *);
 
 /* Linux VLAN device support (e.g. "eth0.10" for VLAN 10.)
  *
@@ -437,24 +519,8 @@ int ofproto_port_set_realdev(struct ofproto *, ofp_port_t vlandev_ofp_port,
 
 /* Table configuration */
 
-enum ofproto_table_config {
-    /* Send to controller. */
-    OFPROTO_TABLE_MISS_CONTROLLER = OFPTC11_TABLE_MISS_CONTROLLER,
-
-    /* Continue to the next table in the pipeline (OpenFlow 1.0 behavior). */
-    OFPROTO_TABLE_MISS_CONTINUE   = OFPTC11_TABLE_MISS_CONTINUE,
-
-    /* Drop the packet. */
-    OFPROTO_TABLE_MISS_DROP       = OFPTC11_TABLE_MISS_DROP,
-
-    /* The default miss behaviour for the OpenFlow version of the controller a
-     * packet_in message would be sent to..  For pre-OF1.3 controllers, send
-     * packet_in to controller.  For OF1.3+ controllers, drop. */
-    OFPROTO_TABLE_MISS_DEFAULT    = 3,
-};
-
-enum ofproto_table_config ofproto_table_get_config(const struct ofproto *,
-                                                   uint8_t table_id);
+enum ofputil_table_miss ofproto_table_get_miss_config(const struct ofproto *,
+                                                      uint8_t table_id);
 
 #ifdef  __cplusplus
 }

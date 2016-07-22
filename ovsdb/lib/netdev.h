@@ -21,6 +21,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "openvswitch/types.h"
+#include "packets.h"
+#include "flow.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -59,6 +61,7 @@ extern "C" {
  *      netdev and access each of those from a different thread.)
  */
 
+struct dp_packet;
 struct netdev;
 struct netdev_class;
 struct netdev_rxq;
@@ -68,6 +71,7 @@ struct in_addr;
 struct in6_addr;
 struct smap;
 struct sset;
+struct ovs_action_push_tnl;
 
 /* Network device statistics.
  *
@@ -114,8 +118,10 @@ struct netdev_tunnel_config {
 
     bool ip_src_flow;
     bool ip_dst_flow;
-    ovs_be32 ip_src;
-    ovs_be32 ip_dst;
+    struct in6_addr ipv6_src;
+    struct in6_addr ipv6_dst;
+
+    uint32_t exts;
 
     uint8_t ttl;
     bool ttl_inherit;
@@ -134,6 +140,7 @@ void netdev_wait(void);
 void netdev_enumerate_types(struct sset *types);
 bool netdev_is_reserved_name(const char *name);
 
+int netdev_n_txq(const struct netdev *netdev);
 int netdev_n_rxq(const struct netdev *netdev);
 bool netdev_is_pmd(const struct netdev *netdev);
 
@@ -141,15 +148,17 @@ bool netdev_is_pmd(const struct netdev *netdev);
 int netdev_open(const char *name, const char *type, struct netdev **netdevp);
 
 struct netdev *netdev_ref(const struct netdev *);
+void netdev_remove(struct netdev *);
 void netdev_close(struct netdev *);
 
 void netdev_parse_name(const char *netdev_name, char **name, char **type);
 
 /* Options. */
-int netdev_set_config(struct netdev *, const struct smap *args);
+int netdev_set_config(struct netdev *, const struct smap *args, char **errp);
 int netdev_get_config(const struct netdev *, struct smap *);
 const struct netdev_tunnel_config *
     netdev_get_tunnel_config(const struct netdev *);
+int netdev_get_numa_id(const struct netdev *);
 
 /* Basic properties. */
 const char *netdev_get_name(const struct netdev *);
@@ -158,6 +167,7 @@ const char *netdev_get_type_from_name(const char *);
 int netdev_get_mtu(const struct netdev *, int *mtup);
 int netdev_set_mtu(const struct netdev *, int mtu);
 int netdev_get_ifindex(const struct netdev *);
+int netdev_set_multiq(struct netdev *, unsigned int n_txq, unsigned int n_rxq);
 
 /* Packet reception. */
 int netdev_rxq_open(struct netdev *, struct netdev_rxq **, int id);
@@ -165,17 +175,27 @@ void netdev_rxq_close(struct netdev_rxq *);
 
 const char *netdev_rxq_get_name(const struct netdev_rxq *);
 
-int netdev_rxq_recv(struct netdev_rxq *rx, struct ofpbuf **buffers, int *cnt);
+int netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet **buffers,
+                    int *cnt);
 void netdev_rxq_wait(struct netdev_rxq *);
 int netdev_rxq_drain(struct netdev_rxq *);
 
 /* Packet transmission. */
-int netdev_send(struct netdev *, struct ofpbuf *, bool may_steal);
-void netdev_send_wait(struct netdev *);
+int netdev_send(struct netdev *, int qid, struct dp_packet **, int cnt,
+                bool may_steal);
+void netdev_send_wait(struct netdev *, int qid);
+
+int netdev_build_header(const struct netdev *, struct ovs_action_push_tnl *data,
+                        const struct flow *tnl_flow);
+int netdev_push_header(const struct netdev *netdev,
+                       struct dp_packet **buffers, int cnt,
+                       const struct ovs_action_push_tnl *data);
+int netdev_pop_header(struct netdev *netdev, struct dp_packet **buffers,
+                      int cnt);
 
 /* Hardware address. */
-int netdev_set_etheraddr(struct netdev *, const uint8_t mac[6]);
-int netdev_get_etheraddr(const struct netdev *, uint8_t mac[6]);
+int netdev_set_etheraddr(struct netdev *, const struct eth_addr mac);
+int netdev_get_etheraddr(const struct netdev *, struct eth_addr *mac);
 
 /* PHY interface. */
 bool netdev_get_carrier(const struct netdev *);
@@ -239,13 +259,13 @@ int netdev_add_router(struct netdev *, struct in_addr router);
 int netdev_get_next_hop(const struct netdev *, const struct in_addr *host,
                         struct in_addr *next_hop, char **);
 int netdev_get_status(const struct netdev *, struct smap *);
-int netdev_arp_lookup(const struct netdev *, ovs_be32 ip, uint8_t mac[6]);
+int netdev_arp_lookup(const struct netdev *, ovs_be32 ip,
+                      struct eth_addr *mac);
 
 struct netdev *netdev_find_dev_by_in4(const struct in_addr *);
 
 /* Statistics. */
 int netdev_get_stats(const struct netdev *, struct netdev_stats *);
-int netdev_set_stats(struct netdev *, const struct netdev_stats *);
 
 /* Quality of service. */
 struct netdev_qos_capabilities {
@@ -318,7 +338,8 @@ typedef void netdev_dump_queue_stats_cb(unsigned int queue_id,
 int netdev_dump_queue_stats(const struct netdev *,
                             netdev_dump_queue_stats_cb *, void *aux);
 
-enum { NETDEV_MAX_RX_BATCH = 256 };     /* Maximum number packets in rx_recv() batch. */
+enum { NETDEV_MAX_BURST = 32 }; /* Maximum number packets in a batch. */
+extern struct seq *tnl_conf_seq;
 
 #ifdef  __cplusplus
 }

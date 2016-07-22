@@ -26,7 +26,7 @@
 #include "socket-util.h"
 #include "sset.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(collectors);
 
@@ -95,7 +95,7 @@ collectors_destroy(struct collectors *c)
         size_t i;
 
         for (i = 0; i < c->n_fds; i++) {
-            close(c->fds[i]);
+            closesocket(c->fds[i]);
         }
         free(c->fds);
         free(c);

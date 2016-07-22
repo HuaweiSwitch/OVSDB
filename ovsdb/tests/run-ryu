@@ -19,7 +19,7 @@ case $srcdir in
     /*) ;;
     *) srcdir=`pwd`/$srcdir ;;
 esac
-if test ! -e "$srcdir"/WHY-OVS; then
+if test ! -e "$srcdir"/WHY-OVS.md; then
     echo >&2 'source directory not found, please set $srcdir or run via \"make check-ryu'
     exit 1
 fi
@@ -77,7 +77,7 @@ do
                datapath-type=dummy fail-mode=secure \
                protocols='[OpenFlow10,OpenFlow11,OpenFlow12,OpenFlow13]' \
                other-config:datapath-id=$dpid \
-        -- set-controller $bridge tcp:127.0.0.1:6633 \
+        -- set-controller $bridge tcp:127.0.0.1:6653 \
         -- set controller $bridge connection-mode=out-of-band \
                                   max-backoff=1000 \
         -- add-port $bridge $port1 \
@@ -100,7 +100,7 @@ EOF
     logfile=$sandbox/`echo $app | sed 's,/,.,g'`.log
     logs="$logs
         $logfile"
-    ryu-manager "$app" --log-file="$logfile" & pid=$!
+    ryu-manager --ofp-tcp-listen-port=6653 "$app" --log-file="$logfile" & pid=$!
     echo $pid > "$sandbox/ryu.pid"
     i=0
     while sleep 1; do

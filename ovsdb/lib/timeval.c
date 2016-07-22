@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@
 #include "seq.h"
 #include "unixctl.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(timeval);
 
@@ -53,8 +53,16 @@ typedef unsigned int clockid_t;
 #endif
 
 /* Number of 100 ns intervals from January 1, 1601 till January 1, 1970. */
-static ULARGE_INTEGER unix_epoch;
+const static unsigned long long unix_epoch = 116444736000000000;
 #endif /* _WIN32 */
+
+/* Structure set by unixctl time/warp command. */
+struct large_warp {
+    struct unixctl_conn *conn; /* Connection waiting for warp response. */
+    long long int total_warp; /* Total offset to be added to monotonic time. */
+    long long int warp;      /* 'total_warp' offset done in steps of 'warp'. */
+    unsigned int main_thread_id; /* Identification for the main thread. */
+};
 
 struct clock {
     clockid_t id;               /* CLOCK_MONOTONIC or CLOCK_REALTIME. */
@@ -65,6 +73,8 @@ struct clock {
     struct timespec warp OVS_GUARDED;  /* Offset added for unit tests. */
     bool stopped OVS_GUARDED;          /* Disable real-time updates if true. */
     struct timespec cache OVS_GUARDED; /* Last time read from kernel. */
+    struct large_warp large_warp OVS_GUARDED; /* Connection information waiting
+                                                 for warp response. */
 };
 
 /* Our clocks. */
@@ -92,6 +102,7 @@ DEFINE_STATIC_PER_THREAD_DATA(long long int, last_wakeup, 0);
 
 static void log_poll_interval(long long int last_wakeup);
 static struct rusage *get_recent_rusage(void);
+static int getrusage_thread(struct rusage *);
 static void refresh_rusage(void);
 static void timespec_add(struct timespec *sum,
                          const struct timespec *a, const struct timespec *b);
@@ -104,7 +115,6 @@ init_clock(struct clock *c, clockid_t id)
     ovs_mutex_init(&c->mutex);
     atomic_init(&c->slow_path, false);
     xclock_gettime(c->id, &c->cache);
-    timewarp_seq = seq_create();
 }
 
 static void
@@ -112,18 +122,9 @@ do_init_time(void)
 {
     struct timespec ts;
 
-#ifdef _WIN32
-    /* Calculate number of 100-nanosecond intervals till 01/01/1970. */
-    SYSTEMTIME unix_epoch_st = { 1970, 1, 0, 1, 0, 0, 0, 0};
-    FILETIME unix_epoch_ft;
-
-    SystemTimeToFileTime(&unix_epoch_st, &unix_epoch_ft);
-    unix_epoch.LowPart = unix_epoch_ft.dwLowDateTime;
-    unix_epoch.HighPart = unix_epoch_ft.dwHighDateTime;
-#endif
-
     coverage_init();
 
+    timewarp_seq = seq_create();
     init_clock(&monotonic_clock, (!clock_gettime(CLOCK_MONOTONIC, &ts)
                                   ? CLOCK_MONOTONIC
                                   : CLOCK_REALTIME));
@@ -146,7 +147,7 @@ time_timespec__(struct clock *c, struct timespec *ts)
 
     time_init();
 
-    atomic_read_explicit(&c->slow_path, &slow_path, memory_order_relaxed);
+    atomic_read_relaxed(&c->slow_path, &slow_path);
     if (!slow_path) {
         xclock_gettime(c->id, ts);
     } else {
@@ -269,9 +270,9 @@ time_poll(struct pollfd *pollfds, int n_pollfds, HANDLE *handles OVS_UNUSED,
     time_init();
     coverage_clear();
     coverage_run();
-    //if (*last_wakeup) {
-    //    log_poll_interval(*last_wakeup);
-    //}
+    if (*last_wakeup && !thread_is_pmd()) {
+        log_poll_interval(*last_wakeup);
+    }
     start = time_msec();
 
     timeout_when = MIN(timeout_when, deadline);
@@ -405,12 +406,14 @@ clock_gettime(clock_t id, struct timespec *ts)
         ULARGE_INTEGER current_time = xgetfiletime();
 
         /* Time from Epoch to now. */
-        ts->tv_sec = (current_time.QuadPart - unix_epoch.QuadPart) / 10000000;
-        ts->tv_nsec = ((current_time.QuadPart - unix_epoch.QuadPart) %
+        ts->tv_sec = (current_time.QuadPart - unix_epoch) / 10000000;
+        ts->tv_nsec = ((current_time.QuadPart - unix_epoch) %
                        10000000) * 100;
     } else {
         return -1;
     }
+
+    return 0;
 }
 #endif /* _WIN32 */
 
@@ -424,8 +427,8 @@ xgettimeofday(struct timeval *tv)
 #else
     ULARGE_INTEGER current_time = xgetfiletime();
 
-    tv->tv_sec = (current_time.QuadPart - unix_epoch.QuadPart) / 10000000;
-    tv->tv_usec = ((current_time.QuadPart - unix_epoch.QuadPart) %
+    tv->tv_sec = (current_time.QuadPart - unix_epoch) / 10000000;
+    tv->tv_usec = ((current_time.QuadPart - unix_epoch) %
                    10000000) / 10;
 #endif
 }
@@ -440,16 +443,77 @@ xclock_gettime(clock_t id, struct timespec *ts)
     }
 }
 
-/* Makes threads wait on timewarp_seq and be waken up when time is warped.
- * This function will be no-op unless timeval_dummy_register() is called. */
-void
-timewarp_wait(void)
+static void
+msec_to_timespec(long long int ms, struct timespec *ts)
 {
-    if (timewarp_enabled) {
-        uint64_t *last_seq = last_seq_get();
+    ts->tv_sec = ms / 1000;
+    ts->tv_nsec = (ms % 1000) * 1000 * 1000;
+}
 
-        *last_seq = seq_read(timewarp_seq);
-        seq_wait(timewarp_seq, *last_seq);
+static void
+timewarp_work(void)
+{
+    struct clock *c = &monotonic_clock;
+    struct timespec warp;
+
+    ovs_mutex_lock(&c->mutex);
+    if (!c->large_warp.conn) {
+        ovs_mutex_unlock(&c->mutex);
+        return;
+    }
+
+    if (c->large_warp.total_warp >= c->large_warp.warp) {
+        msec_to_timespec(c->large_warp.warp, &warp);
+        timespec_add(&c->warp, &c->warp, &warp);
+        c->large_warp.total_warp -= c->large_warp.warp;
+    } else if (c->large_warp.total_warp) {
+        msec_to_timespec(c->large_warp.total_warp, &warp);
+        timespec_add(&c->warp, &c->warp, &warp);
+        c->large_warp.total_warp = 0;
+    } else {
+        /* c->large_warp.total_warp is 0. */
+        msec_to_timespec(c->large_warp.warp, &warp);
+        timespec_add(&c->warp, &c->warp, &warp);
+    }
+
+    if (!c->large_warp.total_warp) {
+        unixctl_command_reply(c->large_warp.conn, "warped");
+        c->large_warp.conn = NULL;
+    }
+
+    ovs_mutex_unlock(&c->mutex);
+    seq_change(timewarp_seq);
+
+    /* give threads (eg. monitor) some chances to run */
+#ifndef _WIN32
+    poll(NULL, 0, 10);
+#else
+    Sleep(10);
+#endif
+}
+
+/* Perform work needed for "timewarp_seq"'s producer and consumers. */
+void
+timewarp_run(void)
+{
+    /* The function is a no-op unless timeval_dummy_register() is called. */
+    if (timewarp_enabled) {
+        unsigned int thread_id;
+        ovs_mutex_lock(&monotonic_clock.mutex);
+        thread_id = monotonic_clock.large_warp.main_thread_id;
+        ovs_mutex_unlock(&monotonic_clock.mutex);
+
+        if (thread_id != ovsthread_id_self()) {
+            /* For threads other than the thread that changes the sequence,
+             * wait on it. */
+            uint64_t *last_seq = last_seq_get();
+
+            *last_seq = seq_read(timewarp_seq);
+            seq_wait(timewarp_seq, *last_seq);
+        } else {
+            /* Work on adding the remaining warps. */
+            timewarp_work();
+        }
     }
 }
 
@@ -497,31 +561,35 @@ log_poll_interval(long long int last_wakeup)
         const struct rusage *last_rusage = get_recent_rusage();
         struct rusage rusage;
 
-        getrusage(RUSAGE_SELF, &rusage);
-        VLOG_WARN("Unreasonably long %lldms poll interval"
-                  " (%lldms user, %lldms system)",
-                  interval,
-                  timeval_diff_msec(&rusage.ru_utime,
-                                    &last_rusage->ru_utime),
-                  timeval_diff_msec(&rusage.ru_stime,
-                                    &last_rusage->ru_stime));
-        if (rusage.ru_minflt > last_rusage->ru_minflt
-            || rusage.ru_majflt > last_rusage->ru_majflt) {
-            VLOG_WARN("faults: %ld minor, %ld major",
-                      rusage.ru_minflt - last_rusage->ru_minflt,
-                      rusage.ru_majflt - last_rusage->ru_majflt);
-        }
-        if (rusage.ru_inblock > last_rusage->ru_inblock
-            || rusage.ru_oublock > last_rusage->ru_oublock) {
-            VLOG_WARN("disk: %ld reads, %ld writes",
-                      rusage.ru_inblock - last_rusage->ru_inblock,
-                      rusage.ru_oublock - last_rusage->ru_oublock);
-        }
-        if (rusage.ru_nvcsw > last_rusage->ru_nvcsw
-            || rusage.ru_nivcsw > last_rusage->ru_nivcsw) {
-            VLOG_WARN("context switches: %ld voluntary, %ld involuntary",
-                      rusage.ru_nvcsw - last_rusage->ru_nvcsw,
-                      rusage.ru_nivcsw - last_rusage->ru_nivcsw);
+        if (!getrusage_thread(&rusage)) {
+            VLOG_WARN("Unreasonably long %lldms poll interval"
+                      " (%lldms user, %lldms system)",
+                      interval,
+                      timeval_diff_msec(&rusage.ru_utime,
+                                        &last_rusage->ru_utime),
+                      timeval_diff_msec(&rusage.ru_stime,
+                                        &last_rusage->ru_stime));
+
+            if (rusage.ru_minflt > last_rusage->ru_minflt
+                || rusage.ru_majflt > last_rusage->ru_majflt) {
+                VLOG_WARN("faults: %ld minor, %ld major",
+                          rusage.ru_minflt - last_rusage->ru_minflt,
+                          rusage.ru_majflt - last_rusage->ru_majflt);
+            }
+            if (rusage.ru_inblock > last_rusage->ru_inblock
+                || rusage.ru_oublock > last_rusage->ru_oublock) {
+                VLOG_WARN("disk: %ld reads, %ld writes",
+                          rusage.ru_inblock - last_rusage->ru_inblock,
+                          rusage.ru_oublock - last_rusage->ru_oublock);
+            }
+            if (rusage.ru_nvcsw > last_rusage->ru_nvcsw
+                || rusage.ru_nivcsw > last_rusage->ru_nivcsw) {
+                VLOG_WARN("context switches: %ld voluntary, %ld involuntary",
+                          rusage.ru_nvcsw - last_rusage->ru_nvcsw,
+                          rusage.ru_nivcsw - last_rusage->ru_nivcsw);
+            }
+        } else {
+            VLOG_WARN("Unreasonably long %lldms poll interval", interval);
         }
         coverage_log();
     }
@@ -618,7 +686,7 @@ timeval_stop_cb(struct unixctl_conn *conn,
                  void *aux OVS_UNUSED)
 {
     ovs_mutex_lock(&monotonic_clock.mutex);
-    atomic_store(&monotonic_clock.slow_path, true);
+    atomic_store_relaxed(&monotonic_clock.slow_path, true);
     monotonic_clock.stopped = true;
     xclock_gettime(monotonic_clock.id, &monotonic_clock.cache);
     ovs_mutex_unlock(&monotonic_clock.mutex);
@@ -630,35 +698,37 @@ timeval_stop_cb(struct unixctl_conn *conn,
  * number of milliseconds.  Unless "time/stop" has also been executed, the
  * monotonic clock continues to tick forward at the normal rate afterward.
  *
+ * "time/warp LARGE_MSECS MSECS" is a variation of the above command. It
+ * advances the current monotonic time by LARGE_MSECS. This is done MSECS
+ * at a time in each run of the main thread. This gives other threads
+ * time to run after the clock has been advanced by MSECS.
+ *
  * Does not affect wall clock readings. */
 static void
 timeval_warp_cb(struct unixctl_conn *conn,
                 int argc OVS_UNUSED, const char *argv[], void *aux OVS_UNUSED)
 {
-    struct timespec ts;
-    int msecs;
-
-    msecs = atoi(argv[1]);
-    if (msecs <= 0) {
+    long long int total_warp = argc > 2 ? atoll(argv[1]) : 0;
+    long long int msecs = argc > 2 ? atoll(argv[2]) : atoll(argv[1]);
+    if (msecs <= 0 || total_warp < 0) {
         unixctl_command_reply_error(conn, "invalid MSECS");
         return;
     }
 
-    ts.tv_sec = msecs / 1000;
-    ts.tv_nsec = (msecs % 1000) * 1000 * 1000;
-
     ovs_mutex_lock(&monotonic_clock.mutex);
-    atomic_store(&monotonic_clock.slow_path, true);
-    timespec_add(&monotonic_clock.warp, &monotonic_clock.warp, &ts);
+    if (monotonic_clock.large_warp.conn) {
+        ovs_mutex_unlock(&monotonic_clock.mutex);
+        unixctl_command_reply_error(conn, "A previous warp in progress");
+        return;
+    }
+    atomic_store_relaxed(&monotonic_clock.slow_path, true);
+    monotonic_clock.large_warp.conn = conn;
+    monotonic_clock.large_warp.total_warp = total_warp;
+    monotonic_clock.large_warp.warp = msecs;
+    monotonic_clock.large_warp.main_thread_id = ovsthread_id_self();
     ovs_mutex_unlock(&monotonic_clock.mutex);
-    seq_change(timewarp_seq);
-    /* give threads (eg. monitor) some chances to run */
-#ifndef _WIN32
-    poll(NULL, 0, 10);
-#else
-    Sleep(10);
-#endif
-    unixctl_command_reply(conn, "warped");
+
+    timewarp_work();
 }
 
 void
@@ -666,7 +736,7 @@ timeval_dummy_register(void)
 {
     timewarp_enabled = true;
     unixctl_command_register("time/stop", "", 0, 0, timeval_stop_cb, NULL);
-    unixctl_command_register("time/warp", "MSECS", 1, 1,
+    unixctl_command_register("time/warp", "[large_msecs] msecs", 1, 2,
                              timeval_warp_cb, NULL);
 }
 

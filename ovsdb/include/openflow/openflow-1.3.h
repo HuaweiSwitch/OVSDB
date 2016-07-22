@@ -37,7 +37,7 @@
 #ifndef OPENFLOW_13_H
 #define OPENFLOW_13_H 1
 
-#include "openflow/openflow-1.2.h"
+#include <openflow/openflow-1.2.h>
 
 /*
  * OpenFlow 1.3 modifies the syntax of the following message types:
@@ -91,10 +91,6 @@ enum ofp13_instruction_type {
     OFPIT13_METER = 6           /* Apply meter (rate limiter) */
 };
 
-#define OFPIT13_ALL (OFPIT11_GOTO_TABLE | OFPIT11_WRITE_METADATA |      \
-                     OFPIT11_WRITE_ACTIONS | OFPIT11_APPLY_ACTIONS |    \
-                     OFPIT11_CLEAR_ACTIONS | OFPIT13_METER)
-
 /* Instruction structure for OFPIT_METER */
 struct ofp13_instruction_meter {
     ovs_be16 type;              /* OFPIT13_METER */
@@ -102,27 +98,6 @@ struct ofp13_instruction_meter {
     ovs_be32 meter_id;          /* Meter instance. */
 };
 OFP_ASSERT(sizeof(struct ofp13_instruction_meter) == 8);
-
-enum ofp13_action_type {
-    OFPAT13_OUTPUT       = 0,   /* Output to switch port. */
-    OFPAT13_COPY_TTL_OUT = 11,  /* Copy TTL "outwards" -- from next-to-outermost
-                                   to outermost */
-    OFPAT13_COPY_TTL_IN  = 12,  /* Copy TTL "inwards" -- from outermost to
-                                   next-to-outermost */
-    OFPAT13_SET_MPLS_TTL = 15,  /* MPLS TTL */
-    OFPAT13_DEC_MPLS_TTL = 16,  /* Decrement MPLS TTL */
-    OFPAT13_PUSH_VLAN    = 17,  /* Push a new VLAN tag */
-    OFPAT13_POP_VLAN     = 18,  /* Pop the outer VLAN tag */
-    OFPAT13_PUSH_MPLS    = 19,  /* Push a new MPLS Label Stack Entry */
-    OFPAT13_POP_MPLS     = 20,  /* Pop the outer MPLS Label Stack Entry */
-    OFPAT13_SET_QUEUE    = 21,  /* Set queue id when outputting to a port */
-    OFPAT13_GROUP        = 22,  /* Apply group. */
-    OFPAT13_SET_NW_TTL   = 23,  /* IP TTL. */
-    OFPAT13_DEC_NW_TTL   = 24,  /* Decrement IP TTL. */
-    OFPAT13_SET_FIELD    = 25,  /* Set a header field using OXM TLV format. */
-    OFPAT13_PUSH_PBB     = 26,  /* Push a new PBB service tag (I-TAG) */
-    OFPAT13_POP_PBB      = 27   /* Pop the outer PBB service tag (I-TAG) */
-};
 
 /* enum ofp_config_flags value OFPC_INVALID_TTL_TO_CONTROLLER
  * is deprecated in OpenFlow 1.3 */
@@ -257,7 +232,14 @@ struct ofp13_table_features {
     char name[OFP_MAX_TABLE_NAME_LEN];
     ovs_be64 metadata_match;  /* Bits of metadata table can match. */
     ovs_be64 metadata_write;  /* Bits of metadata table can write. */
-    ovs_be32 config;          /* Bitmap of OFPTC_* values */
+
+    /* In OF1.3 this field was named 'config' and it was useless because OF1.3
+     * did not define any OFPTC_* bits.
+     *
+     * OF1.4 renamed this field to 'capabilities' and added OFPTC14_EVICTION
+     * and OFPTC14_VACANCY_EVENTS. */
+    ovs_be32 capabilities;    /* Bitmap of OFPTC_* values */
+
     ovs_be32 max_entries;     /* Max number of entries supported. */
 
     /* Table Feature Property list */

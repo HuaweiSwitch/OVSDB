@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@
 #include "poll-loop.h"
 #include "random.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 #include "socket-util.h"
 
 VLOG_DEFINE_THIS_MODULE(vconn);
@@ -138,10 +138,10 @@ vconn_usage(bool active, bool passive, bool bootstrap OVS_UNUSED)
     if (active) {
         printf("Active OpenFlow connection methods:\n");
         printf("  tcp:IP[:PORT]           "
-               "PORT (default: %d) at remote IP\n", OFP_OLD_PORT);
+               "PORT (default: %d) at remote IP\n", OFP_PORT);
 #ifdef HAVE_OPENSSL
         printf("  ssl:IP[:PORT]           "
-               "SSL PORT (default: %d) at remote IP\n", OFP_OLD_PORT);
+               "SSL PORT (default: %d) at remote IP\n", OFP_PORT);
 #endif
         printf("  unix:FILE               Unix domain socket named FILE\n");
     }
@@ -150,11 +150,11 @@ vconn_usage(bool active, bool passive, bool bootstrap OVS_UNUSED)
         printf("Passive OpenFlow connection methods:\n");
         printf("  ptcp:[PORT][:IP]        "
                "listen to TCP PORT (default: %d) on IP\n",
-               OFP_OLD_PORT);
+               OFP_PORT);
 #ifdef HAVE_OPENSSL
         printf("  pssl:[PORT][:IP]        "
                "listen for SSL on PORT (default: %d) on IP\n",
-               OFP_OLD_PORT);
+               OFP_PORT);
 #endif
         printf("  punix:FILE              "
                "listen on Unix domain socket FILE\n");
@@ -252,7 +252,7 @@ vconn_open(const char *name, uint32_t allowed_versions, uint8_t dscp,
     }
 
     /* Success. */
-    ovs_assert(vconn->state != VCS_CONNECTING || vconn->class->connect);
+    ovs_assert(vconn->state != VCS_CONNECTING || vconn->vclass->connect);
     *vconnp = vconn;
     return 0;
 
@@ -272,8 +272,8 @@ vconn_run(struct vconn *vconn)
         vconn_connect(vconn);
     }
 
-    if (vconn->class->run) {
-        (vconn->class->run)(vconn);
+    if (vconn->vclass->run) {
+        (vconn->vclass->run)(vconn);
     }
 }
 
@@ -288,8 +288,8 @@ vconn_run_wait(struct vconn *vconn)
         vconn_connect_wait(vconn);
     }
 
-    if (vconn->class->run_wait) {
-        (vconn->class->run_wait)(vconn);
+    if (vconn->vclass->run_wait) {
+        (vconn->vclass->run_wait)(vconn);
     }
 }
 
@@ -331,7 +331,7 @@ vconn_close(struct vconn *vconn)
 {
     if (vconn != NULL) {
         char *name = vconn->name;
-        (vconn->class->close)(vconn);
+        (vconn->vclass->close)(vconn);
         free(name);
     }
 }
@@ -394,7 +394,7 @@ vconn_set_recv_any_version(struct vconn *vconn)
 static void
 vcs_connecting(struct vconn *vconn)
 {
-    int retval = (vconn->class->connect)(vconn);
+    int retval = (vconn->vclass->connect)(vconn);
     ovs_assert(retval != EINPROGRESS);
     if (!retval) {
         vconn->state = VCS_SEND_HELLO;
@@ -456,16 +456,16 @@ vcs_recv_hello(struct vconn *vconn)
         enum ofptype type;
         enum ofperr error;
 
-        error = ofptype_decode(&type, ofpbuf_data(b));
+        error = ofptype_decode(&type, b->data);
         if (!error && type == OFPTYPE_HELLO) {
             char *peer_s, *local_s;
             uint32_t common_versions;
 
-            if (!ofputil_decode_hello(ofpbuf_data(b), &vconn->peer_versions)) {
+            if (!ofputil_decode_hello(b->data, &vconn->peer_versions)) {
                 struct ds msg = DS_EMPTY_INITIALIZER;
                 ds_put_format(&msg, "%s: unknown data in hello:\n",
                               vconn->name);
-                ds_put_hex_dump(&msg, ofpbuf_data(b), ofpbuf_size(b), 0, true);
+                ds_put_hex_dump(&msg, b->data, b->size, 0, true);
                 VLOG_WARN_RL(&bad_ofmsg_rl, "%s", ds_cstr(&msg));
                 ds_destroy(&msg);
             }
@@ -495,7 +495,7 @@ vcs_recv_hello(struct vconn *vconn)
             ofpbuf_delete(b);
             return;
         } else {
-            char *s = ofp_to_string(ofpbuf_data(b), ofpbuf_size(b), 1);
+            char *s = ofp_to_string(b->data, b->size, 1);
             VLOG_WARN_RL(&bad_ofmsg_rl,
                          "%s: received message while expecting hello: %s",
                          vconn->name, s);
@@ -598,11 +598,11 @@ vconn_recv(struct vconn *vconn, struct ofpbuf **msgp)
         retval = do_recv(vconn, &msg);
     }
     if (!retval && !vconn->recv_any_version) {
-        const struct ofp_header *oh = ofpbuf_data(msg);
+        const struct ofp_header *oh = msg->data;
         if (oh->version != vconn->version) {
             enum ofptype type;
 
-            if (ofptype_decode(&type, ofpbuf_data(msg))
+            if (ofptype_decode(&type, msg->data)
                 || (type != OFPTYPE_HELLO &&
                     type != OFPTYPE_ERROR &&
                     type != OFPTYPE_ECHO_REQUEST &&
@@ -637,11 +637,11 @@ vconn_recv(struct vconn *vconn, struct ofpbuf **msgp)
 static int
 do_recv(struct vconn *vconn, struct ofpbuf **msgp)
 {
-    int retval = (vconn->class->recv)(vconn, msgp);
+    int retval = (vconn->vclass->recv)(vconn, msgp);
     if (!retval) {
         COVERAGE_INC(vconn_received);
         if (VLOG_IS_DBG_ENABLED()) {
-            char *s = ofp_to_string(ofpbuf_data(*msgp), ofpbuf_size(*msgp), 1);
+            char *s = ofp_to_string((*msgp)->data, (*msgp)->size, 1);
             VLOG_DBG_RL(&ofmsg_rl, "%s: received: %s", vconn->name, s);
             free(s);
         }
@@ -674,15 +674,15 @@ do_send(struct vconn *vconn, struct ofpbuf *msg)
 {
     int retval;
 
-    ovs_assert(ofpbuf_size(msg) >= sizeof(struct ofp_header));
+    ovs_assert(msg->size >= sizeof(struct ofp_header));
 
     ofpmsg_update_length(msg);
     if (!VLOG_IS_DBG_ENABLED()) {
         COVERAGE_INC(vconn_sent);
-        retval = (vconn->class->send)(vconn, msg);
+        retval = (vconn->vclass->send)(vconn, msg);
     } else {
-        char *s = ofp_to_string(ofpbuf_data(msg), ofpbuf_size(msg), 1);
-        retval = (vconn->class->send)(vconn, msg);
+        char *s = ofp_to_string(msg->data, msg->size, 1);
+        retval = (vconn->vclass->send)(vconn, msg);
         if (retval != EAGAIN) {
             VLOG_DBG_RL(&ofmsg_rl, "%s: sent (%s): %s",
                         vconn->name, ovs_strerror(retval), s);
@@ -744,6 +744,41 @@ vconn_recv_block(struct vconn *vconn, struct ofpbuf **msgp)
     return retval;
 }
 
+static int
+vconn_recv_xid__(struct vconn *vconn, ovs_be32 xid, struct ofpbuf **replyp,
+                 void (*error_reporter)(const struct ofp_header *))
+{
+    for (;;) {
+        ovs_be32 recv_xid;
+        struct ofpbuf *reply;
+        const struct ofp_header *oh;
+        enum ofptype type;
+        int error;
+
+        error = vconn_recv_block(vconn, &reply);
+        if (error) {
+            *replyp = NULL;
+            return error;
+        }
+        oh = reply->data;
+        recv_xid = oh->xid;
+        if (xid == recv_xid) {
+            *replyp = reply;
+            return 0;
+        }
+
+        error = ofptype_decode(&type, oh);
+        if (!error && type == OFPTYPE_ERROR && error_reporter) {
+            error_reporter(oh);
+        } else {
+            VLOG_DBG_RL(&bad_ofmsg_rl, "%s: received reply with xid %08"PRIx32
+                        " != expected %08"PRIx32,
+                        vconn->name, ntohl(recv_xid), ntohl(xid));
+        }
+        ofpbuf_delete(reply);
+    }
+}
+
 /* Waits until a message with a transaction ID matching 'xid' is received on
  * 'vconn'.  Returns 0 if successful, in which case the reply is stored in
  * '*replyp' for the caller to examine and free.  Otherwise returns a positive
@@ -753,27 +788,24 @@ vconn_recv_block(struct vconn *vconn, struct ofpbuf **msgp)
 int
 vconn_recv_xid(struct vconn *vconn, ovs_be32 xid, struct ofpbuf **replyp)
 {
-    for (;;) {
-        ovs_be32 recv_xid;
-        struct ofpbuf *reply;
-        int error;
+    return vconn_recv_xid__(vconn, xid, replyp, NULL);
+}
 
-        error = vconn_recv_block(vconn, &reply);
-        if (error) {
-            *replyp = NULL;
-            return error;
-        }
-        recv_xid = ((struct ofp_header *) ofpbuf_data(reply))->xid;
-        if (xid == recv_xid) {
-            *replyp = reply;
-            return 0;
-        }
+static int
+vconn_transact__(struct vconn *vconn, struct ofpbuf *request,
+                 struct ofpbuf **replyp,
+                 void (*error_reporter)(const struct ofp_header *))
+{
+    ovs_be32 send_xid = ((struct ofp_header *) request->data)->xid;
+    int error;
 
-        VLOG_DBG_RL(&bad_ofmsg_rl, "%s: received reply with xid %08"PRIx32
-                    " != expected %08"PRIx32,
-                    vconn->name, ntohl(recv_xid), ntohl(xid));
-        ofpbuf_delete(reply);
+    *replyp = NULL;
+    error = vconn_send_block(vconn, request);
+    if (error) {
+        ofpbuf_delete(request);
     }
+    return error ? error : vconn_recv_xid__(vconn, send_xid, replyp,
+                                            error_reporter);
 }
 
 /* Sends 'request' to 'vconn' and blocks until it receives a reply with a
@@ -790,15 +822,7 @@ int
 vconn_transact(struct vconn *vconn, struct ofpbuf *request,
                struct ofpbuf **replyp)
 {
-    ovs_be32 send_xid = ((struct ofp_header *) ofpbuf_data(request))->xid;
-    int error;
-
-    *replyp = NULL;
-    error = vconn_send_block(vconn, request);
-    if (error) {
-        ofpbuf_delete(request);
-    }
-    return error ? error : vconn_recv_xid(vconn, send_xid, replyp);
+    return vconn_transact__(vconn, request, replyp, NULL);
 }
 
 /* Sends 'request' followed by a barrier request to 'vconn', then blocks until
@@ -824,7 +848,7 @@ vconn_transact_noreply(struct vconn *vconn, struct ofpbuf *request,
     *replyp = NULL;
 
     /* Send request. */
-    request_xid = ((struct ofp_header *) ofpbuf_data(request))->xid;
+    request_xid = ((struct ofp_header *) request->data)->xid;
     error = vconn_send_block(vconn, request);
     if (error) {
         ofpbuf_delete(request);
@@ -833,7 +857,7 @@ vconn_transact_noreply(struct vconn *vconn, struct ofpbuf *request,
 
     /* Send barrier. */
     barrier = ofputil_encode_barrier_request(vconn_get_version(vconn));
-    barrier_xid = ((struct ofp_header *) ofpbuf_data(barrier))->xid;
+    barrier_xid = ((struct ofp_header *) barrier->data)->xid;
     error = vconn_send_block(vconn, barrier);
     if (error) {
         ofpbuf_delete(barrier);
@@ -852,7 +876,7 @@ vconn_transact_noreply(struct vconn *vconn, struct ofpbuf *request,
             return error;
         }
 
-        msg_xid = ((struct ofp_header *) ofpbuf_data(msg))->xid;
+        msg_xid = ((struct ofp_header *) msg->data)->xid;
         if (msg_xid == request_xid) {
             if (*replyp) {
                 VLOG_WARN_RL(&bad_ofmsg_rl, "%s: duplicate replies with "
@@ -878,15 +902,13 @@ vconn_transact_noreply(struct vconn *vconn, struct ofpbuf *request,
  * All of the requests on 'requests' are always destroyed, regardless of the
  * return value. */
 int
-vconn_transact_multiple_noreply(struct vconn *vconn, struct list *requests,
+vconn_transact_multiple_noreply(struct vconn *vconn, struct ovs_list *requests,
                                 struct ofpbuf **replyp)
 {
-    struct ofpbuf *request, *next;
+    struct ofpbuf *request;
 
-    LIST_FOR_EACH_SAFE (request, next, list_node, requests) {
+    LIST_FOR_EACH_POP (request, list_node, requests) {
         int error;
-
-        list_remove(&request->list_node);
 
         error = vconn_transact_noreply(vconn, request, replyp);
         if (error || *replyp) {
@@ -897,6 +919,179 @@ vconn_transact_multiple_noreply(struct vconn *vconn, struct list *requests,
 
     *replyp = NULL;
     return 0;
+}
+
+static enum ofperr
+vconn_bundle_reply_validate(struct ofpbuf *reply,
+                            struct ofputil_bundle_ctrl_msg *request,
+                            void (*error_reporter)(const struct ofp_header *))
+{
+    const struct ofp_header *oh;
+    enum ofptype type;
+    enum ofperr error;
+    struct ofputil_bundle_ctrl_msg rbc;
+
+    oh = reply->data;
+    error = ofptype_decode(&type, oh);
+    if (error) {
+        return error;
+    }
+
+    if (type == OFPTYPE_ERROR) {
+        error_reporter(oh);
+        return ofperr_decode_msg(oh, NULL);
+    }
+    if (type != OFPTYPE_BUNDLE_CONTROL) {
+        return OFPERR_OFPBRC_BAD_TYPE;
+    }
+
+    error = ofputil_decode_bundle_ctrl(oh, &rbc);
+    if (error) {
+        return error;
+    }
+
+    if (rbc.bundle_id != request->bundle_id) {
+        return OFPERR_OFPBFC_BAD_ID;
+    }
+
+    if (rbc.type != request->type + 1) {
+        return OFPERR_OFPBFC_BAD_TYPE;
+    }
+
+    return 0;
+}
+
+/* Send bundle control message 'bc' of 'type' via 'vconn', and wait for either
+ * an error or the corresponding bundle control message response.
+ *
+ * 'error_reporter' is called for any error responses received, which may be
+ * also regarding earlier OpenFlow messages than this bundle control message.
+ *
+ * Returns errno value, or 0 when successful. */
+static int
+vconn_bundle_control_transact(struct vconn *vconn,
+                              struct ofputil_bundle_ctrl_msg *bc,
+                              uint16_t type,
+                              void (*error_reporter)(const struct ofp_header *))
+{
+    struct ofpbuf *request, *reply;
+    int error;
+    enum ofperr ofperr;
+
+    bc->type = type;
+    request = ofputil_encode_bundle_ctrl_request(vconn->version, bc);
+    ofpmsg_update_length(request);
+    error = vconn_transact__(vconn, request, &reply, error_reporter);
+    if (error) {
+        return error;
+    }
+
+    ofperr = vconn_bundle_reply_validate(reply, bc, error_reporter);
+    if (ofperr) {
+        VLOG_WARN_RL(&bad_ofmsg_rl, "Bundle %s failed (%s).",
+                     type == OFPBCT_OPEN_REQUEST ? "open"
+                     : type == OFPBCT_CLOSE_REQUEST ? "close"
+                     : type == OFPBCT_COMMIT_REQUEST ? "commit"
+                     : type == OFPBCT_DISCARD_REQUEST ? "discard"
+                     : "control message",
+                     ofperr_to_string(ofperr));
+    }
+    ofpbuf_delete(reply);
+
+    return ofperr ? EPROTO : 0;
+}
+
+/* Checks if error responses can be received on 'vconn'. */
+static void
+vconn_recv_error(struct vconn *vconn,
+                 void (*error_reporter)(const struct ofp_header *))
+{
+    int error;
+
+    do {
+        struct ofpbuf *reply;
+
+        error = vconn_recv(vconn, &reply);
+        if (!error) {
+            const struct ofp_header *oh;
+            enum ofptype type;
+            enum ofperr ofperr;
+
+            oh = reply->data;
+            ofperr = ofptype_decode(&type, oh);
+            if (!ofperr && type == OFPTYPE_ERROR) {
+                error_reporter(oh);
+            } else {
+                VLOG_DBG_RL(&bad_ofmsg_rl,
+                            "%s: received unexpected reply with xid %08"PRIx32,
+                            vconn->name, ntohl(oh->xid));
+            }
+            ofpbuf_delete(reply);
+        }
+    } while (!error);
+}
+
+static int
+vconn_bundle_add_msg(struct vconn *vconn, struct ofputil_bundle_ctrl_msg *bc,
+                     struct ofpbuf *msg,
+                     void (*error_reporter)(const struct ofp_header *))
+{
+    struct ofputil_bundle_add_msg bam;
+    struct ofpbuf *request;
+    int error;
+
+    bam.bundle_id = bc->bundle_id;
+    bam.flags = bc->flags;
+    bam.msg = msg->data;
+
+    request = ofputil_encode_bundle_add(vconn->version, &bam);
+    ofpmsg_update_length(request);
+
+    error = vconn_send_block(vconn, request);
+    if (!error) {
+        /* Check for an error return, so that the socket buffer does not become
+         * full of errors. */
+        vconn_recv_error(vconn, error_reporter);
+    }
+    return error;
+}
+
+int
+vconn_bundle_transact(struct vconn *vconn, struct ovs_list *requests,
+                      uint16_t flags,
+                      void (*error_reporter)(const struct ofp_header *))
+{
+    struct ofputil_bundle_ctrl_msg bc;
+    struct ofpbuf *request;
+    int error;
+
+    memset(&bc, 0, sizeof bc);
+    bc.flags = flags;
+    error = vconn_bundle_control_transact(vconn, &bc, OFPBCT_OPEN_REQUEST,
+                                          error_reporter);
+    if (error) {
+        return error;
+    }
+
+    LIST_FOR_EACH (request, list_node, requests) {
+        error = vconn_bundle_add_msg(vconn, &bc, request, error_reporter);
+        if (error) {
+            break;
+        }
+    }
+
+    if (!error) {
+        error = vconn_bundle_control_transact(vconn, &bc,
+                                              OFPBCT_COMMIT_REQUEST,
+                                              error_reporter);
+    } else {
+        /* Do not overwrite the error code from vconn_bundle_add_msg().
+         * Any error in discard should be either reported or logged, so it
+         * should not get lost. */
+        vconn_bundle_control_transact(vconn, &bc, OFPBCT_DISCARD_REQUEST,
+                                      error_reporter);
+    }
+    return error;
 }
 
 void
@@ -925,7 +1120,7 @@ vconn_wait(struct vconn *vconn, enum vconn_wait_type wait)
         poll_immediate_wake();
         return;
     }
-    (vconn->class->wait)(vconn, wait);
+    (vconn->vclass->wait)(vconn, wait);
 }
 
 void
@@ -1047,7 +1242,7 @@ pvconn_close(struct pvconn *pvconn)
 {
     if (pvconn != NULL) {
         char *name = pvconn->name;
-        (pvconn->class->close)(pvconn);
+        (pvconn->pvclass->close)(pvconn);
         free(name);
     }
 }
@@ -1065,12 +1260,12 @@ pvconn_close(struct pvconn *pvconn)
 int
 pvconn_accept(struct pvconn *pvconn, struct vconn **new_vconn)
 {
-    int retval = (pvconn->class->accept)(pvconn, new_vconn);
+    int retval = (pvconn->pvclass->accept)(pvconn, new_vconn);
     if (retval) {
         *new_vconn = NULL;
     } else {
         ovs_assert((*new_vconn)->state != VCS_CONNECTING
-                   || (*new_vconn)->class->connect);
+                   || (*new_vconn)->vclass->connect);
     }
     return retval;
 }
@@ -1078,7 +1273,7 @@ pvconn_accept(struct pvconn *pvconn, struct vconn **new_vconn)
 void
 pvconn_wait(struct pvconn *pvconn)
 {
-    (pvconn->class->wait)(pvconn);
+    (pvconn->pvclass->wait)(pvconn);
 }
 
 /* Initializes 'vconn' as a new vconn named 'name', implemented via 'class'.
@@ -1103,7 +1298,7 @@ vconn_init(struct vconn *vconn, const struct vconn_class *class,
            int connect_status, const char *name, uint32_t allowed_versions)
 {
     memset(vconn, 0, sizeof *vconn);
-    vconn->class = class;
+    vconn->vclass = class;
     vconn->state = (connect_status == EAGAIN ? VCS_CONNECTING
                     : !connect_status ? VCS_SEND_HELLO
                     : VCS_DISCONNECTED);
@@ -1117,7 +1312,7 @@ void
 pvconn_init(struct pvconn *pvconn, const struct pvconn_class *class,
             const char *name, uint32_t allowed_versions)
 {
-    pvconn->class = class;
+    pvconn->pvclass = class;
     pvconn->name = xstrdup(name);
     pvconn->allowed_versions = allowed_versions;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2012, 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,17 +20,15 @@
 /* Provider interface to vconns, which provide a virtual connection to an
  * OpenFlow device. */
 
-#include "vconn.h"
+#include "openvswitch/vconn.h"
 #include "util.h"
 #include "openflow/openflow-common.h"
 
 /* Active virtual connection to an OpenFlow device. */
 
-/* Active virtual connection to an OpenFlow device.
- *
- * This structure should be treated as opaque by vconn implementations. */
+/* This structure should be treated as opaque by vconn implementations. */
 struct vconn {
-    const struct vconn_class *class;
+    const struct vconn_class *vclass;
     int state;
     int error;
 
@@ -47,9 +45,9 @@ void vconn_init(struct vconn *, const struct vconn_class *, int connect_status,
                 const char *name, uint32_t allowed_versions);
 void vconn_free_data(struct vconn *vconn);
 static inline void vconn_assert_class(const struct vconn *vconn,
-                                      const struct vconn_class *class)
+                                      const struct vconn_class *vclass)
 {
-    ovs_assert(vconn->class == class);
+    ovs_assert(vconn->vclass == vclass);
 }
 
 struct vconn_class {
@@ -130,21 +128,20 @@ struct vconn_class {
     void (*wait)(struct vconn *vconn, enum vconn_wait_type type);
 };
 
-/* Passive virtual connection to an OpenFlow device.
- *
- * This structure should be treated as opaque by vconn implementations. */
+/* Passive virtual connection to an OpenFlow device. */
+
+/* This structure should be treated as opaque by vconn implementations. */
 struct pvconn {
-    const struct pvconn_class *class;
+    const struct pvconn_class *pvclass;
     char *name;
     uint32_t allowed_versions;
 };
-
-void pvconn_init(struct pvconn *pvconn, const struct pvconn_class *class,
+void pvconn_init(struct pvconn *pvconn, const struct pvconn_class *pvclass,
                  const char *name, uint32_t allowed_versions);
 static inline void pvconn_assert_class(const struct pvconn *pvconn,
-                                       const struct pvconn_class *class)
+                                       const struct pvconn_class *pvclass)
 {
-    ovs_assert(pvconn->class == class);
+    ovs_assert(pvconn->pvclass == pvclass);
 }
 
 struct pvconn_class {

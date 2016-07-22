@@ -26,7 +26,7 @@
 #include "netlink.h"
 #include "netlink-socket.h"
 #include "ofpbuf.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(netlink_notifier);
 
@@ -36,7 +36,7 @@ static void nln_report(struct nln *nln, void *change);
 
 struct nln {
     struct nl_sock *notify_sock; /* Netlink socket. */
-    struct list all_notifiers;   /* All nln notifiers. */
+    struct ovs_list all_notifiers;   /* All nln notifiers. */
     bool has_run;                /* Guard for run and wait functions. */
 
     /* Passed in by nln_create(). */
@@ -49,7 +49,7 @@ struct nln {
 struct nln_notifier {
     struct nln *nln;             /* Parent nln. */
 
-    struct list node;
+    struct ovs_list node;
     nln_notify_func *cb;
     void *aux;
 };
@@ -182,12 +182,15 @@ nln_run(struct nln *nln)
             return;
         } else {
             if (error == ENOBUFS) {
+                /* The socket buffer might be full, there could be too many
+                 * notifications, so it makes sense to call nln_report() */
+                nln_report(nln, NULL);
                 VLOG_WARN_RL(&rl, "netlink receive buffer overflowed");
             } else {
                 VLOG_WARN_RL(&rl, "error reading netlink socket: %s",
                              ovs_strerror(error));
             }
-            nln_report(nln, NULL);
+            return;
         }
     }
 }

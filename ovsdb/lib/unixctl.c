@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@
 #include "stream.h"
 #include "stream-provider.h"
 #include "svec.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(unixctl);
 
@@ -44,7 +44,7 @@ struct unixctl_command {
 };
 
 struct unixctl_conn {
-    struct list node;
+    struct ovs_list node;
     struct jsonrpc *rpc;
 
     /* Only one request can be in progress at a time.  While the request is
@@ -55,7 +55,7 @@ struct unixctl_conn {
 /* Server for control connection. */
 struct unixctl_server {
     struct pstream *listener;
-    struct list conns;
+    struct ovs_list conns;
 };
 
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
@@ -63,8 +63,8 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 5);
 static struct shash commands = SHASH_INITIALIZER(&commands);
 
 static void
-unixctl_help(struct unixctl_conn *conn, int argc OVS_UNUSED,
-             const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
+unixctl_list_commands(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                      const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
 {
     struct ds ds = DS_EMPTY_INITIALIZER;
     const struct shash_node **nodes = shash_sort(&commands);
@@ -88,12 +88,12 @@ static void
 unixctl_version(struct unixctl_conn *conn, int argc OVS_UNUSED,
                 const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
 {
-    unixctl_command_reply(conn, get_program_version());
+    unixctl_command_reply(conn, ovs_get_program_version());
 }
 
 /* Registers a unixctl command with the given 'name'.  'usage' describes the
  * arguments to the command; it is used only for presentation to the user in
- * "help" output.
+ * "list-commands" output.
  *
  * 'cb' is called when the command is received.  It is passed an array
  * containing the command name and arguments, plus a copy of 'aux'.  Normally
@@ -224,7 +224,7 @@ unixctl_server_create(const char *path, struct unixctl_server **serverp)
 #ifndef _WIN32
         abs_path = abs_file_name(ovs_rundir(), path);
 #else
-        abs_path = strdup(path);
+        abs_path = xstrdup(path);
 #endif
         punix_path = xasprintf("punix:%s", abs_path);
         free(abs_path);
@@ -243,7 +243,8 @@ unixctl_server_create(const char *path, struct unixctl_server **serverp)
         goto exit;
     }
 
-    unixctl_command_register("help", "", 0, 0, unixctl_help, NULL);
+    unixctl_command_register("list-commands", "", 0, 0, unixctl_list_commands,
+                             NULL);
     unixctl_command_register("version", "", 0, 0, unixctl_version, NULL);
 
     server = xmalloc(sizeof *server);
@@ -438,7 +439,7 @@ unixctl_client_create(const char *path, struct jsonrpc **client)
     int error;
 
 #ifdef _WIN32
-    abs_path = strdup(path);
+    abs_path = xstrdup(path);
 #else
     abs_path = abs_file_name(ovs_rundir(), path);
 #endif

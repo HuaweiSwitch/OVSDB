@@ -1,10 +1,25 @@
 #ifndef __LINUX_SKBUFF_WRAPPER_H
 #define __LINUX_SKBUFF_WRAPPER_H 1
 
-#include_next <linux/skbuff.h>
-
-#include <linux/jhash.h>
 #include <linux/version.h>
+#include <linux/types.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
+/* This should be before skbuff.h to make sure that we rewrite
+ * the calls there. */
+struct sk_buff;
+
+int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail,
+		     gfp_t gfp_mask);
+#define pskb_expand_head rpl_pskb_expand_head
+#endif
+
+#include_next <linux/skbuff.h>
+#include <linux/jhash.h>
+
+#ifndef HAVE_IGNORE_DF_RENAME
+#define ignore_df local_df
+#endif
 
 #ifndef HAVE_SKB_COPY_FROM_LINEAR_DATA_OFFSET
 static inline void skb_copy_from_linear_data_offset(const struct sk_buff *skb,
@@ -283,9 +298,14 @@ static inline void skb_tx_error(struct sk_buff *skb)
 #endif /* LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0) */
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
-unsigned int skb_zerocopy_headlen(const struct sk_buff *from);
-int skb_zerocopy(struct sk_buff *to, struct sk_buff *from, int len,
-		  int hlen);
+#define skb_zerocopy_headlen rpl_skb_zerocopy_headlen
+unsigned int rpl_skb_zerocopy_headlen(const struct sk_buff *from);
+#endif
+
+#ifndef HAVE_SKB_ZEROCOPY
+#define skb_zerocopy rpl_skb_zerocopy
+int rpl_skb_zerocopy(struct sk_buff *to, struct sk_buff *from, int len,
+		     int hlen);
 #endif
 
 #ifndef HAVE_SKB_CLEAR_HASH
@@ -294,7 +314,7 @@ static inline void skb_clear_hash(struct sk_buff *skb)
 #ifdef HAVE_RXHASH
 	skb->rxhash = 0;
 #endif
-#ifdef HAVE_L4_RXHASH
+#if defined(HAVE_L4_RXHASH) && !defined(HAVE_RHEL_OVS_HOOK)
 	skb->l4_rxhash = 0;
 #endif
 }
@@ -316,4 +336,66 @@ static inline void __skb_fill_page_desc(struct sk_buff *skb, int i,
 }
 #endif
 
+#ifndef HAVE_SKB_ENSURE_WRITABLE
+#define skb_ensure_writable rpl_skb_ensure_writable
+int rpl_skb_ensure_writable(struct sk_buff *skb, int write_len);
+#endif
+
+#ifndef HAVE_SKB_VLAN_POP
+#define skb_vlan_pop rpl_skb_vlan_pop
+int rpl_skb_vlan_pop(struct sk_buff *skb);
+#endif
+
+#ifndef HAVE_SKB_VLAN_PUSH
+#define skb_vlan_push rpl_skb_vlan_push
+int rpl_skb_vlan_push(struct sk_buff *skb, __be16 vlan_proto, u16 vlan_tci);
+#endif
+
+#ifndef HAVE_KFREE_SKB_LIST
+void rpl_kfree_skb_list(struct sk_buff *segs);
+#define kfree_skb_list rpl_kfree_skb_list
+#endif
+
+#ifndef HAVE_SKB_CHECKSUM_START_OFFSET
+static inline int skb_checksum_start_offset(const struct sk_buff *skb)
+{
+	return skb->csum_start - skb_headroom(skb);
+}
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,3,0)
+#define skb_postpull_rcsum rpl_skb_postpull_rcsum
+static inline void skb_postpull_rcsum(struct sk_buff *skb,
+				      const void *start, unsigned int len)
+{
+	if (skb->ip_summed == CHECKSUM_COMPLETE)
+		skb->csum = csum_sub(skb->csum, csum_partial(start, len, 0));
+	else if (skb->ip_summed == CHECKSUM_PARTIAL &&
+			skb_checksum_start_offset(skb) < 0)
+		skb->ip_summed = CHECKSUM_NONE;
+}
+
+#define skb_pull_rcsum rpl_skb_pull_rcsum
+static inline unsigned char *skb_pull_rcsum(struct sk_buff *skb, unsigned int len)
+{
+	unsigned char *data = skb->data;
+
+	BUG_ON(len > skb->len);
+	__skb_pull(skb, len);
+	skb_postpull_rcsum(skb, data, len);
+	return skb->data;
+}
+
+#endif
+
+#ifndef HAVE_SKB_SCRUB_PACKET_XNET
+#define skb_scrub_packet rpl_skb_scrub_packet
+void rpl_skb_scrub_packet(struct sk_buff *skb, bool xnet);
+#endif
+
+#define skb_pop_mac_header rpl_skb_pop_mac_header
+static inline void skb_pop_mac_header(struct sk_buff *skb)
+{
+	skb->mac_header = skb->network_header;
+}
 #endif

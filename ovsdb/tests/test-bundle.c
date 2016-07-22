@@ -14,18 +14,15 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
 #include "bundle.h"
-
 #include <math.h>
 #include <stdlib.h>
-
 #include "flow.h"
 #include "ofp-actions.h"
 #include "ofpbuf.h"
-
-#include "util.h"
 #include "ovstest.h"
+#include "util.h"
 
 #define N_FLOWS  50000
 #define MAX_SLAVES 8 /* Maximum supported by this test framework. */
@@ -79,7 +76,7 @@ parse_bundle_actions(char *actions)
         ovs_fatal(0, "%s", error);
     }
 
-    action = ofpbuf_data(&ofpacts);
+    action = ofpacts.data;
     bundle = ofpact_get_BUNDLE(xmemdup(action, action->len));
     ofpbuf_uninit(&ofpacts);
 

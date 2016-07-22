@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,6 @@
  * a useful debugging tool. */
 
 #include "ovs-thread.h"
-#include "vlog.h"
 #include "compiler.h"
 
 /* Makes coverage_run run every 5000 ms (5 seconds).
@@ -89,9 +88,7 @@ void coverage_counter_register(struct coverage_counter*);
 void coverage_init(void);
 void coverage_log(void);
 void coverage_clear(void);
+void coverage_try_clear(void);
 void coverage_run(void);
-
-/* Implementation detail. */
-#define COVERAGE_DEFINE__(COUNTER)                              \
 
 #endif /* coverage.h */

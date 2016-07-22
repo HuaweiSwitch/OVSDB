@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,17 +23,18 @@
 #include "flow.h"
 #include "mac-learning.h"
 #include "odp-util.h"
+#include "ofpbuf.h"
 #include "ofp-actions.h"
 #include "ofp-util.h"
-#include "ofpbuf.h"
 #include "ofproto.h"
 #include "ofproto-provider.h"
 #include "pktbuf.h"
+#include "dp-packet.h"
 #include "poll-loop.h"
 #include "rconn.h"
 #include "timeval.h"
-#include "vconn.h"
-#include "vlog.h"
+#include "openvswitch/vconn.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(fail_open);
 
@@ -76,6 +77,7 @@ struct fail_open {
     int last_disconn_secs;
     long long int next_bogus_packet_in;
     struct rconn_packet_counter *bogus_packet_counter;
+    bool fail_open_active;
 };
 
 static void fail_open_recover(struct fail_open *);
@@ -117,23 +119,24 @@ static void
 send_bogus_packet_ins(struct fail_open *fo)
 {
     struct ofproto_packet_in pin;
-    uint8_t mac[ETH_ADDR_LEN];
-    struct ofpbuf b;
+    struct eth_addr mac;
+    struct dp_packet b;
 
-    ofpbuf_init(&b, 128);
-    eth_addr_nicira_random(mac);
+    dp_packet_init(&b, 128);
+    eth_addr_nicira_random(&mac);
     compose_rarp(&b, mac);
 
     memset(&pin, 0, sizeof pin);
-    pin.up.packet = ofpbuf_data(&b);
-    pin.up.packet_len = ofpbuf_size(&b);
+    pin.up.packet = dp_packet_data(&b);
+    pin.up.packet_len = dp_packet_size(&b);
     pin.up.reason = OFPR_NO_MATCH;
-    pin.up.fmd.in_port = OFPP_LOCAL;
-    pin.send_len = ofpbuf_size(&b);
+    match_init_catchall(&pin.up.flow_metadata);
+    match_set_in_port(&pin.up.flow_metadata, OFPP_LOCAL);
+    pin.send_len = dp_packet_size(&b);
     pin.miss_type = OFPROTO_PACKET_IN_NO_MISS;
     connmgr_send_packet_in(fo->connmgr, &pin);
 
-    ofpbuf_uninit(&b);
+    dp_packet_uninit(&b);
 }
 
 /* Enter fail-open mode if we should be in it. */
@@ -230,10 +233,19 @@ fail_open_flushed(struct fail_open *fo)
 
         match_init_catchall(&match);
         ofproto_add_flow(fo->ofproto, &match, FAIL_OPEN_PRIORITY,
-                         ofpbuf_data(&ofpacts), ofpbuf_size(&ofpacts));
+                         ofpacts.data, ofpacts.size);
 
         ofpbuf_uninit(&ofpacts);
     }
+    fo->fail_open_active = open;
+}
+
+/* Returns the number of fail-open rules currently installed in the flow
+ * table. */
+int
+fail_open_count_rules(const struct fail_open *fo)
+{
+    return fo->fail_open_active != 0;
 }
 
 /* Creates and returns a new struct fail_open for 'ofproto' and 'mgr'. */
@@ -246,6 +258,7 @@ fail_open_create(struct ofproto *ofproto, struct connmgr *mgr)
     fo->last_disconn_secs = 0;
     fo->next_bogus_packet_in = LLONG_MAX;
     fo->bogus_packet_counter = rconn_packet_counter_create();
+    fo->fail_open_active = false;
     return fo;
 }
 

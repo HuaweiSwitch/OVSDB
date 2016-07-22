@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Nicira, Inc.
+ * Copyright (c) 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,12 +20,15 @@
 
 #include <stdbool.h>
 
+#include "coverage.h"
 #include "hash.h"
 #include "hmap.h"
 #include "latch.h"
 #include "list.h"
 #include "ovs-thread.h"
 #include "poll-loop.h"
+
+COVERAGE_DEFINE(seq_change);
 
 /* A sequence number object. */
 struct seq {
@@ -39,15 +42,15 @@ struct seq_waiter {
     struct hmap_node hmap_node OVS_GUARDED; /* In 'seq->waiters'. */
     unsigned int ovsthread_id OVS_GUARDED;  /* Key in 'waiters' hmap. */
 
-    struct seq_thread *thread OVS_GUARDED; /* Thread preparing to wait. */
-    struct list list_node OVS_GUARDED;     /* In 'thread->waiters'. */
+    struct seq_thread *thread OVS_GUARDED;  /* Thread preparing to wait. */
+    struct ovs_list list_node OVS_GUARDED;  /* In 'thread->waiters'. */
 
     uint64_t value OVS_GUARDED; /* seq->value we're waiting to change. */
 };
 
 /* A thread that might be waiting on one or more seqs. */
 struct seq_thread {
-    struct list waiters OVS_GUARDED; /* Contains 'struct seq_waiter's. */
+    struct ovs_list waiters OVS_GUARDED; /* Contains 'struct seq_waiter's. */
     struct latch latch OVS_GUARDED;  /* Wakeup latch for this thread. */
     bool waiting OVS_GUARDED;        /* True if latch_wait() already called. */
 };
@@ -74,6 +77,9 @@ seq_create(void)
     seq_init();
 
     seq = xmalloc(sizeof *seq);
+
+    COVERAGE_INC(seq_change);
+
     ovs_mutex_lock(&seq_mutex);
     seq->value = seq_next++;
     hmap_init(&seq->waiters);
@@ -100,6 +106,8 @@ void
 seq_change(struct seq *seq)
     OVS_EXCLUDED(seq_mutex)
 {
+    COVERAGE_INC(seq_change);
+
     ovs_mutex_lock(&seq_mutex);
     seq->value = seq_next++;
     seq_wake_waiters(seq);
@@ -125,7 +133,7 @@ seq_read(const struct seq *seq)
 }
 
 static void
-seq_wait__(struct seq *seq, uint64_t value)
+seq_wait__(struct seq *seq, uint64_t value, const char *where)
     OVS_REQUIRES(seq_mutex)
 {
     unsigned int id = ovsthread_id_self();
@@ -137,7 +145,7 @@ seq_wait__(struct seq *seq, uint64_t value)
             if (waiter->value != value) {
                 /* The current value is different from the value we've already
                  * waited for, */
-                poll_immediate_wake();
+                poll_immediate_wake_at(where);
             } else {
                 /* Already waiting on 'value', nothing more to do. */
             }
@@ -154,7 +162,7 @@ seq_wait__(struct seq *seq, uint64_t value)
     list_push_back(&waiter->thread->waiters, &waiter->list_node);
 
     if (!waiter->thread->waiting) {
-        latch_wait(&waiter->thread->latch);
+        latch_wait_at(&waiter->thread->latch, where);
         waiter->thread->waiting = true;
     }
 }
@@ -165,18 +173,22 @@ seq_wait__(struct seq *seq, uint64_t value)
  *
  * seq_read() and seq_wait() can be used together to yield a race-free wakeup
  * when an object changes, even without an ability to lock the object.  See
- * Usage in seq.h for details. */
+ * Usage in seq.h for details.
+ *
+ * ('where' is used in debug logging.  Commonly one would use seq_wait() to
+ * automatically provide the caller's source file and line number for
+ * 'where'.) */
 void
-seq_wait(const struct seq *seq_, uint64_t value)
+seq_wait_at(const struct seq *seq_, uint64_t value, const char *where)
     OVS_EXCLUDED(seq_mutex)
 {
     struct seq *seq = CONST_CAST(struct seq *, seq_);
 
     ovs_mutex_lock(&seq_mutex);
     if (value == seq->value) {
-        seq_wait__(seq, value);
+        seq_wait__(seq, value, where);
     } else {
-        poll_immediate_wake();
+        poll_immediate_wake_at(where);
     }
     ovs_mutex_unlock(&seq_mutex);
 }

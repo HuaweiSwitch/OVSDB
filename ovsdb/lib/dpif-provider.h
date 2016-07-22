@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,31 @@ static inline void dpif_assert_class(const struct dpif *dpif,
     ovs_assert(dpif->dpif_class == dpif_class);
 }
 
+struct dpif_flow_dump {
+    struct dpif *dpif;
+    bool terse;         /* If true, key/mask/actions may be omitted. */
+};
+
+static inline void
+dpif_flow_dump_init(struct dpif_flow_dump *dump, const struct dpif *dpif)
+{
+    dump->dpif = CONST_CAST(struct dpif *, dpif);
+}
+
+struct dpif_flow_dump_thread {
+    struct dpif *dpif;
+};
+
+static inline void
+dpif_flow_dump_thread_init(struct dpif_flow_dump_thread *thread,
+                           struct dpif_flow_dump *dump)
+{
+    thread->dpif = dump->dpif;
+}
+
+struct ct_dpif_dump_state;
+struct ct_dpif_entry;
+
 /* Datapath interface class structure, to be defined by each implementation of
  * a datapath interface.
  *
@@ -68,16 +93,25 @@ struct dpif_class {
      * the type assumed if no type is specified when opening a dpif. */
     const char *type;
 
-    /* Enumerates the names of all known created datapaths, if possible, into
-     * 'all_dps'.  The caller has already initialized 'all_dps' and other dpif
-     * classes might already have added names to it.
+    /* Called when the dpif provider is registered, typically at program
+     * startup.  Returning an error from this function will prevent any
+     * datapath with this class from being created.
+     *
+     * This function may be set to null if a datapath class needs no
+     * initialization at registration time. */
+    int (*init)(void);
+
+    /* Enumerates the names of all known created datapaths (of class
+     * 'dpif_class'), if possible, into 'all_dps'.  The caller has already
+     * initialized 'all_dps' and other dpif classes might already have added
+     * names to it.
      *
      * This is used by the vswitch at startup, so that it can delete any
      * datapaths that are not configured.
      *
      * Some kinds of datapaths might not be practically enumerable, in which
      * case this function may be a null pointer. */
-    int (*enumerate)(struct sset *all_dps);
+    int (*enumerate)(struct sset *all_dps, const struct dpif_class *dpif_class);
 
     /* Returns the type to pass to netdev_open() when a dpif of class
      * 'dpif_class' has a port of type 'type', for a few special cases
@@ -110,8 +144,9 @@ struct dpif_class {
      * the 'close' member function. */
     int (*destroy)(struct dpif *dpif);
 
-    /* Performs periodic work needed by 'dpif', if any is necessary. */
-    void (*run)(struct dpif *dpif);
+    /* Performs periodic work needed by 'dpif', if any is necessary.
+     * Returns true if need to revalidate. */
+    bool (*run)(struct dpif *dpif);
 
     /* Arranges for poll_block() to wake up if the "run" member function needs
      * to be called for 'dpif'. */
@@ -217,157 +252,42 @@ struct dpif_class {
      * value other than EAGAIN. */
     void (*port_poll_wait)(const struct dpif *dpif);
 
-    /* Queries 'dpif' for a flow entry.  The flow is specified by the Netlink
-     * attributes with types OVS_KEY_ATTR_* in the 'key_len' bytes starting at
-     * 'key'.
-     *
-     * Returns 0 if successful.  If no flow matches, returns ENOENT.  On other
-     * failure, returns a positive errno value.
-     *
-     * On success, '*bufp' will be set to an ofpbuf owned by the caller that
-     * contains the response for 'maskp' and 'actionsp'. The caller must supply
-     * a valid pointer, and must free the ofpbuf (with ofpbuf_delete()) when it
-     * is no longer needed.
-     *
-     * If 'maskp' is nonnull, then on success '*maskp' will point to the
-     * Netlink attributes for the flow's mask, stored in '*bufp'. '*mask_len'
-     * will be set to the length of the mask attributes.
-     *
-     * If 'actionsp' is nonnull, then on success '*actionsp' will point to the
-     * Netlink attributes for the flow's actions, stored in '*bufp'.
-     * '*actions_len' will be set to the length of the actions attributes.
-     *
-     * If 'stats' is nonnull, then on success it must be updated with the
-     * flow's statistics. */
-    int (*flow_get)(const struct dpif *dpif,
-                    const struct nlattr *key, size_t key_len,
-                    struct ofpbuf **bufp,
-                    struct nlattr **maskp, size_t *mask_len,
-                    struct nlattr **actionsp, size_t *acts_len,
-                    struct dpif_flow_stats *stats);
-
-    /* Adds or modifies a flow in 'dpif'.  The flow is specified by the Netlink
-     * attributes with types OVS_KEY_ATTR_* in the 'put->key_len' bytes
-     * starting at 'put->key'.  The associated actions are specified by the
-     * Netlink attributes with types OVS_ACTION_ATTR_* in the
-     * 'put->actions_len' bytes starting at 'put->actions'.
-     *
-     * - If the flow's key does not exist in 'dpif', then the flow will be
-     *   added if 'put->flags' includes DPIF_FP_CREATE.  Otherwise the
-     *   operation will fail with ENOENT.
-     *
-     *   If the operation succeeds, then 'put->stats', if nonnull, must be
-     *   zeroed.
-     *
-     * - If the flow's key does exist in 'dpif', then the flow's actions will
-     *   be updated if 'put->flags' includes DPIF_FP_MODIFY.  Otherwise the
-     *   operation will fail with EEXIST.  If the flow's actions are updated,
-     *   then its statistics will be zeroed if 'put->flags' includes
-     *   DPIF_FP_ZERO_STATS, and left as-is otherwise.
-     *
-     *   If the operation succeeds, then 'put->stats', if nonnull, must be set
-     *   to the flow's statistics before the update.
-     */
-    int (*flow_put)(struct dpif *dpif, const struct dpif_flow_put *put);
-
-    /* Deletes a flow from 'dpif' and returns 0, or returns ENOENT if 'dpif'
-     * does not contain such a flow.  The flow is specified by the Netlink
-     * attributes with types OVS_KEY_ATTR_* in the 'del->key_len' bytes
-     * starting at 'del->key'.
-     *
-     * If the operation succeeds, then 'del->stats', if nonnull, must be set to
-     * the flow's statistics before its deletion. */
-    int (*flow_del)(struct dpif *dpif, const struct dpif_flow_del *del);
-
     /* Deletes all flows from 'dpif' and clears all of its queues of received
      * packets. */
     int (*flow_flush)(struct dpif *dpif);
 
-    /* Allocates thread-local state for use with the function 'flow_dump_next'.
-     * On return, initializes '*statep' with any private data needed for
-     * iteration. */
-    void (*flow_dump_state_init)(void **statep);
+    /* Flow dumping interface.
+     *
+     * This is the back-end for the flow dumping interface described in
+     * dpif.h.  Please read the comments there first, because this code
+     * closely follows it.
+     *
+     * 'flow_dump_create' and 'flow_dump_thread_create' must always return an
+     * initialized and usable data structure and defer error return until
+     * flow_dump_destroy().  This hasn't been a problem for the dpifs that
+     * exist so far.
+     *
+     * 'flow_dump_create' and 'flow_dump_thread_create' must initialize the
+     * structures that they return with dpif_flow_dump_init() and
+     * dpif_flow_dump_thread_init(), respectively.
+     *
+     * If 'terse' is true, then only UID and statistics will
+     * be returned in the dump. Otherwise, all fields will be returned. */
+    struct dpif_flow_dump *(*flow_dump_create)(const struct dpif *dpif,
+                                               bool terse);
+    int (*flow_dump_destroy)(struct dpif_flow_dump *dump);
 
-    /* Attempts to begin dumping the flows in a dpif.  On success, returns 0
-     * and initializes '*iterp' with any shared data needed for iteration.
-     * On failure, returns a positive errno value. */
-    int (*flow_dump_start)(const struct dpif *dpif, void **iterp);
+    struct dpif_flow_dump_thread *(*flow_dump_thread_create)(
+        struct dpif_flow_dump *dump);
+    void (*flow_dump_thread_destroy)(struct dpif_flow_dump_thread *thread);
 
-    /* Attempts to retrieve another flow from 'dpif' for 'iter', using
-     * 'state' for storage. 'iter' must have been initialized by a successful
-     * call to the 'flow_dump_start' function for 'dpif'. 'state' must have
-     * been initialised with a call to the 'flow_dump_state_init' function for
-     * 'dpif.
-     *
-     * On success, updates the output parameters as described below and returns
-     * 0. Returns EOF if the end of the flow table has been reached, or a
-     * positive errno value on error. Multiple threads may use the same 'dpif'
-     * and 'iter' with this function, but all other parameters must be
-     * different for each thread. If this function returns non-zero,
-     * subsequent calls with the same arguments will also return non-zero.
-     *
-     * On success:
-     *
-     *     - If 'key' and 'key_len' are nonnull, then '*key' and '*key_len'
-     *       must be set to Netlink attributes with types OVS_KEY_ATTR_*
-     *       representing the dumped flow's key.
-     *
-     *     - If 'mask' and 'mask_len' are nonnull then '*mask' and '*mask_len'
-     *       must be set to Netlink attributes with types of OVS_KEY_ATTR_*
-     *       representing the dumped flow's mask.
-     *
-     *     - If 'actions' and 'actions_len' are nonnull then they should be set
-     *       to Netlink attributes with types OVS_ACTION_ATTR_* representing
-     *       the dumped flow's actions.
-     *
-     *     - If 'stats' is nonnull then it should be set to the dumped flow's
-     *       statistics.
-     *
-     * All of the returned data is owned by 'dpif', not by the caller, and the
-     * caller must not modify or free it.  'dpif' must guarantee that it
-     * remains accessible and unchanging until at least the next call to
-     * 'flow_dump_next' or 'flow_dump_done' for 'iter' and 'state'. */
-    int (*flow_dump_next)(const struct dpif *dpif, void *iter, void *state,
-                          const struct nlattr **key, size_t *key_len,
-                          const struct nlattr **mask, size_t *mask_len,
-                          const struct nlattr **actions, size_t *actions_len,
-                          const struct dpif_flow_stats **stats);
-
-    /* Determines whether the next call to 'flow_dump_next' with 'state' will
-     * modify or free the keys that it previously returned. 'state' must have
-     * been initialized by a call to 'flow_dump_state_init' for 'dpif'.
-     *
-     * 'dpif' guarantees that data returned by flow_dump_next() will remain
-     * accessible and unchanging until the next call. This function provides a
-     * way for callers to determine whether that guarantee extends beyond the
-     * next call.
-     *
-     * Returns true if the next call to flow_dump_next() is expected to be
-     * destructive to previously returned keys for 'state', false otherwise. */
-    bool (*flow_dump_next_may_destroy_keys)(void *state);
-
-    /* Releases resources from 'dpif' for 'iter', which was initialized by a
-     * successful call to the 'flow_dump_start' function for 'dpif'. Callers
-     * must ensure that this function is called once within a given iteration,
-     * as the final flow dump operation. */
-    int (*flow_dump_done)(const struct dpif *dpif, void *iter);
-
-    /* Releases 'state' which was initialized by a call to the
-     * 'flow_dump_state_init' function for this 'dpif'. */
-    void (*flow_dump_state_uninit)(void *statep);
-
-    /* Performs the 'execute->actions_len' bytes of actions in
-     * 'execute->actions' on the Ethernet frame in 'execute->packet'
-     * and on the packet metadata in 'execute->md'.
-     * May modify both packet and metadata. */
-    int (*execute)(struct dpif *dpif, struct dpif_execute *execute);
+    int (*flow_dump_next)(struct dpif_flow_dump_thread *thread,
+                          struct dpif_flow *flows, int max_flows);
 
     /* Executes each of the 'n_ops' operations in 'ops' on 'dpif', in the order
      * in which they are specified, placing each operation's results in the
-     * "output" members documented in comments.
-     *
-     * This function is optional.  It is only worthwhile to implement it if
-     * 'dpif' can perform operations in batch faster than individually. */
+     * "output" members documented in comments and the 'error' member of each
+     * dpif_op. */
     void (*operate)(struct dpif *dpif, struct dpif_op **ops, size_t n_ops);
 
     /* Enables or disables receiving packets with dpif_recv() for 'dpif'.
@@ -396,6 +316,13 @@ struct dpif_class {
      *          the corresponding poll loop.
      * */
     int (*handlers_set)(struct dpif *dpif, uint32_t n_handlers);
+
+    /* If 'dpif' creates its own I/O polling threads, refreshes poll threads
+     * configuration.  'n_rxqs' configures the number of rx_queues, which
+     * are distributed among threads.  'cmask' configures the cpu mask
+     * for setting the polling threads' cpu affinity. */
+    int (*poll_threads_set)(struct dpif *dpif, unsigned int n_rxqs,
+                            const char *cmask);
 
     /* Translates OpenFlow queue ID 'queue_id' (in host byte order) into a
      * priority value used for setting packet priority. */
@@ -436,9 +363,65 @@ struct dpif_class {
     /* Throws away any queued upcalls that 'dpif' currently has ready to
      * return. */
     void (*recv_purge)(struct dpif *dpif);
+
+    /* When 'dpif' is about to purge the datapath, the higher layer may want
+     * to be notified so that it could try reacting accordingly (e.g. grabbing
+     * all flow stats before they are gone).
+     *
+     * Registers an upcall callback function with 'dpif'.  This is only used
+     * if 'dpif' needs to notify the purging of datapath.  'aux' is passed to
+     * the callback on invocation. */
+    void (*register_dp_purge_cb)(struct dpif *, dp_purge_callback *, void *aux);
+
+    /* For datapaths that run in userspace (i.e. dpif-netdev), threads polling
+     * for incoming packets can directly call upcall functions instead of
+     * offloading packet processing to separate handler threads. Datapaths
+     * that directly call upcall functions should use the functions below to
+     * to register an upcall function and enable / disable upcalls.
+     *
+     * Registers an upcall callback function with 'dpif'. This is only used
+     * if 'dpif' directly executes upcall functions. 'aux' is passed to the
+     * callback on invocation. */
+    void (*register_upcall_cb)(struct dpif *, upcall_callback *, void *aux);
+
+    /* Enables upcalls if 'dpif' directly executes upcall functions. */
+    void (*enable_upcall)(struct dpif *);
+
+    /* Disables upcalls if 'dpif' directly executes upcall functions. */
+    void (*disable_upcall)(struct dpif *);
+
+    /* Get datapath version. Caller is responsible for freeing the string
+     * returned.  */
+    char *(*get_datapath_version)(void);
+
+    /* Conntrack entry dumping interface.
+     *
+     * These functions are used by ct-dpif.c to provide a datapath-agnostic
+     * dumping interface to the connection trackes provided by the
+     * datapaths.
+     *
+     * ct_dump_start() should put in '*state' a pointer to a newly allocated
+     * stucture that will be passed by the caller to ct_dump_next() and
+     * ct_dump_done(). If 'zone' is not NULL, only the entries in '*zone'
+     * should be dumped.
+     *
+     * ct_dump_next() should fill 'entry' with information from a connection
+     * and prepare to dump the next one on a subsequest invocation.
+     *
+     * ct_dump_done should perform any cleanup necessary (including
+     * deallocating the 'state' structure, if applicable). */
+    int (*ct_dump_start)(struct dpif *, struct ct_dpif_dump_state **state,
+                         const uint16_t *zone);
+    int (*ct_dump_next)(struct dpif *, struct ct_dpif_dump_state *,
+                        struct ct_dpif_entry *entry);
+    int (*ct_dump_done)(struct dpif *, struct ct_dpif_dump_state *state);
+
+    /* Flushes the connection tracking tables. If 'zone' is not NULL,
+     * only deletes connections in '*zone'. */
+    int (*ct_flush)(struct dpif *, const uint16_t *zone);
 };
 
-extern const struct dpif_class dpif_linux_class;
+extern const struct dpif_class dpif_netlink_class;
 extern const struct dpif_class dpif_netdev_class;
 
 #ifdef  __cplusplus

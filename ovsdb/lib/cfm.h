@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2011 Nicira, Inc.
+/* Copyright (c) 2010, 2011, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,10 @@
 
 #include "hmap.h"
 #include "openvswitch/types.h"
+#include "packets.h"
 
 struct flow;
-struct ofpbuf;
+struct dp_packet;
 struct netdev;
 struct flow_wildcards;
 
@@ -63,25 +64,50 @@ struct cfm_settings {
     bool check_tnl_key;         /* Verify inbound packet key? */
 };
 
+/* CFM status query. */
+struct cfm_status {
+    /* 0 if not faulted, otherwise a combination of one or more reasons. */
+    enum cfm_fault_reason faults;
+
+    /* 0 if the remote CFM endpoint is operationally down,
+     * 1 if the remote CFM endpoint is operationally up,
+     * -1 if we don't know because the remote CFM endpoint is not in extended
+     * mode. */
+    int remote_opstate;
+
+    uint64_t flap_count;
+
+    /* Ordinarily a "health status" in the range 0...100 inclusive, with 0
+     * being worst and 100 being best, or -1 if the health status is not
+     * well-defined. */
+    int health;
+
+    /* MPIDs of remote maintenance points whose CCMs have been received. */
+    uint64_t *rmps;
+    size_t n_rmps;
+};
+
 void cfm_init(void);
 struct cfm *cfm_create(const struct netdev *);
 struct cfm *cfm_ref(const struct cfm *);
 void cfm_unref(struct cfm *);
 void cfm_run(struct cfm *);
 bool cfm_should_send_ccm(struct cfm *);
-void cfm_compose_ccm(struct cfm *, struct ofpbuf *packet, uint8_t eth_src[6]);
-void cfm_wait(struct cfm *);
+void cfm_compose_ccm(struct cfm *, struct dp_packet *,
+                     const struct eth_addr eth_src);
+long long int cfm_wait(struct cfm *);
 bool cfm_configure(struct cfm *, const struct cfm_settings *);
 void cfm_set_netdev(struct cfm *, const struct netdev *);
 bool cfm_should_process_flow(const struct cfm *cfm, const struct flow *,
                              struct flow_wildcards *);
-void cfm_process_heartbeat(struct cfm *, const struct ofpbuf *packet);
+void cfm_process_heartbeat(struct cfm *, const struct dp_packet *packet);
 bool cfm_check_status_change(struct cfm *);
 int cfm_get_fault(const struct cfm *);
 uint64_t cfm_get_flap_count(const struct cfm *);
 int cfm_get_health(const struct cfm *);
 int cfm_get_opup(const struct cfm *);
 void cfm_get_remote_mpids(const struct cfm *, uint64_t **rmps, size_t *n_rmps);
+void cfm_get_status(const struct cfm *, struct cfm_status *);
 const char *cfm_fault_reason_to_str(int fault);
 
 long long int cfm_wake_time(struct cfm*);

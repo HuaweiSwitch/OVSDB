@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,8 +29,8 @@
 #include "sat-math.h"
 #include "timeval.h"
 #include "util.h"
-#include "vconn.h"
-#include "vlog.h"
+#include "openvswitch/vconn.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(rconn);
 
@@ -95,14 +95,13 @@ struct rconn {
     char *target;               /* vconn name, passed to vconn_open(). */
     bool reliable;
 
-    struct list txq;            /* Contains "struct ofpbuf"s. */
+    struct ovs_list txq;        /* Contains "struct ofpbuf"s. */
 
     int backoff;
     int max_backoff;
     time_t backoff_deadline;
     time_t last_connected;
     time_t last_disconnected;
-    unsigned int packets_sent;
     unsigned int seqno;
     int last_error;
 
@@ -119,7 +118,6 @@ struct rconn {
 
     /* These values are simply for statistics reporting, not used directly by
      * anything internal to the rconn (or ofproto for that matter). */
-    unsigned int packets_received;
     unsigned int n_attempted_connections, n_successful_connections;
     time_t creation_time;
     unsigned long int total_time_connected;
@@ -137,8 +135,8 @@ struct rconn {
     uint8_t dscp;
 
     /* Messages sent or received are copied to the monitor connections. */
-#define MAX_MONITORS 8
-    struct vconn *monitors[8];
+#define MAXIMUM_MONITORS 8
+    struct vconn *monitors[MAXIMUM_MONITORS];
     size_t n_monitors;
 
     uint32_t allowed_versions;
@@ -262,12 +260,9 @@ rconn_create(int probe_interval, int max_backoff, uint8_t dscp,
     rc->last_disconnected = TIME_MIN;
     rc->seqno = 0;
 
-    rc->packets_sent = 0;
-
     rc->probably_admitted = false;
     rc->last_admitted = time_now();
 
-    rc->packets_received = 0;
     rc->n_attempted_connections = 0;
     rc->n_successful_connections = 0;
     rc->creation_time = time_now();
@@ -714,7 +709,6 @@ rconn_recv(struct rconn *rc)
                 rc->last_admitted = time_now();
             }
             rc->last_activity = time_now();
-            rc->packets_received++;
             if (rc->state == S_IDLE) {
                 state_transition(rc, S_ACTIVE);
             }
@@ -751,11 +745,11 @@ rconn_send__(struct rconn *rc, struct ofpbuf *b,
         copy_to_monitor(rc, b);
 
         if (counter) {
-            rconn_packet_counter_inc(counter, ofpbuf_size(b));
+            rconn_packet_counter_inc(counter, b->size);
         }
 
         /* Reuse 'frame' as a private pointer while 'b' is in txq. */
-        ofpbuf_set_frame(b, counter);
+        b->header = counter;
 
         list_push_back(&rc->txq, &b->list_node);
 
@@ -829,15 +823,6 @@ rconn_send_with_limit(struct rconn *rc, struct ofpbuf *b,
     ovs_mutex_unlock(&rc->mutex);
 
     return error;
-}
-
-/* Returns the total number of packets successfully sent on the underlying
- * vconn.  A packet is not counted as sent while it is still queued in the
- * rconn, only when it has been successfuly passed to the vconn.  */
-unsigned int
-rconn_packets_sent(const struct rconn *rc)
-{
-    return rc->packets_sent;
 }
 
 /* Adds 'vconn' to 'rc' as a monitoring connection, to which all messages sent
@@ -962,14 +947,6 @@ rconn_get_version(const struct rconn *rconn)
     ovs_mutex_unlock(&rconn->mutex);
 
     return version;
-}
-
-/* Returns the total number of packets successfully received by the underlying
- * vconn.  */
-unsigned int
-rconn_packets_received(const struct rconn *rc)
-{
-    return rc->packets_received;
 }
 
 /* Returns a string representing the internal state of 'rc'.  The caller must
@@ -1136,19 +1113,19 @@ try_send(struct rconn *rc)
     OVS_REQUIRES(rc->mutex)
 {
     struct ofpbuf *msg = ofpbuf_from_list(rc->txq.next);
-    unsigned int n_bytes = ofpbuf_size(msg);
-    struct rconn_packet_counter *counter = msg->frame;
+    unsigned int n_bytes = msg->size;
+    struct rconn_packet_counter *counter = msg->header;
     int retval;
 
     /* Eagerly remove 'msg' from the txq.  We can't remove it from the list
      * after sending, if sending is successful, because it is then owned by the
      * vconn, which might have freed it already. */
     list_remove(&msg->list_node);
-    ofpbuf_set_frame(msg, NULL);
+    msg->header = NULL;
 
     retval = vconn_send(rc->vconn, msg);
     if (retval) {
-        ofpbuf_set_frame(msg, counter);
+        msg->header = counter;
         list_push_front(&rc->txq, &msg->list_node);
         if (retval != EAGAIN) {
             report_error(rc, retval);
@@ -1157,7 +1134,6 @@ try_send(struct rconn *rc)
         return retval;
     }
     COVERAGE_INC(rconn_sent);
-    rc->packets_sent++;
     if (counter) {
         rconn_packet_counter_dec(counter, n_bytes);
     }
@@ -1171,7 +1147,14 @@ static void
 report_error(struct rconn *rc, int error)
     OVS_REQUIRES(rc->mutex)
 {
-    if (error == EOF) {
+    /* On Windows, when a peer terminates without calling a closesocket()
+     * on socket fd, we get WSAECONNRESET. Don't print warning messages
+     * for that case. */
+    if (error == EOF
+#ifdef _WIN32
+        || error == WSAECONNRESET
+#endif
+        ) {
         /* If 'rc' isn't reliable, then we don't really expect this connection
          * to last forever anyway (probably it's a connection that we received
          * via accept()), so use DBG level to avoid cluttering the logs. */
@@ -1243,9 +1226,9 @@ flush_queue(struct rconn *rc)
     }
     while (!list_is_empty(&rc->txq)) {
         struct ofpbuf *b = ofpbuf_from_list(list_pop_front(&rc->txq));
-        struct rconn_packet_counter *counter = b->frame;
+        struct rconn_packet_counter *counter = b->header;
         if (counter) {
-            rconn_packet_counter_dec(counter, ofpbuf_size(b));
+            rconn_packet_counter_dec(counter, b->size);
         }
         COVERAGE_INC(rconn_discarded);
         ofpbuf_delete(b);
@@ -1284,7 +1267,7 @@ static void
 state_transition(struct rconn *rc, enum state state)
     OVS_REQUIRES(rc->mutex)
 {
-    rc->seqno += (rc->state == S_ACTIVE) != (state == S_ACTIVE);
+    rc->seqno += is_connected_state(rc->state) != is_connected_state(state);
     if (is_connected_state(state) && !is_connected_state(rc->state)) {
         rc->probably_admitted = false;
     }
@@ -1355,7 +1338,7 @@ is_admitted_msg(const struct ofpbuf *b)
     enum ofptype type;
     enum ofperr error;
 
-    error = ofptype_decode(&type, ofpbuf_data(b));
+    error = ofptype_decode(&type, b->data);
     if (error) {
         return false;
     }
@@ -1382,8 +1365,8 @@ is_admitted_msg(const struct ofpbuf *b)
     case OFPTYPE_GROUP_FEATURES_STATS_REPLY:
     case OFPTYPE_TABLE_FEATURES_STATS_REQUEST:
     case OFPTYPE_TABLE_FEATURES_STATS_REPLY:
-    case OFPTYPE_BUNDLE_CONTROL:
-    case OFPTYPE_BUNDLE_ADD_MESSAGE:
+    case OFPTYPE_TABLE_DESC_REQUEST:
+    case OFPTYPE_TABLE_DESC_REPLY:
         return false;
 
     case OFPTYPE_PACKET_IN:
@@ -1420,6 +1403,7 @@ is_admitted_msg(const struct ofpbuf *b)
     case OFPTYPE_ROLE_REQUEST:
     case OFPTYPE_ROLE_REPLY:
     case OFPTYPE_ROLE_STATUS:
+    case OFPTYPE_REQUESTFORWARD:
     case OFPTYPE_SET_FLOW_FORMAT:
     case OFPTYPE_FLOW_MOD_TABLE_ID:
     case OFPTYPE_SET_PACKET_IN_FORMAT:
@@ -1431,6 +1415,11 @@ is_admitted_msg(const struct ofpbuf *b)
     case OFPTYPE_FLOW_MONITOR_CANCEL:
     case OFPTYPE_FLOW_MONITOR_PAUSED:
     case OFPTYPE_FLOW_MONITOR_RESUMED:
+    case OFPTYPE_BUNDLE_CONTROL:
+    case OFPTYPE_BUNDLE_ADD_MESSAGE:
+    case OFPTYPE_NXT_TLV_TABLE_MOD:
+    case OFPTYPE_NXT_TLV_TABLE_REQUEST:
+    case OFPTYPE_NXT_TLV_TABLE_REPLY:
     default:
         return true;
     }

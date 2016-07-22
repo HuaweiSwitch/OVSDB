@@ -1,7 +1,7 @@
 # Generated automatically -- do not modify!    -*- buffer-read-only: t -*-
 # Spec file for Open vSwitch.
 
-# Copyright (C) 2009, 2010 Nicira Networks, Inc.
+# Copyright (C) 2009, 2010, 2015 Nicira Networks, Inc.
 #
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
@@ -17,7 +17,7 @@ Summary: Open vSwitch Kernel Modules
 Group: System Environment/Daemons
 URL: http://www.openvswitch.org/
 Vendor: OpenSource Security Ralf Spenneberg <ralf@os-s.net>
-Version: 2.3.0
+Version: 2.5.0
 
 # The entire source code is ASL 2.0 except datapath/ which is GPLv2
 License: GPLv2
@@ -56,7 +56,7 @@ depmod %{kernel}
 
 %files
 %defattr(-,root,root)
-/lib/modules/%{kernel}/kernel/extra/openvswitch/openvswitch.ko
+/lib/modules/%{kernel}/kernel/extra/openvswitch/*.ko
 
 %changelog
 * Wed Sep 21 2011 Kyle Mestery <kmestery@cisco.com>

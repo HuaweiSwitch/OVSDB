@@ -66,18 +66,20 @@
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
 
+/* Define to 1 if libcap-ng is available. */
+#undef HAVE_LIBCAPNG
+
 /* Define to 1 if you have the `socket' library (-lsocket). */
 #undef HAVE_LIBSOCKET
 
 /* Define to 1 if you have the <linux/if_ether.h> header file. */
 #undef HAVE_LINUX_IF_ETHER_H
 
+/* Define to 1 if you have the <linux/perf_event.h> header file. */
+#undef HAVE_LINUX_PERF_EVENT_H
+
 /* Define to 1 if you have the <linux/types.h> header file. */
 #undef HAVE_LINUX_TYPES_H
-
-/* Define to 1 if you have __malloc_hook, __realloc_hook, and __free_hook in
-   <malloc.h>. */
-#undef HAVE_MALLOC_HOOKS
 
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
@@ -103,6 +105,9 @@
 
 /* Define to 1 if `posix_memalign' works. */
 #undef HAVE_POSIX_MEMALIGN
+
+/* Define if compiler supports #pragma message directive */
+#undef HAVE_PRAGMA_MESSAGE
 
 /* Define to 1 if you have the `pthread_set_name_np' function. */
 #undef HAVE_PTHREAD_SET_NAME_NP
@@ -173,9 +178,6 @@
    */
 #undef LT_OBJDIR
 
-/* Define to 1 if your C compiler doesn't accept -c and -o together. */
-#undef NO_MINUS_C_MINUS_O
-
 /* Name of package */
 #undef PACKAGE
 
@@ -228,6 +230,12 @@
 /* Version number of package */
 #undef VERSION
 
+/* DPDK vhost-cuse support enabled, vhost-user disabled. */
+#undef VHOST_CUSE
+
+/* System uses the Visual Studio build target. */
+#undef VSTUDIO_DDK
+
 /* Define to 1 if building on WIN32. */
 #undef WIN32
 
@@ -241,6 +249,11 @@
 # ifndef WORDS_BIGENDIAN
 #  undef WORDS_BIGENDIAN
 # endif
+#endif
+
+/* Enable large inode numbers on Mac OS X 10.5.  */
+#ifndef _DARWIN_USE_64_BIT_INODE
+# define _DARWIN_USE_64_BIT_INODE 1
 #endif
 
 /* Number of bits in a file offset, on hosts where this is settable. */

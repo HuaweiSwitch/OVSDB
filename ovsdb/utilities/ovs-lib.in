@@ -128,6 +128,10 @@ pid_exists () {
     test -d /proc/"$1"
 }
 
+pid_comm_check () {
+    [ "$1" = "`cat /proc/$2/comm`" ]
+}
+
 start_daemon () {
     priority=$1
     wrapper=$2
@@ -198,11 +202,18 @@ start_daemon () {
 stop_daemon () {
     if test -e "$rundir/$1.pid"; then
         if pid=`cat "$rundir/$1.pid"`; then
-            for action in TERM .1 .25 .65 1 1 1 1 KILL 1 1 1 2 10 15 30 FAIL; do
+            for action in EXIT .1 .25 .65 1 \
+                          TERM .1 .25 .65 1 1 1 1 \
+                          KILL 1 1 1 2 10 15 30 \
+                          FAIL; do
                 if pid_exists "$pid" >/dev/null 2>&1; then :; else
                     return 0
                 fi
                 case $action in
+                    EXIT)
+                        action "Exiting $1 ($pid)" \
+                            ${bindir}/ovs-appctl -T 1 -t $rundir/$1.$pid.ctl exit
+                        ;;
                     TERM)
                         action "Killing $1 ($pid)" kill $pid
                         ;;
@@ -244,5 +255,132 @@ daemon_status () {
 
 daemon_is_running () {
     pidfile=$rundir/$1.pid
-    test -e "$pidfile" && pid=`cat "$pidfile"` && pid_exists "$pid"
+    test -e "$pidfile" && pid=`cat "$pidfile"` && pid_exists "$pid" && pid_comm_check $1 $pid
 } >/dev/null 2>&1
+
+# Prints commands needed to move the ip address from interface $1 to interface
+# $2
+move_ip_address () {
+    if [ -z "$1" ] || [ -z "$2" ]; then
+        return
+    fi
+    dev="$1"
+    dst="$2"
+
+    # IP addresses (including IPv6).
+    echo "ip addr flush dev $dev 2>/dev/null" # Suppresses "Nothing to flush".
+    ip addr show dev $dev | while read addr; do
+        set -- $addr
+
+        # Check and trim family.
+        family=$1
+        shift
+        case $family in
+            inet | inet6) ;;
+            *) continue ;;
+        esac
+
+        # Trim device off the end--"ip" insists on having "dev" precede it.
+        addrcmd=
+        while test $# != 0; do
+            case $1 in
+                dynamic)
+                    # Omit kernel-maintained route.
+                    continue 2
+                    ;;
+                scope)
+                    if test "$2" = link -a "$family" != inet6; then
+                        # Omit route derived from IP address, e.g.
+                        # 172.16.0.0/16 derived from 172.16.12.34,
+                        # but preserve IPv6 link-local address.
+                        continue 2
+                    fi
+                    ;;
+                "$dev"|"$dev:"*)
+                    # Address label string
+                    label=`echo $1 | sed "s/$dev/$dst/"`
+                    addrcmd="$addrcmd label $label"
+                    shift
+                    continue
+                    ;;
+            esac
+            addrcmd="$addrcmd $1"
+            shift
+        done
+        if test "$1" != "$dev"; then
+            addrcmd="$addrcmd $1"
+        fi
+
+        echo ip -f $family addr add $addrcmd dev $dst
+    done
+}
+
+# Prints commands needed to move the ip route of interface $1 to interface $2
+move_ip_routes () {
+    if [ -z "$1" ] || [ -z "$2" ]; then
+        return
+    fi
+    dev="$1"
+    dst="$2"
+    echo "ip route flush dev $dev proto boot 2>/dev/null" # Suppresses "Nothing to flush".
+    ip route show dev $dev | while read route; do
+        # "proto kernel" routes are installed by the kernel automatically.
+        case $route in
+            *" proto kernel "*) continue ;;
+        esac
+
+        echo "ip route add $route dev $dst"
+    done
+}
+
+ovsdb_tool () {
+    ovsdb-tool -vconsole:off "$@"
+}
+
+create_db () {
+    DB_FILE="$1"
+    DB_SCHEMA="$2"
+    action "Creating empty database $DB_FILE" ovsdb_tool create "$DB_FILE" "$DB_SCHEMA"
+}
+
+upgrade_db () {
+    DB_FILE="$1"
+    DB_SCHEMA="$2"
+
+    schemaver=`ovsdb_tool schema-version "$DB_SCHEMA"`
+    if test ! -e "$DB_FILE"; then
+        log_warning_msg "$DB_FILE does not exist"
+        install -d -m 755 -o root -g root `dirname $DB_FILE`
+        create_db "$DB_FILE" "$DB_SCHEMA"
+    elif test X"`ovsdb_tool needs-conversion "$DB_FILE" "$DB_SCHEMA"`" != Xno; then
+        # Back up the old version.
+        version=`ovsdb_tool db-version "$DB_FILE"`
+        cksum=`ovsdb_tool db-cksum "$DB_FILE" | awk '{print $1}'`
+        backup=$DB_FILE.backup$version-$cksum
+        action "Backing up database to $backup" cp "$DB_FILE" "$backup" || return 1
+
+        # Compact database.  This is important if the old schema did not enable
+        # garbage collection (i.e. if it did not have any tables with "isRoot":
+        # true) but the new schema does.  In that situation the old database
+        # may contain a transaction that creates a record followed by a
+        # transaction that creates the first use of the record.  Replaying that
+        # series of transactions against the new database schema (as "convert"
+        # does) would cause the record to be dropped by the first transaction,
+        # then the second transaction would cause a referential integrity
+        # failure (for a strong reference).
+        #
+        # Errors might occur on an Open vSwitch downgrade if ovsdb-tool doesn't
+        # understand some feature of the schema used in the OVSDB version that
+        # we're downgrading from, so we don't give up on error.
+        action "Compacting database" ovsdb_tool compact "$DB_FILE"
+
+        # Upgrade or downgrade schema.
+        if action "Converting database schema" ovsdb_tool convert "$DB_FILE" "$DB_SCHEMA"; then
+            :
+        else
+            log_warning_msg "Schema conversion failed, using empty database instead"
+            rm -f "$DB_FILE"
+            create_db "$DB_FILE" "$DB_SCHEMA"
+        fi
+    fi
+}

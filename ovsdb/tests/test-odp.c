@@ -15,18 +15,17 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
+#include "odp-util.h"
 #include <stdio.h>
-
 #include "dynamic-string.h"
 #include "flow.h"
 #include "match.h"
-#include "odp-util.h"
 #include "ofp-parse.h"
 #include "ofpbuf.h"
-#include "util.h"
-#include "vlog.h"
 #include "ovstest.h"
+#include "util.h"
+#include "openvswitch/vlog.h"
 
 static int
 parse_keys(bool wc_keys)
@@ -55,8 +54,19 @@ parse_keys(bool wc_keys)
         }
 
         if (!wc_keys) {
+            struct odp_flow_key_parms odp_parms = {
+                .flow = &flow,
+                .support = {
+                    .recirc = true,
+                    .ct_state = true,
+                    .ct_zone = true,
+                    .ct_mark = true,
+                    .ct_label = true,
+                },
+            };
+
             /* Convert odp_key to flow. */
-            fitness = odp_flow_key_to_flow(ofpbuf_data(&odp_key), ofpbuf_size(&odp_key), &flow);
+            fitness = odp_flow_key_to_flow(odp_key.data, odp_key.size, &flow);
             switch (fitness) {
                 case ODP_FIT_PERFECT:
                     break;
@@ -76,12 +86,12 @@ parse_keys(bool wc_keys)
             /* Convert cls_rule back to odp_key. */
             ofpbuf_uninit(&odp_key);
             ofpbuf_init(&odp_key, 0);
-            odp_flow_key_from_flow(&odp_key, &flow, NULL,
-                                   flow.in_port.odp_port);
+            odp_parms.odp_in_port = flow.in_port.odp_port;
+            odp_flow_key_from_flow(&odp_parms, &odp_key);
 
-            if (ofpbuf_size(&odp_key) > ODPUTIL_FLOW_KEY_BYTES) {
+            if (odp_key.size > ODPUTIL_FLOW_KEY_BYTES) {
                 printf ("too long: %"PRIu32" > %d\n",
-                        ofpbuf_size(&odp_key), ODPUTIL_FLOW_KEY_BYTES);
+                        odp_key.size, ODPUTIL_FLOW_KEY_BYTES);
                 exit_code = 1;
             }
         }
@@ -89,16 +99,17 @@ parse_keys(bool wc_keys)
         /* Convert odp_key to string. */
         ds_init(&out);
         if (wc_keys) {
-            odp_flow_format(ofpbuf_data(&odp_key), ofpbuf_size(&odp_key),
-                            ofpbuf_data(&odp_mask), ofpbuf_size(&odp_mask), NULL, &out, false);
+            odp_flow_format(odp_key.data, odp_key.size,
+                            odp_mask.data, odp_mask.size, NULL, &out, false);
         } else {
-            odp_flow_key_format(ofpbuf_data(&odp_key), ofpbuf_size(&odp_key), &out);
+            odp_flow_key_format(odp_key.data, odp_key.size, &out);
         }
         puts(ds_cstr(&out));
         ds_destroy(&out);
 
     next:
         ofpbuf_uninit(&odp_key);
+        ofpbuf_uninit(&odp_mask);
     }
     ds_destroy(&in);
 
@@ -127,7 +138,7 @@ parse_actions(void)
 
         /* Convert odp_actions back to string. */
         ds_init(&out);
-        format_odp_actions(&out, ofpbuf_data(&odp_actions), ofpbuf_size(&odp_actions));
+        format_odp_actions(&out, odp_actions.data, odp_actions.size);
         puts(ds_cstr(&out));
         ds_destroy(&out);
 
@@ -149,7 +160,7 @@ parse_filter(char *filter_parse)
 
     vlog_set_levels_from_string_assert("odp_util:console:dbg");
     if (filter_parse && !strncmp(filter_parse, "filter=", 7)) {
-        filter = strdup(filter_parse+7);
+        filter = xstrdup(filter_parse + 7);
         memset(&flow_filter, 0, sizeof(flow_filter));
         memset(&wc_filter, 0, sizeof(wc_filter));
 
@@ -185,9 +196,9 @@ parse_filter(char *filter_parse)
             struct match match, match_filter;
             struct minimatch minimatch;
 
-            odp_flow_key_to_flow(ofpbuf_data(&odp_key), ofpbuf_size(&odp_key), &flow);
-            odp_flow_key_to_mask(ofpbuf_data(&odp_mask), ofpbuf_size(&odp_mask), &wc.masks,
-                                 &flow);
+            odp_flow_key_to_flow(odp_key.data, odp_key.size, &flow);
+            odp_flow_key_to_mask(odp_mask.data, odp_mask.size, odp_key.data,
+                                 odp_key.size, &wc, &flow);
             match_init(&match, &flow, &wc);
 
             match_init(&match_filter, &flow_filter, &wc);
@@ -202,8 +213,8 @@ parse_filter(char *filter_parse)
         }
         /* Convert odp_key to string. */
         ds_init(&out);
-        odp_flow_format(ofpbuf_data(&odp_key), ofpbuf_size(&odp_key),
-                        ofpbuf_data(&odp_mask), ofpbuf_size(&odp_mask), NULL, &out, false);
+        odp_flow_format(odp_key.data, odp_key.size,
+                        odp_mask.data, odp_mask.size, NULL, &out, false);
         puts(ds_cstr(&out));
         ds_destroy(&out);
 

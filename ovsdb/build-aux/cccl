@@ -45,7 +45,7 @@ esac
 # We'll assume cl to start out
 prog=cl
 # opts specifies the command line to pass to the MSVC program
-clopt="${slash}nologo"
+clopt="${slash}nologo ${slash}FS"
 linkopt="${slash}nologo"
 # gotparam is 0 if we didn't ever see a param, in which case we show usage()
 gotparam=
@@ -87,6 +87,14 @@ EOF
         # cl only supports one debugging level
         clopt="$clopt ${slash}Zi"
         linkopt="$linkopt ${slash}DEBUG"
+        ;;
+
+    -O0)
+        clopt="$clopt ${slash}Od ${slash}D_DEBUG"
+        ;;
+
+    -O2)
+        clopt="$clopt ${slash}O2"
         ;;
 
     -L*)
@@ -140,6 +148,14 @@ EOF
         #ignore warnings
         ;;
 
+    -Q*)
+        #ignore link warnings
+        ;;
+
+    -fno-strict-aliasing*)
+        #ignore aliasing
+        ;;
+
     -isystem)
         shift
         clopt="$clopt -I$1"
@@ -190,6 +206,8 @@ else
     opts=$linkopt
 fi
 
-echo "$prog $opts"
+if test x$V = x1 ; then
+    echo "$prog $opts"
+fi
 exec $prog $opts
 exit 0

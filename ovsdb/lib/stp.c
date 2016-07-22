@@ -28,13 +28,17 @@
 #include "byte-order.h"
 #include "connectivity.h"
 #include "ofpbuf.h"
+#include "ovs-atomic.h"
+#include "dp-packet.h"
 #include "packets.h"
 #include "seq.h"
 #include "unixctl.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(stp);
+
+static struct vlog_rate_limit stp_rl = VLOG_RATE_LIMIT_INIT(60, 60);
 
 #define STP_PROTOCOL_ID 0x0000
 #define STP_PROTOCOL_VERSION 0x00
@@ -82,6 +86,7 @@ struct stp_timer {
 
 struct stp_port {
     struct stp *stp;
+    char *port_name;                /* Human-readable name for log messages. */
     void *aux;                      /* Auxiliary data the user may retrieve. */
     int port_id;                    /* 8.5.5.1: Unique port identifier. */
     enum stp_state state;           /* 8.5.5.2: Current state. */
@@ -106,7 +111,7 @@ struct stp_port {
 };
 
 struct stp {
-    struct list node;               /* Node in all_stps list. */
+    struct ovs_list node;           /* Node in all_stps list. */
 
     /* Static bridge data. */
     char *name;                     /* Human-readable name for log messages. */
@@ -140,15 +145,15 @@ struct stp {
     /* Interface to client. */
     bool fdb_needs_flush;          /* MAC learning tables needs flushing. */
     struct stp_port *first_changed_port;
-    void (*send_bpdu)(struct ofpbuf *bpdu, int port_no, void *aux);
+    void (*send_bpdu)(struct dp_packet *bpdu, int port_no, void *aux);
     void *aux;
 
     struct ovs_refcount ref_cnt;
 };
 
 static struct ovs_mutex mutex;
-static struct list all_stps__ = LIST_INITIALIZER(&all_stps__);
-static struct list *const all_stps OVS_GUARDED_BY(mutex) = &all_stps__;
+static struct ovs_list all_stps__ = OVS_LIST_INITIALIZER(&all_stps__);
+static struct ovs_list *const all_stps OVS_GUARDED_BY(mutex) = &all_stps__;
 
 #define FOR_EACH_ENABLED_PORT(PORT, STP)                        \
     for ((PORT) = stp_next_enabled_port((STP), (STP)->ports);   \
@@ -254,7 +259,7 @@ stp_init(void)
  */
 struct stp *
 stp_create(const char *name, stp_identifier bridge_id,
-           void (*send_bpdu)(struct ofpbuf *bpdu, int port_no, void *aux),
+           void (*send_bpdu)(struct dp_packet *bpdu, int port_no, void *aux),
            void *aux)
 {
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
@@ -327,11 +332,17 @@ stp_ref(const struct stp *stp_)
 void
 stp_unref(struct stp *stp)
 {
-    if (stp && ovs_refcount_unref(&stp->ref_cnt) == 1) {
+    if (stp && ovs_refcount_unref_relaxed(&stp->ref_cnt) == 1) {
+        size_t i;
+
         ovs_mutex_lock(&mutex);
         list_remove(&stp->node);
         ovs_mutex_unlock(&mutex);
         free(stp->name);
+
+        for (i = 0; i < STP_MAX_PORTS; i++) {
+            free(stp->ports[i].port_name);
+        }
         free(stp);
     }
 }
@@ -664,24 +675,20 @@ stp_state_name(enum stp_state state)
 
 /* Returns true if 'state' is one in which packets received on a port should
  * be forwarded, false otherwise.
- *
- * Returns true if 'state' is STP_DISABLED, since presumably in that case the
- * port should still work, just not have STP applied to it. */
+ */
 bool
 stp_forward_in_state(enum stp_state state)
 {
-    return (state & (STP_DISABLED | STP_FORWARDING)) != 0;
+    return (state & STP_FORWARDING) != 0;
 }
 
 /* Returns true if 'state' is one in which MAC learning should be done on
  * packets received on a port, false otherwise.
- *
- * Returns true if 'state' is STP_DISABLED, since presumably in that case the
- * port should still work, just not have STP applied to it. */
+ */
 bool
 stp_learn_in_state(enum stp_state state)
 {
-    return (state & (STP_DISABLED | STP_LEARNING | STP_FORWARDING)) != 0;
+    return (state & (STP_LEARNING | STP_FORWARDING)) != 0;
 }
 
 /* Returns true if 'state' is one in which bpdus should be forwarded on a
@@ -793,6 +800,18 @@ stp_port_get_stp(struct stp_port *p)
     stp = p->stp;
     ovs_mutex_unlock(&mutex);
     return stp;
+}
+
+void
+stp_port_set_name(struct stp_port *p, const char *name)
+{
+    char *old;
+
+    ovs_mutex_lock(&mutex);
+    old = p->port_name;
+    p->port_name = xstrdup(name);
+    free(old);
+    ovs_mutex_unlock(&mutex);
 }
 
 /* Sets the 'aux' member of 'p'.
@@ -1019,6 +1038,8 @@ stp_transmit_config(struct stp_port *p) OVS_REQUIRES(mutex)
         return;
     }
     if (p->hold_timer.active) {
+        VLOG_DBG_RL(&stp_rl, "bridge: %s, port: %s, transmit config bpdu pending",
+                    stp->name, p->port_name);
         p->config_pending = true;
     } else {
         struct stp_config_bpdu config;
@@ -1049,6 +1070,8 @@ stp_transmit_config(struct stp_port *p) OVS_REQUIRES(mutex)
         if (ntohs(config.message_age) < stp->max_age) {
             p->topology_change_ack = false;
             p->config_pending = false;
+            VLOG_DBG_RL(&stp_rl, "bridge: %s, port: %s, transmit config bpdu",
+                        stp->name, p->port_name);
             stp_send_bpdu(p, &config, sizeof config);
             stp_start_timer(&p->hold_timer, 0);
         }
@@ -1119,9 +1142,12 @@ stp_transmit_tcn(struct stp *stp) OVS_REQUIRES(mutex)
 {
     struct stp_port *p = stp->root_port;
     struct stp_tcn_bpdu tcn_bpdu;
+
     if (!p) {
         return;
     }
+    VLOG_DBG_RL(&stp_rl, "bridge: %s, root port: %s, transmit tcn", stp->name,
+                p->port_name);
     tcn_bpdu.header.protocol_id = htons(STP_PROTOCOL_ID);
     tcn_bpdu.header.protocol_version = STP_PROTOCOL_VERSION;
     tcn_bpdu.header.bpdu_type = STP_TYPE_TCN;
@@ -1367,6 +1393,9 @@ stp_message_age_timer_expiry(struct stp_port *p) OVS_REQUIRES(mutex)
 {
     struct stp *stp = p->stp;
     bool root = stp_is_root_bridge(stp);
+
+    VLOG_DBG_RL(&stp_rl, "bridge: %s, port: %s, message age timer expired",
+                stp->name, p->port_name);
     stp_become_designated_port(p);
     stp_configuration_update(stp);
     stp_port_state_selection(stp);
@@ -1438,7 +1467,12 @@ stp_initialize_port(struct stp_port *p, enum stp_state state)
 {
     ovs_assert(state & (STP_DISABLED | STP_BLOCKING));
     stp_become_designated_port(p);
-    stp_set_port_state(p, state);
+
+    if (!p->state && state == STP_DISABLED) {
+        p->state = state; /* Do not trigger state change when initializing. */
+    } else {
+        stp_set_port_state(p, state);
+    }
     p->topology_change_ack = false;
     p->config_pending = false;
     p->change_detection_enabled = true;
@@ -1536,19 +1570,19 @@ stp_send_bpdu(struct stp_port *p, const void *bpdu, size_t bpdu_size)
 {
     struct eth_header *eth;
     struct llc_header *llc;
-    struct ofpbuf *pkt;
+    struct dp_packet *pkt;
 
     /* Skeleton. */
-    pkt = ofpbuf_new(ETH_HEADER_LEN + LLC_HEADER_LEN + bpdu_size);
-    eth = ofpbuf_put_zeros(pkt, sizeof *eth);
-    llc = ofpbuf_put_zeros(pkt, sizeof *llc);
-    ofpbuf_set_frame(pkt, eth);
-    ofpbuf_set_l3(pkt, ofpbuf_put(pkt, bpdu, bpdu_size));
+    pkt = dp_packet_new(ETH_HEADER_LEN + LLC_HEADER_LEN + bpdu_size);
+    eth = dp_packet_put_zeros(pkt, sizeof *eth);
+    llc = dp_packet_put_zeros(pkt, sizeof *llc);
+    dp_packet_reset_offsets(pkt);
+    dp_packet_set_l3(pkt, dp_packet_put(pkt, bpdu, bpdu_size));
 
     /* 802.2 header. */
-    memcpy(eth->eth_dst, eth_addr_stp, ETH_ADDR_LEN);
+    eth->eth_dst = eth_addr_stp;
     /* p->stp->send_bpdu() must fill in source address. */
-    eth->eth_type = htons(ofpbuf_size(pkt) - ETH_HEADER_LEN);
+    eth->eth_type = htons(dp_packet_size(pkt) - ETH_HEADER_LEN);
 
     /* LLC header. */
     llc->llc_dsap = STP_LLC_DSAP;

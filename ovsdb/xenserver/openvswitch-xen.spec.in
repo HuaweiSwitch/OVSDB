@@ -1,21 +1,29 @@
 # Spec file for Open vSwitch.
 
-# Copyright (C) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+# Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
 #
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
 # notice and this notice are preserved.  This file is offered as-is,
 # without warranty of any kind.
 
-# When building, the rpmbuild command line should define
-# openvswitch_version, kernel_name, kernel_version, and kernel_flavor
-# using -D arguments.
+# For XenServer version < 6.5, when building, the rpmbuild command line
+# should define openvswitch_version, kernel_name, kernel_version and
+# kernel_flavor using -D arguments.
 # for example:
 #
 #    rpmbuild -D "openvswitch_version 1.1.0+build123"
 #      -D "kernel_name  NAME-xen"
 #      -D "kernel_version 2.6.32.12-0.7.1.xs5.6.100.323.170596"
 #      -D "kernel_flavor xen"
+#      -bb /usr/src/redhat/SPECS/openvswitch-xen.spec
+#
+# For XenServer version >= 6.5, use kernel_uname which should be
+# the `uname -r` output.
+# for example:
+#
+#    rpmbuild -D "openvswitch_version 2.3.0+build123"
+#      -D "kernel_uname  3.10.0+2"
 #      -bb /usr/src/redhat/SPECS/openvswitch-xen.spec
 #
 # If tests have to be skipped while building, specify the '--without check'
@@ -26,6 +34,11 @@
 %define openvswitch_version @VERSION@
 %endif
 
+%if %{?kernel_uname:1}%{!?kernel_uname:0}
+%define kernel_name kernel
+%define kernel_version %{kernel_uname}
+%endif
+
 %if %{?kernel_name:0}%{!?kernel_name:1}
 %define kernel %(rpm -qa 'kernel*xen-devel' | head -1)
 %define kernel_name %(rpm -q --queryformat "%%{Name}" %{kernel} | sed 's/-devel//' | sed 's/kernel-//')
@@ -33,13 +46,15 @@
 %define kernel_flavor xen
 %endif
 
-%define xen_version %{kernel_version}%{kernel_flavor}
+%if %{?xen_version:0}%{!?xen_version:1}
+%define xen_version %{kernel_version}%{?kernel_flavor:%{kernel_flavor}}
+%endif
 
 # bump this when breaking compatibility with userspace
 %define module_abi_version 0
 
 # build-supplemental-pack.sh requires this naming for kernel module packages
-%define module_package modules-%{kernel_flavor}-%{kernel_version}
+%define module_package modules%{?kernel_flavor:-%{kernel_flavor}}-%{kernel_version}
 
 %bcond_without check
 
@@ -65,18 +80,23 @@ traffic.
 Summary: Open vSwitch kernel module
 Group: System Environment/Kernel
 License: GPLv2
-Provides: %{name}-modules-%{kernel_flavor} = %{kernel_version}, openvswitch.ko.%{module_abi_version}
-Requires: kernel-%{kernel_name} = %{kernel_version}
+Provides: %{name}-modules%{?kernel_flavor:-%{kernel_flavor}} = %{kernel_version}, openvswitch.ko.%{module_abi_version}
+%if %{?kernel_uname:0}%{!?kernel_uname:1}
+Requires: kernel%{?kernel_flavor:-%{kernel_flavor}} = %{kernel_version}
+%endif
+%if %{?kernel_uname:1}%{!?kernel_uname:0}
+Requires: kernel-uname-r = %{kernel_version}
+%endif
 
 %description %{module_package}
 Open vSwitch Linux kernel module compiled against kernel version
-%{xen_version}.
+%{kernel_version}%{?kernel_flavor:%{kernel_flavor}}.
 
 %prep
 %setup -q -n openvswitch-%{openvswitch_version}
 
 %build
-./configure --prefix=/usr --sysconfdir=/etc --localstatedir=%{_localstatedir} --with-linux=/lib/modules/%{xen_version}/build --enable-ssl
+./configure --prefix=/usr --sysconfdir=/etc --localstatedir=%{_localstatedir} --with-linux=/lib/modules/%{xen_version}/build --enable-ssl CFLAGS='-g -O2 -msse -msse2'
 make %{_smp_mflags}
 
 %install
@@ -120,8 +140,6 @@ install -m 644 \
 
 install -d -m 755 $RPM_BUILD_ROOT/lib/modules/%{xen_version}/extra/openvswitch
 find datapath/linux -name *.ko -exec install -m 755  \{\} $RPM_BUILD_ROOT/lib/modules/%{xen_version}/extra/openvswitch \;
-install python/compat/uuid.py $RPM_BUILD_ROOT/usr/share/openvswitch/python
-install python/compat/argparse.py $RPM_BUILD_ROOT/usr/share/openvswitch/python
 
 install -d -m 755 $RPM_BUILD_ROOT/etc/xensource/bugtool
 cp -rf $RPM_BUILD_ROOT/usr/share/openvswitch/bugtool-plugins/* $RPM_BUILD_ROOT/etc/xensource/bugtool
@@ -129,14 +147,18 @@ cp -rf $RPM_BUILD_ROOT/usr/share/openvswitch/bugtool-plugins/* $RPM_BUILD_ROOT/e
 # Get rid of stuff we don't want to make RPM happy.
 rm \
     $RPM_BUILD_ROOT/usr/bin/ovs-benchmark \
+    $RPM_BUILD_ROOT/usr/bin/ovs-testcontroller \
     $RPM_BUILD_ROOT/usr/bin/ovs-l3ping \
     $RPM_BUILD_ROOT/usr/bin/ovs-pki \
     $RPM_BUILD_ROOT/usr/bin/ovs-test \
     $RPM_BUILD_ROOT/usr/share/man/man1/ovs-benchmark.1 \
+    $RPM_BUILD_ROOT/usr/share/man/man8/ovs-testcontroller.8 \
     $RPM_BUILD_ROOT/usr/share/man/man8/ovs-l3ping.8 \
     $RPM_BUILD_ROOT/usr/share/man/man8/ovs-pki.8 \
     $RPM_BUILD_ROOT/usr/share/man/man8/ovs-test.8
 (cd "$RPM_BUILD_ROOT" && rm -f usr/lib/lib*)
+(cd "$RPM_BUILD_ROOT" && rm -rf usr/include)
+(cd "$RPM_BUILD_ROOT" && rm -rf usr/lib/pkgconfig)
 
 install -d -m 755 $RPM_BUILD_ROOT/var/lib/openvswitch
 
@@ -414,6 +436,8 @@ exit 0
 
 %files
 %defattr(-,root,root)
+/etc/bash_completion.d/ovs-appctl-bashcomp.bash
+/etc/bash_completion.d/ovs-vsctl-bashcomp.bash
 /etc/init.d/openvswitch
 /etc/init.d/openvswitch-xapi-update
 /etc/xapi.d/plugins/openvswitch-cfg-update
@@ -444,6 +468,7 @@ exit 0
 /usr/bin/ovs-appctl
 /usr/bin/ovs-dpctl
 /usr/bin/ovs-dpctl-top
+/usr/bin/ovs-docker
 /usr/bin/ovs-ofctl
 /usr/bin/ovs-parse-backtrace
 /usr/bin/ovs-pcap
@@ -480,6 +505,13 @@ exit 0
 %exclude /usr/share/openvswitch/python/*.py[co]
 %exclude /usr/share/openvswitch/python/ovs/*.py[co]
 %exclude /usr/share/openvswitch/python/ovs/db/*.py[co]
+%exclude /usr/bin/ovn-*
+%exclude /usr/share/man/man5/ovn-*
+%exclude /usr/share/man/man7/ovn-*
+%exclude /usr/share/man/man8/ovn-*
+%exclude /usr/share/openvswitch/ovn-*
+%exclude /usr/share/openvswitch/scripts/ovn-*
 
 %files %{module_package}
 /lib/modules/%{xen_version}/extra/openvswitch/openvswitch.ko
+/lib/modules/%{xen_version}/extra/openvswitch/vport-*.ko

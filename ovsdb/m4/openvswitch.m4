@@ -1,6 +1,6 @@
 # -*- autoconf -*-
 
-# Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+# Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+m4_include([m4/compat.at])
 
 dnl Checks for --enable-coverage and updates CFLAGS and LDFLAGS appropriately.
 AC_DEFUN([OVS_CHECK_COVERAGE],
@@ -28,8 +30,20 @@ AC_DEFUN([OVS_CHECK_COVERAGE],
       esac],
      [coverage=false])
    if $coverage; then
-     CFLAGS="$CFLAGS -O0 --coverage"
-     LDFLAGS="$LDFLAGS --coverage"
+     # Autoconf by default puts "-g -O2" in CFLAGS.  We need to remove the -O2
+     # option for coverage to be useful.  This does it without otherwise
+     # interfering with anything that the user might have put there.
+     old_CFLAGS=$CFLAGS
+     CFLAGS=
+     for option in $old_CFLAGS; do
+        case $option in
+            (-O2) ;;
+            (*) CFLAGS="$CFLAGS $option" ;;
+        esac
+     done
+
+     OVS_CFLAGS="$OVS_CFLAGS --coverage"
+     OVS_LDFLAGS="$OVS_LDFLAGS --coverage"
    fi])
 
 dnl Checks for --enable-ndebug and defines NDEBUG if it is specified.
@@ -56,6 +70,22 @@ AC_DEFUN([OVS_CHECK_ESX],
       AC_DEFINE([ESX], [1], [Define to 1 if building on ESX.])
    fi])
 
+dnl Checks for MSVC x64 compiler.
+AC_DEFUN([OVS_CHECK_WIN64],
+  [AC_CACHE_CHECK(
+    [for MSVC x64 compiler],
+    [cl_cv_x64],
+    [dnl "cl" writes x64 output to stdin:
+     if (cl) 2>&1 | grep 'x64' >/dev/null 2>&1; then
+       cl_cv_x64=yes
+       MSVC64_LDFLAGS=" /MACHINE:X64 "
+     else
+       cl_cv_x64=no
+       MSVC64_LDFLAGS=""
+     fi])
+     AC_SUBST([MSVC64_LDFLAGS])
+])
+
 dnl Checks for WINDOWS.
 AC_DEFUN([OVS_CHECK_WIN32],
   [AC_CHECK_HEADER([windows.h],
@@ -72,9 +102,25 @@ AC_DEFUN([OVS_CHECK_WIN32],
             AC_MSG_ERROR([Invalid --with-pthread value])
               ;;
             *)
-            PTHREAD_INCLUDES="-I$withval/include"
-            PTHREAD_LDFLAGS="-L$withval/lib/x86"
+            if (cl) 2>&1 | grep 'x64' >/dev/null 2>&1; then
+              cl_cv_x64=yes
+            else
+              cl_cv_x64=no
+            fi
+            if test "$cl_cv_x64" = yes; then
+                PTHREAD_WIN32_DIR=$withval/lib/x64
+                PTHREAD_WIN32_DIR_DLL=/$(echo ${withval} | ${SED} -e 's/://')/dll/x64
+                PTHREAD_WIN32_DIR_DLL_WIN_FORM=$withval/dll/x64
+            else
+                PTHREAD_WIN32_DIR=$withval/lib/x86
+                PTHREAD_WIN32_DIR_DLL=/$(echo ${withval} | ${SED} -e 's/://')/dll/x86
+                PTHREAD_WIN32_DIR_DLL_WIN_FORM=$withval/dll/x86
+            fi
+            PTHREAD_INCLUDES=-I$withval/include
+            PTHREAD_LDFLAGS=-L$PTHREAD_WIN32_DIR
             PTHREAD_LIBS="-lpthreadVC2"
+            AC_SUBST([PTHREAD_WIN32_DIR_DLL_WIN_FORM])
+            AC_SUBST([PTHREAD_WIN32_DIR_DLL])
             AC_SUBST([PTHREAD_INCLUDES])
             AC_SUBST([PTHREAD_LDFLAGS])
             AC_SUBST([PTHREAD_LIBS])
@@ -84,11 +130,48 @@ AC_DEFUN([OVS_CHECK_WIN32],
             AC_MSG_ERROR([pthread directory not specified])
          ]
       )
+      AC_ARG_WITH([debug],
+         [AS_HELP_STRING([--with-debug],
+            [Build without compiler optimizations])],
+         [
+            MSVC_CFLAGS="-O0"
+            AC_SUBST([MSVC_CFLAGS])
+         ], [
+            MSVC_CFLAGS="-O2"
+            AC_SUBST([MSVC_CFLAGS])
+         ]
+      )
+
       AC_DEFINE([WIN32], [1], [Define to 1 if building on WIN32.])
       AH_BOTTOM([#ifdef WIN32
 #include "include/windows/windefs.h"
 #endif])
    fi])
+
+dnl OVS_CHECK_WINDOWS
+dnl
+dnl Configure Visual Studio solution build
+AC_DEFUN([OVS_CHECK_VISUAL_STUDIO_DDK], [
+AC_ARG_WITH([vstudiotarget],
+         [AS_HELP_STRING([--with-vstudiotarget=target_type],
+            [Target type: Debug/Release])],
+         [
+            case "$withval" in
+            "Release") ;;
+            "Debug") ;;
+            *) AC_MSG_ERROR([No valid Visual Studio configuration found]) ;;
+            esac
+
+            VSTUDIO_CONFIG=$withval
+         ], [
+            VSTUDIO_CONFIG=
+         ]
+      )
+
+  AC_SUBST([VSTUDIO_CONFIG])
+  AC_DEFINE([VSTUDIO_DDK], [1], [System uses the Visual Studio build target.])
+  AM_CONDITIONAL([VSTUDIO_DDK], [test -n "$VSTUDIO_CONFIG"])
+])
 
 dnl Checks for Netlink support.
 AC_DEFUN([OVS_CHECK_NETLINK],
@@ -101,6 +184,42 @@ AC_DEFUN([OVS_CHECK_NETLINK],
    if test "$HAVE_NETLINK" = yes; then
       AC_DEFINE([HAVE_NETLINK], [1],
                 [Define to 1 if Netlink protocol is available.])
+   fi])
+
+dnl Checks for libcap-ng.
+AC_DEFUN([OVS_CHECK_LIBCAPNG],
+  [AC_ARG_ENABLE(
+     [libcapng],
+     [AC_HELP_STRING([--disable-libcapng], [Disable Linux capability support])],
+     [case "${enableval}" in
+        (yes) libcapng=true ;;
+        (no)  libcapng=false ;;
+        (*) AC_MSG_ERROR([bad value ${enableval} for --enable-libcapng]) ;;
+      esac],
+     [libcapng=check])
+
+   if test "$libcapng" != false; then
+       AC_CHECK_LIB([cap-ng], [capng_clear], [HAVE_LIBCAPNG=yes])
+
+       if test "$HAVE_LIBCAPNG" != yes; then
+           if test "$libcapng" = true ; then
+                AC_MSG_ERROR([libcap-ng support requested, but not found])
+           fi
+           if test "$libcapng" = check ; then
+                 AC_MSG_WARN([cannot find libcap-ng.
+--user option will not be supported on Linux.
+(you may use --disable-libcapng to suppress this warning). ])
+           fi
+       fi
+   fi
+
+   AC_SUBST([HAVE_LIBCAPNG])
+   AM_CONDITIONAL([HAVE_LIBCAPNG], [test "$HAVE_LIBCAPNG" = yes])
+   if test "$HAVE_LIBCAPNG" = yes; then
+      AC_DEFINE([HAVE_LIBCAPNG], [1],
+                [Define to 1 if libcap-ng is available.])
+      CAPNG_LDADD="-lcap-ng"
+      AC_SUBST([CAPNG_LDADD])
    fi])
 
 dnl Checks for OpenSSL.
@@ -190,46 +309,30 @@ AC_DEFUN([OVS_CHECK_BACKTRACE],
                   [AC_DEFINE([HAVE_BACKTRACE], [1],
                              [Define to 1 if you have backtrace(3).])])])
 
-dnl Checks for __malloc_hook, etc., supported by glibc.
-AC_DEFUN([OVS_CHECK_MALLOC_HOOKS],
-  [AC_CACHE_CHECK(
-    [whether libc supports hooks for malloc and related functions],
-    [ovs_cv_malloc_hooks],
-    [AC_COMPILE_IFELSE(
-      [AC_LANG_PROGRAM(
-         [#include <malloc.h>
-         ],
-         [(void) __malloc_hook;
-          (void) __realloc_hook;
-          (void) __free_hook;])],
-      [ovs_cv_malloc_hooks=yes],
-      [ovs_cv_malloc_hooks=no])])
-   if test $ovs_cv_malloc_hooks = yes; then
-     AC_DEFINE([HAVE_MALLOC_HOOKS], [1],
-               [Define to 1 if you have __malloc_hook, __realloc_hook, and
-                __free_hook in <malloc.h>.])
-   fi])
+dnl Defines HAVE_PERF_EVENT if linux/perf_event.h is found.
+AC_DEFUN([OVS_CHECK_PERF_EVENT],
+  [AC_CHECK_HEADERS([linux/perf_event.h])])
 
 dnl Checks for valgrind/valgrind.h.
 AC_DEFUN([OVS_CHECK_VALGRIND],
   [AC_CHECK_HEADERS([valgrind/valgrind.h])])
 
-dnl Checks for Python 2.x, x >= 4.
+dnl Checks for Python 2.x, x >= 7.
 AC_DEFUN([OVS_CHECK_PYTHON],
   [AC_CACHE_CHECK(
-     [for Python 2.x for x >= 4],
+     [for Python 2.x for x >= 7],
      [ovs_cv_python],
      [if test -n "$PYTHON"; then
         ovs_cv_python=$PYTHON
       else
         ovs_cv_python=no
-        for binary in python python2.4 python2.5; do
+        for binary in python python2.7; do
           ovs_save_IFS=$IFS; IFS=$PATH_SEPARATOR
           for dir in $PATH; do
             IFS=$ovs_save_IFS
             test -z "$dir" && dir=.
             if test -x "$dir"/"$binary" && "$dir"/"$binary" -c 'import sys
-if sys.hexversion >= 0x02040000 and sys.hexversion < 0x03000000:
+if sys.hexversion >= 0x02070000 and sys.hexversion < 0x03000000:
     sys.exit(0)
 else:
     sys.exit(1)'; then
@@ -261,36 +364,6 @@ AC_DEFUN([OVS_CHECK_DOT],
        ovs_cv_dot=no
      fi])
    AM_CONDITIONAL([HAVE_DOT], [test "$ovs_cv_dot" = yes])])
-
-dnl Checks whether $PYTHON supports the module given as $1
-AC_DEFUN([OVS_CHECK_PYTHON_MODULE],
-  [AC_REQUIRE([OVS_CHECK_PYTHON])
-   AC_CACHE_CHECK(
-     [for $1 Python module],
-     [ovs_cv_py_[]AS_TR_SH([$1])],
-     [ovs_cv_py_[]AS_TR_SH([$1])=no
-      if test $HAVE_PYTHON = yes; then
-        AS_ECHO(["running $PYTHON -c 'import $1
-import sys
-sys.exit(0)'..."]) >&AS_MESSAGE_LOG_FD 2>&1
-        if $PYTHON -c 'import $1
-import sys
-sys.exit(0)' >&AS_MESSAGE_LOG_FD 2>&1; then
-          ovs_cv_py_[]AS_TR_SH([$1])=yes
-        fi
-      fi])])
-
-dnl Checks for missing python modules at build time
-AC_DEFUN([OVS_CHECK_PYTHON_COMPAT],
-  [OVS_CHECK_PYTHON_MODULE([uuid])
-   if test $ovs_cv_py_uuid = yes; then
-     INCLUDE_PYTHON_COMPAT=no
-   else
-     INCLUDE_PYTHON_COMPAT=yes
-   fi
-   AC_MSG_CHECKING([whether to add python/compat to PYTHONPATH])
-   AC_MSG_RESULT([$INCLUDE_PYTHON_COMPAT])
-   AM_CONDITIONAL([INCLUDE_PYTHON_COMPAT], [test $INCLUDE_PYTHON_COMPAT = yes])])
 
 dnl Checks for groff.
 AC_DEFUN([OVS_CHECK_GROFF],
@@ -447,3 +520,12 @@ dnl OVS_CHECK_INCLUDE_NEXT
 AC_DEFUN([OVS_CHECK_INCLUDE_NEXT],
   [AC_REQUIRE([gl_CHECK_NEXT_HEADERS])
    gl_CHECK_NEXT_HEADERS([$1])])
+
+dnl OVS_CHECK_PRAGMA_MESSAGE
+AC_DEFUN([OVS_CHECK_PRAGMA_MESSAGE],
+  [AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+   [[_Pragma("message(\"Checking for pragma message\")")
+   ]])],
+     [AC_DEFINE(HAVE_PRAGMA_MESSAGE,1,[Define if compiler supports #pragma
+     message directive])])
+  ])

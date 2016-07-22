@@ -35,6 +35,17 @@ ovs_pyfiles = \
 	python/ovs/version.py \
 	python/ovs/vlog.py
 
+# These python files are used at build time but not runtime,
+# so they are not installed.
+EXTRA_DIST += \
+	python/build/__init__.py \
+	python/build/nroff.py
+
+# PyPI support.
+EXTRA_DIST += \
+	python/README.rst \
+	python/setup.py
+
 PYFILES = $(ovs_pyfiles) python/ovs/dirs.py $(ovstest_pyfiles)
 EXTRA_DIST += $(PYFILES)
 PYCOV_CLEAN_FILES += $(PYFILES:.py=.py,cover)
@@ -56,6 +67,12 @@ ovs-install-data-local:
 	$(MKDIR_P) $(DESTDIR)$(pkgdatadir)/python/ovs
 	$(INSTALL_DATA) python/ovs/dirs.py.tmp $(DESTDIR)$(pkgdatadir)/python/ovs/dirs.py
 	rm python/ovs/dirs.py.tmp
+
+python-sdist: $(srcdir)/python/ovs/version.py $(ovs_pyfiles) python/ovs/dirs.py
+	(cd python/ && $(PYTHON) setup.py sdist)
+
+pypi-upload: $(srcdir)/python/ovs/version.py $(ovs_pyfiles) python/ovs/dirs.py
+	(cd python/ && $(PYTHON) setup.py sdist upload)
 else
 ovs-install-data-local:
 	@:
@@ -68,13 +85,13 @@ ovs-uninstall-local:
 
 ALL_LOCAL += $(srcdir)/python/ovs/version.py
 $(srcdir)/python/ovs/version.py: config.status
-	$(ro_shell) > $(@F).tmp
-	echo 'VERSION = "$(VERSION)"' >> $(@F).tmp
+	$(AM_V_GEN)$(ro_shell) > $(@F).tmp && \
+	echo 'VERSION = "$(VERSION)"' >> $(@F).tmp && \
 	if cmp -s $(@F).tmp $@; then touch $@; rm $(@F).tmp; else mv $(@F).tmp $@; fi
 
 ALL_LOCAL += $(srcdir)/python/ovs/dirs.py
 $(srcdir)/python/ovs/dirs.py: python/ovs/dirs.py.template
-	sed \
+	$(AM_V_GEN)sed \
 		-e '/^##/d' \
                 -e 's,[@]pkgdatadir[@],/usr/local/share/openvswitch,g' \
                 -e 's,[@]RUNDIR[@],/var/run,g' \
@@ -82,6 +99,6 @@ $(srcdir)/python/ovs/dirs.py: python/ovs/dirs.py.template
                 -e 's,[@]bindir[@],/usr/local/bin,g' \
                 -e 's,[@]sysconfdir[@],/usr/local/etc,g' \
                 -e 's,[@]DBDIR[@],/usr/local/etc/openvswitch,g' \
-		< $? > $@.tmp
+		< $? > $@.tmp && \
 	mv $@.tmp $@
-EXTRA_DIST += python/ovs/dirs.py python/ovs/dirs.py.template
+EXTRA_DIST += python/ovs/dirs.py.template

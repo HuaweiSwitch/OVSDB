@@ -22,13 +22,12 @@
 #include <netinet/in.h>
 #include "compiler.h"
 #include "flow.h"
+#include "meta-flow.h"
 #include "ofp-errors.h"
 #include "openvswitch/types.h"
 
 struct ds;
 struct match;
-struct mf_field;
-struct mf_subfield;
 struct ofpact_reg_move;
 struct ofpact_reg_load;
 struct ofpact_stack;
@@ -42,6 +41,12 @@ struct nx_action_reg_move;
  * See include/openflow/nicira-ext.h for NXM specification.
  */
 
+void mf_format_subfield(const struct mf_subfield *, struct ds *);
+char *mf_parse_subfield__(struct mf_subfield *sf, const char **s)
+    OVS_WARN_UNUSED_RESULT;
+char *mf_parse_subfield(struct mf_subfield *, const char *s)
+    OVS_WARN_UNUSED_RESULT;
+
 enum ofperr nx_pull_match(struct ofpbuf *, unsigned int match_len,
                           struct match *,
                           ovs_be64 *cookie, ovs_be64 *cookie_mask);
@@ -50,64 +55,68 @@ enum ofperr nx_pull_match_loose(struct ofpbuf *, unsigned int match_len,
                                 ovs_be64 *cookie_mask);
 enum ofperr oxm_pull_match(struct ofpbuf *, struct match *);
 enum ofperr oxm_pull_match_loose(struct ofpbuf *, struct match *);
+enum ofperr oxm_pull_field_array(const void *, size_t fields_len,
+                                 struct field_array *);
 int nx_put_match(struct ofpbuf *, const struct match *,
                  ovs_be64 cookie, ovs_be64 cookie_mask);
 int oxm_put_match(struct ofpbuf *, const struct match *, enum ofp_version);
+void oxm_format_field_array(struct ds *, const struct field_array *);
+int oxm_put_field_array(struct ofpbuf *, const struct field_array *,
+                        enum ofp_version version);
+
+/* Decoding and encoding OXM/NXM headers (just a field ID) or entries (a field
+ * ID followed by a value and possibly a mask). */
+enum ofperr nx_pull_entry(struct ofpbuf *, const struct mf_field **,
+                          union mf_value *value, union mf_value *mask);
+enum ofperr nx_pull_header(struct ofpbuf *, const struct mf_field **,
+                           bool *masked);
+void nxm_put__(struct ofpbuf *b, enum mf_field_id field,
+               enum ofp_version version, const void *value,
+               const void *mask, size_t n_bytes);
+void nx_put_entry(struct ofpbuf *, enum mf_field_id, enum ofp_version,
+                  const union mf_value *value, const union mf_value *mask);
+void nx_put_header(struct ofpbuf *, enum mf_field_id, enum ofp_version,
+                   bool masked);
+
+/* NXM and OXM protocol headers values.
+ *
+ * These are often alternatives to nx_pull_entry/header() and
+ * nx_put_entry/header() for decoding and encoding OXM/NXM.  In those cases,
+ * the nx_*() functions should be preferred because they can support the 64-bit
+ * "experimenter" OXM format (even though it is not yet implemented). */
+uint32_t mf_nxm_header(enum mf_field_id);
+const struct mf_field *mf_from_nxm_header(uint32_t nxm_header);
 
 char *nx_match_to_string(const uint8_t *, unsigned int match_len);
 char *oxm_match_to_string(const struct ofpbuf *, unsigned int match_len);
 int nx_match_from_string(const char *, struct ofpbuf *);
 int oxm_match_from_string(const char *, struct ofpbuf *);
 
+void nx_format_field_name(enum mf_field_id, enum ofp_version, struct ds *);
+
 char *nxm_parse_reg_move(struct ofpact_reg_move *, const char *)
-    WARN_UNUSED_RESULT;
-char *nxm_parse_reg_load(struct ofpact_reg_load *, const char *)
-    WARN_UNUSED_RESULT;
+    OVS_WARN_UNUSED_RESULT;
 
 void nxm_format_reg_move(const struct ofpact_reg_move *, struct ds *);
-void nxm_format_reg_load(const struct ofpact_reg_load *, struct ds *);
-
-enum ofperr nxm_reg_move_from_openflow(const struct nx_action_reg_move *,
-                                       struct ofpbuf *ofpacts);
-enum ofperr nxm_reg_load_from_openflow(const struct nx_action_reg_load *,
-                                       struct ofpbuf *ofpacts);
 
 enum ofperr nxm_reg_move_check(const struct ofpact_reg_move *,
                                const struct flow *);
-enum ofperr nxm_reg_load_check(const struct ofpact_reg_load *,
-                               const struct flow *);
-
-void nxm_reg_move_to_nxast(const struct ofpact_reg_move *,
-                           struct ofpbuf *openflow);
-void nxm_reg_load_to_nxast(const struct ofpact_reg_load *,
-                           struct ofpbuf *openflow);
 
 void nxm_execute_reg_move(const struct ofpact_reg_move *, struct flow *,
-                          struct flow_wildcards *);
-void nxm_execute_reg_load(const struct ofpact_reg_load *, struct flow *,
                           struct flow_wildcards *);
 void nxm_reg_load(const struct mf_subfield *, uint64_t src_data,
                   struct flow *, struct flow_wildcards *);
 
 char *nxm_parse_stack_action(struct ofpact_stack *, const char *)
-    WARN_UNUSED_RESULT;
+    OVS_WARN_UNUSED_RESULT;
 
 void nxm_format_stack_push(const struct ofpact_stack *, struct ds *);
 void nxm_format_stack_pop(const struct ofpact_stack *, struct ds *);
 
-enum ofperr nxm_stack_push_from_openflow(const struct nx_action_stack *,
-                                       struct ofpbuf *ofpacts);
-enum ofperr nxm_stack_pop_from_openflow(const struct nx_action_stack *,
-                                       struct ofpbuf *ofpacts);
 enum ofperr nxm_stack_push_check(const struct ofpact_stack *,
                                  const  struct flow *);
 enum ofperr nxm_stack_pop_check(const struct ofpact_stack *,
                                const struct flow *);
-
-void nxm_stack_push_to_nxast(const struct ofpact_stack *,
-                           struct ofpbuf *openflow);
-void nxm_stack_pop_to_nxast(const struct ofpact_stack *,
-                           struct ofpbuf *openflow);
 
 void nxm_execute_stack_push(const struct ofpact_stack *,
                             const struct flow *, struct flow_wildcards *,
@@ -116,8 +125,12 @@ void nxm_execute_stack_pop(const struct ofpact_stack *,
                             struct flow *, struct flow_wildcards *,
                             struct ofpbuf *);
 
-int nxm_field_bytes(uint32_t header);
-int nxm_field_bits(uint32_t header);
+ovs_be64 oxm_bitmap_from_mf_bitmap(const struct mf_bitmap *, enum ofp_version);
+struct mf_bitmap oxm_bitmap_to_mf_bitmap(ovs_be64 oxm_bitmap,
+                                         enum ofp_version);
+struct mf_bitmap oxm_writable_fields(void);
+struct mf_bitmap oxm_matchable_fields(void);
+struct mf_bitmap oxm_maskable_fields(void);
 
 /* Dealing with the 'ofs_nbits' members in several Nicira extensions. */
 

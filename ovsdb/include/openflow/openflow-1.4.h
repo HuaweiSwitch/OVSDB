@@ -37,7 +37,7 @@
 #ifndef OPENFLOW_14_H
 #define OPENFLOW_14_H 1
 
-#include "openflow/openflow-1.3.h"
+#include <openflow/openflow-1.3.h>
 
 
 /* ## ---------- ## */
@@ -72,7 +72,7 @@ struct ofp14_port {
     ovs_be32 port_no;
     ovs_be16 length;
     uint8_t pad[2];
-    uint8_t hw_addr[OFP_ETH_ALEN];
+    struct eth_addr hw_addr;
     uint8_t pad2[2];                  /* Align to 64 bits. */
     char name[OFP_MAX_PORT_NAME_LEN]; /* Null-terminated */
 
@@ -106,7 +106,7 @@ OFP_ASSERT(sizeof(struct ofp14_port_mod_prop_ethernet) == 8);
 struct ofp14_port_mod {
     ovs_be32 port_no;
     uint8_t pad[4];
-    uint8_t hw_addr[OFP_ETH_ALEN];
+    struct eth_addr hw_addr;
     uint8_t pad2[2];
     ovs_be32 config;        /* Bitmap of OFPPC_* flags. */
     ovs_be32 mask;          /* Bitmap of OFPPC_* flags to be changed. */
@@ -128,6 +128,13 @@ enum ofp14_table_mod_prop_eviction_flag {
     OFPTMPEF14_OTHER           = 1 << 0,     /* Using other factors. */
     OFPTMPEF14_IMPORTANCE      = 1 << 1,     /* Using flow entry importance. */
     OFPTMPEF14_LIFETIME        = 1 << 2,     /* Using flow entry lifetime. */
+};
+
+/* What changed about the table */
+enum ofp14_table_reason {
+    OFPTR_VACANCY_DOWN = 3,    /* Vacancy down threshold event. */
+    OFPTR_VACANCY_UP   = 4,    /* Vacancy up threshold event. */
+    OFPTR_N_REASONS            /* Denotes number of reasons. */
 };
 
 struct ofp14_table_mod_prop_eviction {
@@ -155,6 +162,16 @@ struct ofp14_table_mod {
 };
 OFP_ASSERT(sizeof(struct ofp14_table_mod) == 8);
 
+/* Body of reply to OFPMP_TABLE_DESC request. */
+struct ofp14_table_desc {
+    ovs_be16 length;       /* Length is padded to 64 bits. */
+    uint8_t table_id;      /* Identifier of table. Lower numbered tables
+                              are consulted first. */
+    uint8_t pad[1];        /* Align to 32-bits. */
+    ovs_be32 config;       /* Bitmap of OFPTC_* values. */
+    /* Followed by 0 or more OFPTMPT14_* properties. */
+};
+OFP_ASSERT(sizeof(struct ofp14_table_desc) == 8);
 
 /* ## ---------------- ## */
 /* ## ofp14_port_stats ## */
@@ -239,6 +256,13 @@ struct ofp14_async_config {
 };
 OFP_ASSERT(sizeof(struct ofp14_async_config) == 8);
 
+/* Request forward reason */
+enum ofp14_requestforward_reason {
+    OFPRFR_GROUP_MOD = 0,      /* Forward group mod requests. */
+    OFPRFR_METER_MOD = 1,      /* Forward meter mod requests. */
+    OFPRFR_N_REASONS           /* Denotes number of reasons. */
+};
+
 /* Async Config property types.
 * Low order bit cleared indicates a property for the slave role.
 * Low order bit set indicates a property for the master/equal role.
@@ -310,6 +334,7 @@ enum ofp14_controller_role_reason {
     OFPCRR_MASTER_REQUEST = 0,  /* Another controller asked to be master. */
     OFPCRR_CONFIG         = 1,  /* Configuration changed on the switch. */
     OFPCRR_EXPERIMENTER   = 2,  /* Experimenter data changed. */
+    OFPCRR_N_REASONS            /* Denotes number of reasons. */
 };
 
 /* Role property types.
@@ -332,6 +357,12 @@ struct ofp14_role_prop_experimenter {
      *     bytes of all-zero bytes */
 };
 OFP_ASSERT(sizeof(struct ofp14_role_prop_experimenter) == 12);
+
+/* Group/Meter request forwarding. */
+struct ofp14_requestforward {
+    struct ofp_header request;  /* Request being forwarded. */
+};
+OFP_ASSERT(sizeof(struct ofp14_requestforward) == 8);
 
 /* Bundle control message types */
 enum ofp14_bundle_ctrl_type {
@@ -366,5 +397,52 @@ struct ofp14_bundle_ctrl_msg {
      * - Zero or more properties (see struct ofp14_bundle_prop_header). */
 };
 OFP_ASSERT(sizeof(struct ofp14_bundle_ctrl_msg) == 8);
+
+/* Body for ofp14_multipart_request of type OFPMP_FLOW_MONITOR.
+ *
+ * The OFPMP_FLOW_MONITOR request's body consists of an array of zero or more
+ * instances of this structure. The request arranges to monitor the flows
+ * that match the specified criteria, which are interpreted in the same way as
+ * for OFPMP_FLOW.
+ *
+ * 'id' identifies a particular monitor for the purpose of allowing it to be
+ * canceled later with OFPFMC_DELETE. 'id' must be unique among
+ * existing monitors that have not already been canceled.
+ */
+struct ofp14_flow_monitor_request {
+    ovs_be32 monitor_id;        /* Controller-assigned ID for this monitor. */
+    ovs_be32 out_port;          /* Required output port, if not OFPP_ANY. */
+    ovs_be32 out_group;         /* Required output port, if not OFPG_ANY. */
+    ovs_be16 flags;             /* OFPMF14_*. */
+    uint8_t table_id;           /* One table's ID or OFPTT_ALL (all tables). */
+    uint8_t command;            /* One of OFPFMC14_*. */
+    /* Followed by an ofp11_match structure. */
+};
+OFP_ASSERT(sizeof(struct ofp14_flow_monitor_request) == 16);
+
+/* Flow monitor commands */
+enum ofp14_flow_monitor_command {
+    OFPFMC14_ADD = 0, /* New flow monitor. */
+    OFPFMC14_MODIFY = 1, /* Modify existing flow monitor. */
+    OFPFMC14_DELETE = 2, /* Delete/cancel existing flow monitor. */
+};
+
+/* 'flags' bits in struct of_flow_monitor_request. */
+enum ofp14_flow_monitor_flags {
+    /* When to send updates. */
+    /* Common to NX and OpenFlow 1.4 */
+    OFPFMF14_INITIAL = 1 << 0,     /* Initially matching flows. */
+    OFPFMF14_ADD = 1 << 1,         /* New matching flows as they are added. */
+    OFPFMF14_REMOVED = 1 << 2,     /* Old matching flows as they are removed. */
+    OFPFMF14_MODIFY = 1 << 3,      /* Matching flows as they are changed. */
+
+    /* What to include in updates. */
+    /* Common to NX and OpenFlow 1.4 */
+    OFPFMF14_INSTRUCTIONS = 1 << 4, /* If set, instructions are included. */
+    OFPFMF14_NO_ABBREV = 1 << 5,    /* If set, include own changes in full. */
+    /* OpenFlow 1.4 */
+    OFPFMF14_ONLY_OWN = 1 << 6,     /* If set, don't include other controllers.
+                                     */
+};
 
 #endif /* openflow/openflow-1.4.h */

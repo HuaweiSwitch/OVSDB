@@ -16,7 +16,7 @@
 
 #include <config.h>
 #include "stream-ssl.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(stream_nossl);
 
@@ -28,7 +28,7 @@ stream_ssl_is_configured(void)
     return false;
 }
 
-static void NO_RETURN
+OVS_NO_RETURN static void
 nossl_option(const char *detail)
 {
     VLOG_FATAL("%s specified but Open vSwitch was built without SSL support",

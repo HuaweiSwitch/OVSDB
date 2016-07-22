@@ -14,14 +14,11 @@ export PYTHONPATH
 PYTHONIOENCODING=utf_8
 export PYTHONIOENCODING
 
-# PYTHONDONTWRITEBYTECODE=yes keeps Python 2.6+ from creating .pyc and .pyo
+# PYTHONDONTWRITEBYTECODE=yes keeps Python from creating .pyc and .pyo
 # files.  Creating .py[co] works OK for any given version of Open
 # vSwitch, but it causes trouble if you switch from a version with
 # foo/__init__.py into an (older) version with plain foo.py, since
 # foo/__init__.pyc will cause Python to ignore foo.py.
-#
-# Python before version 2.6 always creates .pyc files, so if you develop
-# with such an older version then you're out of luck.
 PYTHONDONTWRITEBYTECODE=yes
 export PYTHONDONTWRITEBYTECODE
 
@@ -39,15 +36,6 @@ case `pwd | tr -d ' -~'` in
     '') non_ascii_cwd=false ;;
     *) non_ascii_cwd=true
 esac
-
-if test $HAVE_PYTHON = yes; then
-    if python -m argparse 2>/dev/null; then
-        :
-    else
-        PYTHONPATH=$PYTHONPATH:$abs_top_srcdir/python/compat
-        export PYTHONPATH
-    fi
-fi
 
 # Enable malloc debugging features.
 case `uname` in
@@ -93,12 +81,39 @@ FreeBSD|NetBSD)
     ;;
 esac
 
-# Check for MINGW platform.
+# Check for platform.
 case `uname` in
 MINGW*)
     IS_WIN32="yes"
+    IS_BSD="no"
+    ;;
+FreeBSD|NetBSD)
+    IS_WIN32="no"
+    IS_BSD="yes"
     ;;
 *)
     IS_WIN32="no"
+    IS_BSD="no"
     ;;
 esac
+
+# Check whether to run IPv6 tests.
+if perl -e 'use Socket; socket(FH, PF_INET6, SOCK_STREAM, 0) || exit 1;'; then
+    HAVE_IPV6=yes
+else
+    HAVE_IPV6=no
+fi
+
+# XXX: Disable Python related tests on Windows because Open vSwitch code
+# written in Python has not been ported to the Windows platform. We will
+# need to remove the next block after porting is complete.
+if test "$IS_WIN32" = "yes"; then
+    HAVE_PYTHON="no"
+fi
+
+if test "$HAVE_PYTHON" = "yes" \
+   && test "x`$PYTHON $abs_top_srcdir/tests/test-l7.py --help | grep 'ftp'`" != x; then
+    HAVE_PYFTPDLIB="yes"
+else
+    HAVE_PYFTPDLIB="no"
+fi

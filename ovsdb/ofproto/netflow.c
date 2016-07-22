@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@
 #include "socket-util.h"
 #include "timeval.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(netflow);
 
@@ -79,7 +79,7 @@ struct netflow_flow {
 };
 
 static struct ovs_mutex mutex = OVS_MUTEX_INITIALIZER;
-static atomic_uint netflow_count = ATOMIC_VAR_INIT(0);
+static atomic_count netflow_count = ATOMIC_COUNT_INIT(0);
 
 static struct netflow_flow *netflow_flow_lookup(const struct netflow *,
                                                 const struct flow *)
@@ -90,7 +90,7 @@ static void netflow_expire__(struct netflow *, struct netflow_flow *)
 static void netflow_run__(struct netflow *) OVS_REQUIRES(mutex);
 
 void
-netflow_mask_wc(struct flow *flow, struct flow_wildcards *wc)
+netflow_mask_wc(const struct flow *flow, struct flow_wildcards *wc)
 {
     if (flow->dl_type != htons(ETH_TYPE_IP)) {
         return;
@@ -110,7 +110,7 @@ gen_netflow_rec(struct netflow *nf, struct netflow_flow *nf_flow,
     struct netflow_v5_header *nf_hdr;
     struct netflow_v5_record *nf_rec;
 
-    if (!ofpbuf_size(&nf->packet)) {
+    if (!nf->packet.size) {
         struct timespec now;
 
         time_wall_timespec(&now);
@@ -121,14 +121,14 @@ gen_netflow_rec(struct netflow *nf, struct netflow_flow *nf_flow,
         nf_hdr->sysuptime = htonl(time_msec() - nf->boot_time);
         nf_hdr->unix_secs = htonl(now.tv_sec);
         nf_hdr->unix_nsecs = htonl(now.tv_nsec);
-        nf_hdr->flow_seq = htonl(nf->netflow_cnt++);
         nf_hdr->engine_type = nf->engine_type;
         nf_hdr->engine_id = nf->engine_id;
         nf_hdr->sampling_interval = htons(0);
     }
 
-    nf_hdr = ofpbuf_data(&nf->packet);
+    nf_hdr = nf->packet.data;
     nf_hdr->count = htons(ntohs(nf_hdr->count) + 1);
+    nf_hdr->flow_seq = htonl(nf->netflow_cnt++);
 
     nf_rec = ofpbuf_put_zeros(&nf->packet, sizeof *nf_rec);
     nf_rec->src_addr = nf_flow->nw_src;
@@ -276,7 +276,8 @@ netflow_expire__(struct netflow *nf, struct netflow_flow *nf_flow)
 }
 
 void
-netflow_flow_clear(struct netflow *nf, struct flow *flow) OVS_EXCLUDED(mutex)
+netflow_flow_clear(struct netflow *nf, const struct flow *flow)
+    OVS_EXCLUDED(mutex)
 {
     struct netflow_flow *nf_flow;
 
@@ -298,9 +299,9 @@ netflow_run__(struct netflow *nf) OVS_REQUIRES(mutex)
     long long int now = time_msec();
     struct netflow_flow *nf_flow, *next;
 
-    if (ofpbuf_size(&nf->packet)) {
-        collectors_send(nf->collectors, ofpbuf_data(&nf->packet), ofpbuf_size(&nf->packet));
-        ofpbuf_set_size(&nf->packet, 0);
+    if (nf->packet.size) {
+        collectors_send(nf->collectors, nf->packet.data, nf->packet.size);
+        nf->packet.size = 0;
     }
 
     if (!nf->active_timeout || now < nf->next_timeout) {
@@ -339,7 +340,7 @@ netflow_wait(struct netflow *nf) OVS_EXCLUDED(mutex)
     if (nf->active_timeout) {
         poll_timer_wait_until(nf->next_timeout);
     }
-    if (ofpbuf_size(&nf->packet)) {
+    if (nf->packet.size) {
         poll_immediate_wake();
     }
     ovs_mutex_unlock(&mutex);
@@ -381,7 +382,6 @@ struct netflow *
 netflow_create(void)
 {
     struct netflow *nf = xzalloc(sizeof *nf);
-    int junk;
 
     nf->engine_type = 0;
     nf->engine_id = 0;
@@ -392,7 +392,7 @@ netflow_create(void)
     hmap_init(&nf->flows);
     ovs_refcount_init(&nf->ref_cnt);
     ofpbuf_init(&nf->packet, 1500);
-    atomic_add(&netflow_count, 1, &junk);
+    atomic_count_inc(&netflow_count);
     return nf;
 }
 
@@ -409,24 +409,22 @@ netflow_ref(const struct netflow *nf_)
 void
 netflow_unref(struct netflow *nf)
 {
-    if (nf && ovs_refcount_unref(&nf->ref_cnt) == 1) {
-        int orig;
-
-        atomic_sub(&netflow_count, 1, &orig);
+    if (nf && ovs_refcount_unref_relaxed(&nf->ref_cnt) == 1) {
+        atomic_count_dec(&netflow_count);
         collectors_destroy(nf->collectors);
         ofpbuf_uninit(&nf->packet);
         free(nf);
     }
 }
 
-/* Returns true if there exist any netflow objects, false otherwise. */
+/* Returns true if there exist any netflow objects, false otherwise.
+ * Callers must cope with transient false positives, i.e., there is no tight
+ * synchronization with the count and the actual existence of netflow objects.
+ */
 bool
 netflow_exists(void)
 {
-    int n;
-
-    atomic_read(&netflow_count, &n);
-    return n > 0;
+    return atomic_count_get(&netflow_count) > 0;
 }
 
 /* Helpers. */
@@ -458,13 +456,13 @@ netflow_flow_hash(const struct flow *flow)
 {
     uint32_t hash = 0;
 
-    hash = mhash_add(hash, (OVS_FORCE uint32_t) flow->in_port.ofp_port);
-    hash = mhash_add(hash, ntohl(flow->nw_src));
-    hash = mhash_add(hash, ntohl(flow->nw_dst));
-    hash = mhash_add(hash, flow->nw_tos);
-    hash = mhash_add(hash, flow->nw_proto);
-    hash = mhash_add(hash, ntohs(flow->tp_src));
-    hash = mhash_add(hash, ntohs(flow->tp_dst));
+    hash = hash_add(hash, (OVS_FORCE uint32_t) flow->in_port.ofp_port);
+    hash = hash_add(hash, ntohl(flow->nw_src));
+    hash = hash_add(hash, ntohl(flow->nw_dst));
+    hash = hash_add(hash, flow->nw_tos);
+    hash = hash_add(hash, flow->nw_proto);
+    hash = hash_add(hash, ntohs(flow->tp_src));
+    hash = hash_add(hash, ntohs(flow->tp_dst));
 
-    return mhash_finish(hash, 28);
+    return hash_finish(hash, 28);
 }

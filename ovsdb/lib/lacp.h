@@ -31,7 +31,7 @@ enum lacp_status {
 
 struct lacp_settings {
     char *name;                       /* Name (for debugging). */
-    uint8_t id[ETH_ADDR_LEN];         /* System ID. Must be nonzero. */
+    struct eth_addr id;               /* System ID. Must be nonzero. */
     uint16_t priority;                /* System priority. */
     bool active;                      /* Active or passive mode? */
     bool fast;                        /* Fast or slow probe interval. */
@@ -47,7 +47,7 @@ void lacp_configure(struct lacp *, const struct lacp_settings *);
 bool lacp_is_active(const struct lacp *);
 
 void lacp_process_packet(struct lacp *, const void *slave,
-                         const struct ofpbuf *packet);
+                         const struct dp_packet *packet);
 enum lacp_status lacp_status(const struct lacp *);
 
 struct lacp_slave_settings {
@@ -69,5 +69,28 @@ typedef void lacp_send_pdu(void *slave, const void *pdu, size_t pdu_size);
 
 void lacp_run(struct lacp *, lacp_send_pdu *);
 void lacp_wait(struct lacp *);
+
+struct lacp_slave_stats {
+    /* id */
+    struct eth_addr dot3adAggPortActorSystemID;
+    struct eth_addr dot3adAggPortPartnerOperSystemID;
+    uint32_t dot3adAggPortAttachedAggID;
+    /* state */
+    uint8_t dot3adAggPortActorAdminState;
+    uint8_t dot3adAggPortActorOperState;
+    uint8_t dot3adAggPortPartnerAdminState;
+    uint8_t dot3adAggPortPartnerOperState;
+    /* counters */
+    uint32_t dot3adAggPortStatsLACPDUsRx;
+    /* uint32_t dot3adAggPortStatsMarkerPDUsRx; */
+    /* uint32_t dot3adAggPortStatsMarkerResponsePDUsRx; */
+    /* uint32_t dot3adAggPortStatsUnknownRx; */
+    uint32_t dot3adAggPortStatsIllegalRx;
+    uint32_t dot3adAggPortStatsLACPDUsTx;
+    /* uint32_t dot3adAggPortStatsMarkerPDUsTx; */
+    /* uint32_t dot3adAggPortStatsMarkerResponsePDUsTx; */
+};
+
+bool lacp_get_slave_stats(const struct lacp *, const void *slave_, struct lacp_slave_stats *);
 
 #endif /* lacp.h */

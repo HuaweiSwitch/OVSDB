@@ -23,7 +23,7 @@
 #include "ofp-util.h"
 #include "ofpbuf.h"
 #include "openflow/openflow.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(ofp_errors);
 
@@ -327,8 +327,8 @@ ofperr_decode_msg(const struct ofp_header *oh, struct ofpbuf *payload)
     /* Translate the error type and code into an ofperr. */
     error = ofperr_decode(oh->version, vendor, type, code);
     if (error && payload) {
-        ofpbuf_init(payload, ofpbuf_size(&b));
-        ofpbuf_push(payload, ofpbuf_data(&b), ofpbuf_size(&b));
+        ofpbuf_init(payload, b.size);
+        ofpbuf_push(payload, b.data, b.size);
     }
     return error;
 }

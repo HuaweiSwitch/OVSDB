@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 
 #include "byte-order.h"
 #include "classifier.h"
+#include "dp-packet.h"
 #include "flow.h"
 #include "hmap.h"
 #include "mac-learning.h"
@@ -41,8 +42,8 @@
 #include "shash.h"
 #include "simap.h"
 #include "timeval.h"
-#include "vconn.h"
-#include "vlog.h"
+#include "openvswitch/vconn.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(learning_switch);
 
@@ -104,6 +105,13 @@ static enum ofperr process_switch_features(struct lswitch *,
                                            struct ofp_header *);
 static void process_packet_in(struct lswitch *, const struct ofp_header *);
 static void process_echo_request(struct lswitch *, const struct ofp_header *);
+
+static ofp_port_t get_mac_entry_ofp_port(const struct mac_learning *ml,
+                                         const struct mac_entry *)
+    OVS_REQ_RDLOCK(ml->rwlock);
+static void set_mac_entry_ofp_port(struct mac_learning *ml,
+                                   struct mac_entry *, ofp_port_t)
+    OVS_REQ_WRLOCK(ml->rwlock);
 
 /* Creates and returns a new learning switch whose configuration is given by
  * 'cfg'.
@@ -173,10 +181,51 @@ static void
 lswitch_handshake(struct lswitch *sw)
 {
     enum ofputil_protocol protocol;
+    enum ofp_version version;
 
     send_features_request(sw);
 
-    protocol = ofputil_protocol_from_ofp_version(rconn_get_version(sw->rconn));
+    version = rconn_get_version(sw->rconn);
+    protocol = ofputil_protocol_from_ofp_version(version);
+    if (version >= OFP13_VERSION) {
+        /* OpenFlow 1.3 and later by default drop packets that miss in the flow
+         * table.  Set up a flow to send packets to the controller by
+         * default. */
+        struct ofputil_flow_mod fm;
+        struct ofpact_output output;
+        struct ofpbuf *msg;
+        int error;
+
+        ofpact_init_OUTPUT(&output);
+        output.port = OFPP_CONTROLLER;
+        output.max_len = OFP_DEFAULT_MISS_SEND_LEN;
+
+        match_init_catchall(&fm.match);
+        fm.priority = 0;
+        fm.cookie = 0;
+        fm.cookie_mask = 0;
+        fm.new_cookie = 0;
+        fm.modify_cookie = false;
+        fm.table_id = 0;
+        fm.command = OFPFC_ADD;
+        fm.idle_timeout = 0;
+        fm.hard_timeout = 0;
+        fm.importance = 0;
+        fm.buffer_id = UINT32_MAX;
+        fm.out_port = OFPP_NONE;
+        fm.out_group = OFPG_ANY;
+        fm.flags = 0;
+        fm.ofpacts = &output.ofpact;
+        fm.ofpacts_len = sizeof output;
+        fm.delete_reason = 0;
+
+        msg = ofputil_encode_flow_mod(&fm, protocol);
+        error = rconn_send(sw->rconn, msg, NULL);
+        if (error) {
+            VLOG_INFO_RL(&rl, "%s: failed to add default flow (%s)",
+                         rconn_get_name(sw->rconn), ovs_strerror(error));
+        }
+    }
     if (sw->default_flows) {
         struct ofpbuf *msg = NULL;
         int error = 0;
@@ -315,12 +364,12 @@ lswitch_process_packet(struct lswitch *sw, const struct ofpbuf *msg)
 
     switch (type) {
     case OFPTYPE_ECHO_REQUEST:
-        process_echo_request(sw, ofpbuf_data(msg));
+        process_echo_request(sw, msg->data);
         break;
 
     case OFPTYPE_FEATURES_REPLY:
         if (sw->state == S_FEATURES_REPLY) {
-            if (!process_switch_features(sw, ofpbuf_data(msg))) {
+            if (!process_switch_features(sw, msg->data)) {
                 sw->state = S_SWITCHING;
             } else {
                 rconn_disconnect(sw->rconn);
@@ -329,7 +378,7 @@ lswitch_process_packet(struct lswitch *sw, const struct ofpbuf *msg)
         break;
 
     case OFPTYPE_PACKET_IN:
-        process_packet_in(sw, ofpbuf_data(msg));
+        process_packet_in(sw, msg->data);
         break;
 
     case OFPTYPE_FLOW_REMOVED:
@@ -370,6 +419,7 @@ lswitch_process_packet(struct lswitch *sw, const struct ofpbuf *msg)
     case OFPTYPE_ROLE_REQUEST:
     case OFPTYPE_ROLE_REPLY:
     case OFPTYPE_ROLE_STATUS:
+    case OFPTYPE_REQUESTFORWARD:
     case OFPTYPE_SET_FLOW_FORMAT:
     case OFPTYPE_FLOW_MOD_TABLE_ID:
     case OFPTYPE_SET_PACKET_IN_FORMAT:
@@ -398,11 +448,16 @@ lswitch_process_packet(struct lswitch *sw, const struct ofpbuf *msg)
     case OFPTYPE_METER_FEATURES_STATS_REPLY:
     case OFPTYPE_TABLE_FEATURES_STATS_REQUEST:
     case OFPTYPE_TABLE_FEATURES_STATS_REPLY:
+    case OFPTYPE_TABLE_DESC_REQUEST:
+    case OFPTYPE_TABLE_DESC_REPLY:
     case OFPTYPE_BUNDLE_CONTROL:
     case OFPTYPE_BUNDLE_ADD_MESSAGE:
+    case OFPTYPE_NXT_TLV_TABLE_MOD:
+    case OFPTYPE_NXT_TLV_TABLE_REQUEST:
+    case OFPTYPE_NXT_TLV_TABLE_REPLY:
     default:
         if (VLOG_IS_DBG_ENABLED()) {
-            char *s = ofp_to_string(ofpbuf_data(msg), ofpbuf_size(msg), 2);
+            char *s = ofp_to_string(msg->data, msg->size, 2);
             VLOG_DBG_RL(&rl, "%016llx: OpenFlow packet ignored: %s",
                         sw->datapath_id, s);
             free(s);
@@ -485,14 +540,14 @@ lswitch_choose_destination(struct lswitch *sw, const struct flow *flow)
         if (mac_learning_may_learn(sw->ml, flow->dl_src, 0)) {
             struct mac_entry *mac = mac_learning_insert(sw->ml, flow->dl_src,
                                                         0);
-            if (mac->port.ofp_port != flow->in_port.ofp_port) {
+            if (get_mac_entry_ofp_port(sw->ml, mac)
+                != flow->in_port.ofp_port) {
                 VLOG_DBG_RL(&rl, "%016llx: learned that "ETH_ADDR_FMT" is on "
                             "port %"PRIu16, sw->datapath_id,
                             ETH_ADDR_ARGS(flow->dl_src),
                             flow->in_port.ofp_port);
 
-                mac->port.ofp_port = flow->in_port.ofp_port;
-                mac_learning_changed(sw->ml);
+                set_mac_entry_ofp_port(sw->ml, mac, flow->in_port.ofp_port);
             }
         }
         ovs_rwlock_unlock(&sw->ml->rwlock);
@@ -510,7 +565,7 @@ lswitch_choose_destination(struct lswitch *sw, const struct flow *flow)
         ovs_rwlock_rdlock(&sw->ml->rwlock);
         mac = mac_learning_lookup(sw->ml, flow->dl_dst, 0);
         if (mac) {
-            out_port = mac->port.ofp_port;
+            out_port = get_mac_entry_ofp_port(sw->ml, mac);
             if (out_port == flow->in_port.ofp_port) {
                 /* Don't send a packet back out its input port. */
                 ovs_rwlock_unlock(&sw->ml->rwlock);
@@ -556,7 +611,7 @@ process_packet_in(struct lswitch *sw, const struct ofp_header *oh)
     struct ofputil_packet_out po;
     enum ofperr error;
 
-    struct ofpbuf pkt;
+    struct dp_packet pkt;
     struct flow flow;
 
     error = ofputil_decode_packet_in(&pi, oh);
@@ -574,16 +629,16 @@ process_packet_in(struct lswitch *sw, const struct ofp_header *oh)
     }
 
     /* Extract flow data from 'opi' into 'flow'. */
-    ofpbuf_use_const(&pkt, pi.packet, pi.packet_len);
-    flow_extract(&pkt, NULL, &flow);
-    flow.in_port.ofp_port = pi.fmd.in_port;
-    flow.tunnel.tun_id = pi.fmd.tun_id;
+    dp_packet_use_const(&pkt, pi.packet, pi.packet_len);
+    flow_extract(&pkt, &flow);
+    flow.in_port.ofp_port = pi.flow_metadata.flow.in_port.ofp_port;
+    flow.tunnel.tun_id = pi.flow_metadata.flow.tunnel.tun_id;
 
     /* Choose output port. */
     out_port = lswitch_choose_destination(sw, &flow);
 
     /* Make actions. */
-    queue_id = get_queue_id(sw, pi.fmd.in_port);
+    queue_id = get_queue_id(sw, pi.flow_metadata.flow.in_port.ofp_port);
     ofpbuf_use_stack(&ofpacts, ofpacts_stub, sizeof ofpacts_stub);
     if (out_port == OFPP_NONE) {
         /* No actions. */
@@ -600,15 +655,15 @@ process_packet_in(struct lswitch *sw, const struct ofp_header *oh)
     /* Prepare packet_out in case we need one. */
     po.buffer_id = pi.buffer_id;
     if (po.buffer_id == UINT32_MAX) {
-        po.packet = ofpbuf_data(&pkt);
-        po.packet_len = ofpbuf_size(&pkt);
+        po.packet = dp_packet_data(&pkt);
+        po.packet_len = dp_packet_size(&pkt);
     } else {
         po.packet = NULL;
         po.packet_len = 0;
     }
-    po.in_port = pi.fmd.in_port;
-    po.ofpacts = ofpbuf_data(&ofpacts);
-    po.ofpacts_len = ofpbuf_size(&ofpacts);
+    po.in_port = pi.flow_metadata.flow.in_port.ofp_port;
+    po.ofpacts = ofpacts.data;
+    po.ofpacts_len = ofpacts.size;
 
     /* Send the packet, and possibly the whole flow, to the output port. */
     if (sw->max_idle >= 0 && (!sw->ml || out_port != OFPP_FLOOD)) {
@@ -620,14 +675,14 @@ process_packet_in(struct lswitch *sw, const struct ofp_header *oh)
         memset(&fm, 0, sizeof fm);
         match_init(&fm.match, &flow, &sw->wc);
         ofputil_normalize_match_quiet(&fm.match);
-        fm.priority = 0;
+        fm.priority = 1; /* Must be > 0 because of table-miss flow entry. */
         fm.table_id = 0xff;
         fm.command = OFPFC_ADD;
         fm.idle_timeout = sw->max_idle;
         fm.buffer_id = pi.buffer_id;
         fm.out_port = OFPP_NONE;
-        fm.ofpacts = ofpbuf_data(&ofpacts);
-        fm.ofpacts_len = ofpbuf_size(&ofpacts);
+        fm.ofpacts = ofpacts.data;
+        fm.ofpacts_len = ofpacts.size;
         buffer = ofputil_encode_flow_mod(&fm, sw->protocol);
 
         queue_tx(sw, buffer);
@@ -649,4 +704,21 @@ static void
 process_echo_request(struct lswitch *sw, const struct ofp_header *rq)
 {
     queue_tx(sw, make_echo_reply(rq));
+}
+
+static ofp_port_t
+get_mac_entry_ofp_port(const struct mac_learning *ml,
+                       const struct mac_entry *e)
+    OVS_REQ_RDLOCK(ml->rwlock)
+{
+    void *port = mac_entry_get_port(ml, e);
+    return (OVS_FORCE ofp_port_t) (uintptr_t) port;
+}
+
+static void
+set_mac_entry_ofp_port(struct mac_learning *ml,
+                       struct mac_entry *e, ofp_port_t ofp_port)
+    OVS_REQ_WRLOCK(ml->rwlock)
+{
+    mac_entry_set_port(ml, e, (void *) (OVS_FORCE uintptr_t) ofp_port);
 }

@@ -29,7 +29,7 @@
 #include "poll-loop.h"
 #include "timeval.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 static const struct nl_policy rtnlgrp_link_policy[] = {
     [IFLA_IFNAME] = { .type = NL_A_STRING, .optional = false },
@@ -45,7 +45,7 @@ main(int argc OVS_UNUSED, char *argv[])
     int error;
 
     set_program_name(argv[0]);
-    vlog_set_levels(NULL, VLF_ANY_FACILITY, VLL_DBG);
+    vlog_set_levels(NULL, VLF_ANY_DESTINATION, VLL_DBG);
 
     error = nl_sock_create(NETLINK_ROUTE, &sock);
     if (error) {

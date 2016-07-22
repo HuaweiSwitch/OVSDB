@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 #include "daemon-private.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +28,9 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if HAVE_LIBCAPNG
+#include <cap-ng.h>
+#endif
 #include "command-line.h"
 #include "fatal-signal.h"
 #include "dirs.h"
@@ -35,9 +40,21 @@
 #include "socket-util.h"
 #include "timeval.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(daemon_unix);
+
+#ifdef __linux__
+#define LINUX 1
+#else
+#define LINUX 0
+#endif
+
+#if HAVE_LIBCAPNG
+#define LIBCAPNG 1
+#else
+#define LIBCAPNG 0
+#endif
 
 /* --detach: Should we run in the background? */
 bool detach;                    /* Was --detach specified? */
@@ -63,6 +80,14 @@ static int daemonize_fd = -1;
 /* --monitor: Should a supervisory process monitor the daemon and restart it if
  * it dies due to an error signal? */
 static bool monitor;
+
+/* --user: Only root can use this option. Switch to new uid:gid after
+ * initially running as root.  */
+static bool switch_user = false;
+static uid_t uid;
+static gid_t gid;
+static char *user = NULL;
+static void daemon_become_new_user__(bool access_datapath);
 
 static void check_already_running(void);
 static int lock_pidfile(FILE *, int command);
@@ -214,19 +239,23 @@ fork_and_clean_up(void)
 /* Forks, then:
  *
  *   - In the parent, waits for the child to signal that it has completed its
- *     startup sequence.  Then stores -1 in '*fdp' and returns the child's pid.
+ *     startup sequence.  Then stores -1 in '*fdp' and returns the child's
+ *     pid in '*child_pid' argument.
  *
- *   - In the child, stores a fd in '*fdp' and returns 0.  The caller should
- *     pass the fd to fork_notify_startup() after it finishes its startup
- *     sequence.
+ *   - In the child, stores a fd in '*fdp' and returns 0 through '*child_pid'
+ *     argument.  The caller should pass the fd to fork_notify_startup() after
+ *     it finishes its startup sequence.
  *
- * If something goes wrong with the fork, logs a critical error and aborts the
- * process. */
-static pid_t
-fork_and_wait_for_startup(int *fdp)
+ * Returns 0 on success.  If something goes wrong and child process was not
+ * able to signal its readiness by calling fork_notify_startup(), then this
+ * function returns -1. However, even in case of failure it still sets child
+ * process id in '*child_pid'. */
+static int
+fork_and_wait_for_startup(int *fdp, pid_t *child_pid)
 {
     int fds[2];
     pid_t pid;
+    int ret = 0;
 
     xpipe(fds);
 
@@ -252,8 +281,9 @@ fork_and_wait_for_startup(int *fdp)
                     exit(WEXITSTATUS(status));
                 } else {
                     char *status_msg = process_status_msg(status);
-                    VLOG_FATAL("fork child died before signaling startup (%s)",
-                               status_msg);
+                    VLOG_ERR("fork child died before signaling startup (%s)",
+                             status_msg);
+                    ret = -1;
                 }
             } else if (retval < 0) {
                 VLOG_FATAL("waitpid failed (%s)", ovs_strerror(errno));
@@ -268,8 +298,8 @@ fork_and_wait_for_startup(int *fdp)
         close(fds[0]);
         *fdp = fds[1];
     }
-
-    return pid;
+    *child_pid = pid;
+    return ret;
 }
 
 static void
@@ -317,6 +347,7 @@ monitor_daemon(pid_t daemon_pid)
     time_t last_restart;
     char *status_msg;
     int crashes;
+    bool child_ready = true;
 
     set_subprogram_name("monitor");
     status_msg = xstrdup("healthy");
@@ -326,16 +357,19 @@ monitor_daemon(pid_t daemon_pid)
         int retval;
         int status;
 
-        proctitle_set("monitoring pid %lu (%s)",
-                      (unsigned long int) daemon_pid, status_msg);
+        ovs_cmdl_proctitle_set("monitoring pid %lu (%s)",
+                               (unsigned long int) daemon_pid, status_msg);
 
-        do {
-            retval = waitpid(daemon_pid, &status, 0);
-        } while (retval == -1 && errno == EINTR);
+        if (child_ready) {
+            do {
+                retval = waitpid(daemon_pid, &status, 0);
+            } while (retval == -1 && errno == EINTR);
+            if (retval == -1) {
+                VLOG_FATAL("waitpid failed (%s)", ovs_strerror(errno));
+            }
+        }
 
-        if (retval == -1) {
-            VLOG_FATAL("waitpid failed (%s)", ovs_strerror(errno));
-        } else if (retval == daemon_pid) {
+        if (!child_ready || retval == daemon_pid) {
             char *s = process_status_msg(status);
             if (should_restart(status)) {
                 free(status_msg);
@@ -372,8 +406,11 @@ monitor_daemon(pid_t daemon_pid)
                 last_restart = time(NULL);
 
                 VLOG_ERR("%s, restarting", status_msg);
-                daemon_pid = fork_and_wait_for_startup(&daemonize_fd);
-                if (!daemon_pid) {
+                child_ready = !fork_and_wait_for_startup(&daemonize_fd,
+                                                         &daemon_pid);
+                if (child_ready && !daemon_pid) {
+                    /* Child process needs to break out of monitoring
+                     * loop. */
                     break;
                 }
             } else {
@@ -387,7 +424,7 @@ monitor_daemon(pid_t daemon_pid)
     free(status_msg);
 
     /* Running in new daemon process. */
-    proctitle_restore();
+    ovs_cmdl_proctitle_restore();
     set_subprogram_name("");
 }
 
@@ -397,13 +434,23 @@ monitor_daemon(pid_t daemon_pid)
  * daemon_complete()) or that it failed to start up (by exiting with a nonzero
  * exit code). */
 void
-daemonize_start(void)
+daemonize_start(bool access_datapath)
 {
     assert_single_threaded();
     daemonize_fd = -1;
 
+    if (switch_user) {
+        daemon_become_new_user__(access_datapath);
+        switch_user = false;
+    }
+
     if (detach) {
-        if (fork_and_wait_for_startup(&daemonize_fd) > 0) {
+        pid_t pid;
+
+        if (fork_and_wait_for_startup(&daemonize_fd, &pid)) {
+            VLOG_FATAL("could not detach from foreground session");
+        }
+        if (pid > 0) {
             /* Running in parent process. */
             exit(0);
         }
@@ -416,7 +463,9 @@ daemonize_start(void)
         int saved_daemonize_fd = daemonize_fd;
         pid_t daemon_pid;
 
-        daemon_pid = fork_and_wait_for_startup(&daemonize_fd);
+        if (fork_and_wait_for_startup(&daemonize_fd, &daemon_pid)) {
+            VLOG_FATAL("could not initiate process monitoring");
+        }
         if (daemon_pid > 0) {
             /* Running in monitor process. */
             fork_notify_startup(saved_daemonize_fd);
@@ -664,4 +713,325 @@ bool
 should_service_stop(void)
 {
     return false;
+}
+
+
+static bool
+gid_matches(gid_t expected, gid_t value)
+{
+    return expected == -1 || expected == value;
+}
+
+static bool
+gid_verify(gid_t gid)
+{
+    gid_t r, e;
+
+    r = getgid();
+    e = getegid();
+    return (gid_matches(gid, r) &&
+            gid_matches(gid, e));
+}
+
+static void
+daemon_switch_group(gid_t gid)
+{
+    if ((setgid(gid) == -1) || !gid_verify(gid)) {
+        VLOG_FATAL("%s: fail to switch group to gid as %d, aborting",
+                   pidfile, gid);
+    }
+}
+
+static bool
+uid_matches(uid_t expected, uid_t value)
+{
+    return expected == -1 || expected == value;
+}
+
+static bool
+uid_verify(const uid_t uid)
+{
+    uid_t r, e;
+
+    r = getuid();
+    e = geteuid();
+    return (uid_matches(uid, r) &&
+            uid_matches(uid, e));
+}
+
+static void
+daemon_switch_user(const uid_t uid, const char *user)
+{
+    if ((setuid(uid) == -1) || !uid_verify(uid)) {
+        VLOG_FATAL("%s: fail to switch user to %s, aborting",
+                   pidfile, user);
+    }
+}
+
+/* Use portable Unix APIs to switch uid:gid, when datapath
+ * access is not required.  On Linux systems, all capabilities
+ * will be dropped.  */
+static void
+daemon_become_new_user_unix(void)
+{
+    /* "Setuid Demystified" by Hao Chen, etc outlines some caveats of
+     * around unix system call setuid() and friends. This implementation
+     * mostly follow the advice given by the paper.  The paper is
+     * published in 2002, so things could have changed.  */
+
+    /* Change both real and effective uid and gid will permanently
+     * drop the process' privilege.  "Setuid Demystified" suggested
+     * that calling getuid() after each setuid() call to verify they
+     * are actually set, because checking return code alone is not
+     * sufficient.  */
+    daemon_switch_group(gid);
+    if (user && initgroups(user, gid) == -1) {
+        VLOG_FATAL("%s: fail to add supplementary group gid %d, "
+                   "aborting", pidfile, gid);
+    }
+    daemon_switch_user(uid, user);
+}
+
+/* Linux specific implementation of daemon_become_new_user()
+ * using libcap-ng.   */
+static void
+daemon_become_new_user_linux(bool access_datapath OVS_UNUSED)
+{
+#if defined __linux__ &&  HAVE_LIBCAPNG
+    int ret;
+
+    ret = capng_get_caps_process();
+
+    if (!ret) {
+        if (capng_have_capabilities(CAPNG_SELECT_CAPS) > CAPNG_NONE) {
+            const capng_type_t cap_sets = CAPNG_EFFECTIVE|CAPNG_PERMITTED;
+
+            capng_clear(CAPNG_SELECT_BOTH);
+
+            ret = capng_update(CAPNG_ADD, cap_sets, CAP_IPC_LOCK)
+                  || capng_update(CAPNG_ADD, cap_sets, CAP_NET_BIND_SERVICE);
+
+            if (access_datapath && !ret) {
+                ret = capng_update(CAPNG_ADD, cap_sets, CAP_NET_ADMIN)
+                      || capng_update(CAPNG_ADD, cap_sets, CAP_NET_RAW);
+            }
+        } else {
+            ret = -1;
+        }
+    }
+
+    if (!ret) {
+        /* CAPNG_INIT_SUPP_GRP will be a better choice than
+         * CAPNG_DROP_SUPP_GRP. However this enum value is only defined
+         * with libcap-ng higher than version 0.7.4, which is not wildly
+         * available on many Linux distributions yet. Taking a more
+         * conservative approach to make sure OVS behaves consistently.
+         *
+         * XXX We may change this for future OVS releases.
+         */
+        ret = capng_change_id(uid, gid, CAPNG_DROP_SUPP_GRP
+                              | CAPNG_CLEAR_BOUNDING);
+    }
+
+    if (ret) {
+        VLOG_FATAL("%s: libcap-ng fail to switch to user and group "
+                   "%d:%d, aborting", pidfile, uid, gid);
+    }
+#endif
+}
+
+static void
+daemon_become_new_user__(bool access_datapath)
+{
+    /* If vlog file has been created, change its owner to the non-root user
+     * as specifed by the --user option.  */
+    vlog_change_owner_unix(uid, gid);
+
+    if (LINUX) {
+        if (LIBCAPNG) {
+            daemon_become_new_user_linux(access_datapath);
+        } else {
+            VLOG_FATAL("%s: fail to downgrade user using libcap-ng. "
+                       "(libcap-ng is not configured at compile time), "
+                       "aborting.", pidfile);
+        }
+    } else {
+        daemon_become_new_user_unix();
+    }
+}
+
+/* Noramlly, user switch is embedded within daemonize_start().
+ * However, there in case the user switch needs to be done
+ * before daemonize_start(), the following API can be used.  */
+void
+daemon_become_new_user(bool access_datapath)
+{
+    assert_single_threaded();
+    if (switch_user) {
+        daemon_become_new_user__(access_datapath);
+        /* daemonize_start() should not switch user again. */
+        switch_user = false;
+    }
+}
+
+/* Return the maximun suggested buffer size for both getpwname_r()
+ * and getgrnam_r().
+ *
+ * This size may still not be big enough. in case getpwname_r()
+ * and friends return ERANGE, a larger buffer should be supplied to
+ * retry. (The man page did not specify the max size to stop at, we
+ * will keep trying with doubling the buffer size for each round until
+ * the size wrapps around size_t.  */
+static size_t
+get_sysconf_buffer_size(void)
+{
+    size_t bufsize, pwd_bs = 0, grp_bs = 0;
+    const size_t default_bufsize = 1024;
+
+    errno = 0;
+    if ((pwd_bs = sysconf(_SC_GETPW_R_SIZE_MAX)) == -1) {
+        if (errno) {
+            VLOG_FATAL("%s: Read initial passwordd struct size "
+                       "failed (%s), aborting. ", pidfile,
+                       ovs_strerror(errno));
+        }
+    }
+
+    if ((grp_bs = sysconf(_SC_GETGR_R_SIZE_MAX)) == -1) {
+        if (errno) {
+            VLOG_FATAL("%s: Read initial group struct size "
+                       "failed (%s), aborting. ", pidfile,
+                       ovs_strerror(errno));
+        }
+    }
+
+    bufsize = MAX(pwd_bs, grp_bs);
+    return bufsize ? bufsize : default_bufsize;
+}
+
+/* Try to double the size of '*buf', return true
+ * if successful, and '*sizep' will be updated with
+ * the new size. Otherwise, return false.  */
+static bool
+enlarge_buffer(char **buf, size_t *sizep)
+{
+    size_t newsize = *sizep * 2;
+
+    if (newsize > *sizep) {
+        *buf = xrealloc(*buf, newsize);
+        *sizep = newsize;
+        return true;
+    }
+
+    return false;
+}
+
+/* Parse and sanity check user_spec.
+ *
+ * If successful, set global variables 'uid' and 'gid'
+ * with the parsed results. Global variable 'user'
+ * will be pointing to a string that stores the name
+ * of the user to be switched into.
+ *
+ * Also set 'switch_to_new_user' to true, The actual
+ * user switching is done as soon as daemonize_start()
+ * is called. I/O access before calling daemonize_start()
+ * will still be with root's credential.  */
+void
+daemon_set_new_user(const char *user_spec)
+{
+    char *pos = strchr(user_spec, ':');
+    size_t init_bufsize, bufsize;
+
+    init_bufsize = get_sysconf_buffer_size();
+    uid = getuid();
+    gid = getgid();
+
+    if (geteuid() || uid) {
+        VLOG_FATAL("%s: only root can use --user option", pidfile);
+    }
+
+    user_spec += strspn(user_spec, " \t\r\n");
+    size_t len = pos ? pos - user_spec : strlen(user_spec);
+    char *buf;
+    struct passwd pwd, *res;
+    int e;
+
+    bufsize = init_bufsize;
+    buf = xmalloc(bufsize);
+    if (len) {
+        user = xmemdup0(user_spec, len);
+
+        while ((e = getpwnam_r(user, &pwd, buf, bufsize, &res)) == ERANGE) {
+            if (!enlarge_buffer(&buf, &bufsize)) {
+                break;
+            }
+        }
+
+        if (e != 0) {
+            VLOG_FATAL("%s: Failed to retrive user %s's uid (%s), aborting.",
+                       pidfile, user, ovs_strerror(e));
+        }
+    } else {
+        /* User name is not specified, use current user.  */
+        while ((e = getpwuid_r(uid, &pwd, buf, bufsize, &res)) == ERANGE) {
+            if (!enlarge_buffer(&buf, &bufsize)) {
+                break;
+            }
+        }
+
+        if (e != 0) {
+            VLOG_FATAL("%s: Failed to retrive current user's name "
+                       "(%s), aborting.", pidfile, ovs_strerror(e));
+        }
+        user = xstrdup(pwd.pw_name);
+    }
+
+    uid = pwd.pw_uid;
+    gid = pwd.pw_gid;
+    free(buf);
+
+    if (pos) {
+        char *grpstr = pos + 1;
+        grpstr += strspn(grpstr, " \t\r\n");
+
+        if (*grpstr) {
+            struct group grp, *res;
+
+            bufsize = init_bufsize;
+            buf = xmalloc(bufsize);
+            while ((e = getgrnam_r(grpstr, &grp, buf, bufsize, &res))
+                         == ERANGE) {
+                if (!enlarge_buffer(&buf, &bufsize)) {
+                    break;
+                }
+            }
+
+            if (e) {
+                VLOG_FATAL("%s: Failed to get group entry for %s, "
+                           "(%s), aborting.", pidfile, grpstr,
+                           ovs_strerror(e));
+            }
+
+            if (gid != grp.gr_gid) {
+                char **mem;
+
+                for (mem = grp.gr_mem; *mem; ++mem) {
+                    if (!strcmp(*mem, user)) {
+                        break;
+                    }
+                }
+
+                if (!*mem) {
+                    VLOG_FATAL("%s: Invalid --user option %s (user %s is "
+                               "not in group %s), aborting.", pidfile,
+                               user_spec, user, grpstr);
+                }
+                gid = grp.gr_gid;
+            }
+            free(buf);
+        }
+    }
+
+    switch_user = true;
 }

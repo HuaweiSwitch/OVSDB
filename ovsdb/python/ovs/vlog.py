@@ -26,7 +26,7 @@ import ovs.dirs
 import ovs.unixctl
 import ovs.util
 
-FACILITIES = {"console": "info", "file": "info", "syslog": "info"}
+DESTINATIONS = {"console": "info", "file": "info", "syslog": "info"}
 PATTERNS = {
     "console": "%D{%Y-%m-%dT%H:%M:%SZ}|%05N|%c%T|%p|%m",
     "file": "%D{%Y-%m-%dT%H:%M:%S.###Z}|%05N|%c%T|%p|%m",
@@ -40,6 +40,11 @@ LEVELS = {
     "emer": logging.CRITICAL,
     "off": logging.CRITICAL
 }
+FACILITIES = ['auth', 'authpriv', 'cron', 'daemon', 'ftp', 'kern', 'lpr',
+              'mail', 'news', 'syslog', 'user', 'uucp', 'local0', 'local1',
+              'local2', 'local3', 'local4', 'local5', 'local6', 'local7']
+syslog_facility = "daemon"
+syslog_handler = ''
 
 
 def get_level(level_str):
@@ -50,7 +55,7 @@ class Vlog:
     __inited = False
     __msg_num = 0
     __start_time = 0
-    __mfl = {}  # Module -> facility -> level
+    __mfl = {}  # Module -> destination -> level
     __log_file = None
     __file_handler = None
     __log_patterns = PATTERNS
@@ -63,7 +68,7 @@ class Vlog:
         assert not Vlog.__inited
         self.name = name.lower()
         if name not in Vlog.__mfl:
-            Vlog.__mfl[self.name] = FACILITIES.copy()
+            Vlog.__mfl[self.name] = DESTINATIONS.copy()
 
     def __log(self, level, message, **kwargs):
         if not Vlog.__inited:
@@ -79,8 +84,8 @@ class Vlog:
                 msg = self._build_message(message, f, level, msg_num)
                 logging.getLogger(f).log(level_num, msg, **kwargs)
 
-    def _build_message(self, message, facility, level, msg_num):
-        pattern = self.__log_patterns[facility]
+    def _build_message(self, message, destination, level, msg_num):
+        pattern = self.__log_patterns[destination]
         tmp = pattern
 
         tmp = self._format_time(tmp)
@@ -216,7 +221,7 @@ class Vlog:
         Vlog.__start_time = datetime.datetime.utcnow()
         logging.raiseExceptions = False
         Vlog.__log_file = log_file
-        for f in FACILITIES:
+        for f in DESTINATIONS:
             logger = logging.getLogger(f)
             logger.setLevel(logging.DEBUG)
 
@@ -224,9 +229,7 @@ class Vlog:
                 if f == "console":
                     logger.addHandler(logging.StreamHandler(sys.stderr))
                 elif f == "syslog":
-                    logger.addHandler(logging.handlers.SysLogHandler(
-                        address="/dev/log",
-                        facility=logging.handlers.SysLogHandler.LOG_DAEMON))
+                    Vlog.add_syslog_handler()
                 elif f == "file" and Vlog.__log_file:
                     Vlog.__file_handler = logging.FileHandler(Vlog.__log_file)
                     logger.addHandler(Vlog.__file_handler)
@@ -241,17 +244,17 @@ class Vlog:
                                      Vlog._unixctl_vlog_list, None)
 
     @staticmethod
-    def set_level(module, facility, level):
-        """ Sets the log level of the 'module'-'facility' tuple to 'level'.
+    def set_level(module, destination, level):
+        """ Sets the log level of the 'module'-'destination' tuple to 'level'.
         All three arguments are strings which are interpreted the same as
         arguments to the --verbose flag.  Should be called after all Vlog
         objects have already been created."""
 
         module = module.lower()
-        facility = facility.lower()
+        destination = destination.lower()
         level = level.lower()
 
-        if facility != "any" and facility not in FACILITIES:
+        if destination != "any" and destination not in DESTINATIONS:
             return
 
         if module != "any" and module not in Vlog.__mfl:
@@ -265,47 +268,80 @@ class Vlog:
         else:
             modules = [module]
 
-        if facility == "any":
-            facilities = FACILITIES.keys()
+        if destination == "any":
+            destinations = DESTINATIONS.keys()
         else:
-            facilities = [facility]
+            destinations = [destination]
 
         for m in modules:
-            for f in facilities:
+            for f in destinations:
                 Vlog.__mfl[m][f] = level
 
     @staticmethod
-    def set_pattern(facility, pattern):
-        """ Sets the log pattern of the 'facility' to 'pattern' """
-        facility = facility.lower()
-        Vlog.__log_patterns[facility] = pattern
+    def set_pattern(destination, pattern):
+        """ Sets the log pattern of the 'destination' to 'pattern' """
+        destination = destination.lower()
+        Vlog.__log_patterns[destination] = pattern
+
+    @staticmethod
+    def add_syslog_handler(facility=None):
+        global syslog_facility, syslog_handler
+
+        # If handler is already added and there is no change in 'facility',
+        # there is nothing to do.
+        if (not facility or facility == syslog_facility) and syslog_handler:
+            return
+
+        logger = logging.getLogger('syslog')
+        # If there is no infrastructure to support python syslog, increase
+        # the logging severity level to avoid repeated errors.
+        if not os.path.exists("/dev/log"):
+            logger.setLevel(logging.CRITICAL)
+            return
+
+        if syslog_handler:
+            logger.removeHandler(syslog_handler)
+
+        if facility:
+            syslog_facility = facility
+
+        syslog_handler = logging.handlers.SysLogHandler(address="/dev/log",
+                                                    facility=syslog_facility)
+        logger.addHandler(syslog_handler)
+        return
 
     @staticmethod
     def set_levels_from_string(s):
         module = None
         level = None
-        facility = None
+        destination = None
 
         words = re.split('[ :]', s)
         if words[0] == "pattern":
             try:
-                if words[1] in FACILITIES and words[2]:
+                if words[1] in DESTINATIONS and words[2]:
                     segments = [words[i] for i in range(2, len(words))]
                     pattern = "".join(segments)
                     Vlog.set_pattern(words[1], pattern)
                     return
                 else:
-                    return "Facility %s does not exist" % words[1]
+                    return "Destination %s does not exist" % words[1]
             except IndexError:
-                return "Please supply a valid pattern and facility"
+                return "Please supply a valid pattern and destination"
+        elif words[0] == "FACILITY":
+            if words[1] in FACILITIES:
+                Vlog.add_syslog_handler(words[1])
+                return
+            else:
+                return "Facility %s is invalid" % words[1]
 
         for word in [w.lower() for w in words]:
             if word == "any":
                 pass
-            elif word in FACILITIES:
-                if facility:
-                    return "cannot specify multiple facilities"
-                facility = word
+            elif word in DESTINATIONS:
+                if destination:
+                    return "cannot specify multiple destinations"
+                destination = word
             elif word in LEVELS:
                 if level:
                     return "cannot specify multiple levels"
@@ -315,9 +351,9 @@ class Vlog:
                     return "cannot specify multiple modules"
                 module = word
             else:
-                return "no facility, level, or module \"%s\"" % word
+                return "no destination, level, or module \"%s\"" % word
 
-        Vlog.set_level(module or "any", facility or "any", level or "any")
+        Vlog.set_level(module or "any", destination or "any", level or "any")
 
     @staticmethod
     def get_levels():

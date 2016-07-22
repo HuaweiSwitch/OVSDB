@@ -83,6 +83,10 @@ only allow privileged users, such as the superuser, to use it.
 \fBovs\-vswitchd\fR emits a log message if \fBmlockall()\fR is
 unavailable or unsuccessful.
 .
+.SS "DPDK Options"
+.IP "\fB\-\-dpdk\fR"
+Initialize \fBovs\-vswitchd\fR DPDK datapath.  Refer to INSTALL.DPDK
+for details.
 .SS "Daemon Options"
 .ds DD \
 \fBovs\-vswitchd\fR detaches only after it has connected to the \
@@ -94,7 +98,10 @@ configuration.
 .SS "Public Key Infrastructure Options"
 .so lib/ssl.man
 .so lib/ssl-bootstrap.man
+.SS "Logging Options"
 .so lib/vlog.man
+.SS "Other Options"
+.so lib/unixctl.man
 .so lib/common.man
 .
 .SH "RUNTIME MANAGEMENT COMMANDS"
@@ -138,6 +145,13 @@ Flushes \fIbridge\fR MAC address learning table, or all learning tables
 if no \fIbridge\fR is given.
 .IP "\fBfdb/show\fR \fIbridge\fR"
 Lists each MAC address/VLAN pair learned by the specified \fIbridge\fR,
+along with the port on which it was learned and the age of the entry,
+in seconds.
+.IP "\fBmdb/flush\fR [\fIbridge\fR]"
+Flushes \fIbridge\fR multicast snooping table, or all snooping tables
+if no \fIbridge\fR is given.
+.IP "\fBmdb/show\fR \fIbridge\fR"
+Lists each multicast group/VLAN pair learned by the specified \fIbridge\fR,
 along with the port on which it was learned and the age of the entry,
 in seconds.
 .IP "\fBbridge/reconnect\fR [\fIbridge\fR]"
@@ -209,12 +223,46 @@ whether it is attached or detached, port id and priority, actor
 information, and partner information.  If \fIport\fR is not specified,
 then displays detailed information about all interfaces with CFM
 enabled.
+.SS "DPCTL DATAPATH DEBUGGING COMMANDS"
+The primary way to configure \fBovs\-vswitchd\fR is through the Open
+vSwitch database, e.g. using \fBovs\-vsctl\fR(8).  These commands
+provide a debugging interface for managing datapaths.  They implement
+the same features (and syntax) as \fBovs\-dpctl\fR(8).  Unlike
+\fBovs\-dpctl\fR(8), these commands work with datapaths that are
+integrated into \fBovs\-vswitchd\fR (e.g. the \fBnetdev\fR datapath
+type).
+.PP
+.
+.ds DX \fBdpctl/\fR
+.de DO
+\\$2 \\$1 \\$3
+..
+.so lib/dpctl.man
+.
+.SS "DPIF-NETDEV COMMANDS"
+These commands are used to expose internal information (mostly statistics)
+about the ``dpif-netdev'' userspace datapath. If there is only one datapath
+(as is often the case, unless \fBdpctl/\fR commands are used), the \fIdp\fR
+argument can be omitted.
+.IP "\fBdpif-netdev/pmd-stats-show\fR [\fIdp\fR]"
+Shows performance statistics for each pmd thread of the datapath \fIdp\fR.
+The special thread ``main'' sums up the statistics of every non pmd thread.
+The sum of ``emc hits'', ``masked hits'' and ``miss'' is the number of
+packets received by the datapath.  Cycles are counted using the TSC or similar
+facilities (when available on the platform).  To reset these counters use
+\fBdpif-netdev/pmd-stats-clear\fR. The duration of one cycle depends on the
+measuring infrastructure.
+.IP "\fBdpif-netdev/pmd-stats-clear\fR [\fIdp\fR]"
+Resets to zero the per pmd thread performance numbers shown by the
+\fBdpif-netdev/pmd-stats-show\fR command.  It will NOT reset datapath or
+bridge statistics, only the values shown by the above command.
 .
 .so ofproto/ofproto-dpif-unixctl.man
 .so ofproto/ofproto-unixctl.man
 .so lib/vlog-unixctl.man
 .so lib/memory-unixctl.man
 .so lib/coverage-unixctl.man
+.so ofproto/ofproto-tnl-unixctl.man
 .
 .SH "OPENFLOW IMPLEMENTATION"
 .
@@ -243,12 +291,13 @@ We believe these limits to be accurate as of this writing.  These
 limits assume the use of the Linux kernel datapath.
 .
 .IP \(bu
-\fBovs\-vswitchd\fR started through \fBovs\-ctl\fR(8) provides a limit of 7500
+\fBovs\-vswitchd\fR started through \fBovs\-ctl\fR(8) provides a limit of 65535
 file descriptors.  The limits on the number of bridges and ports is decided by
 the availability of file descriptors.  With the Linux kernel datapath, creation
-of a single bridge consumes 3 file descriptors and adding a port consumes
-1 file descriptor.  Performance will degrade beyond 1,024 ports per bridge due
-to fixed hash table sizing.  Other platforms may have different limitations.
+of a single bridge consumes three file descriptors and adding a port consumes
+"n-handler-threads" file descriptors per bridge port.  Performance will degrade
+beyond 1,024 ports per bridge due to fixed hash table sizing.  Other platforms
+may have different limitations.
 .
 .IP \(bu
 2,048 MAC learning entries per bridge, by default.  (This is

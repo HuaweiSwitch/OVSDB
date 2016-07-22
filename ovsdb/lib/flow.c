@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@
 #include "hash.h"
 #include "jhash.h"
 #include "match.h"
-#include "ofpbuf.h"
+#include "dp-packet.h"
 #include "openflow/openflow.h"
 #include "packets.h"
 #include "odp-util.h"
@@ -42,39 +42,44 @@
 COVERAGE_DEFINE(flow_extract);
 COVERAGE_DEFINE(miniflow_malloc);
 
-/* U32 indices for segmented flow classification. */
-const uint8_t flow_segment_u32s[4] = {
-    FLOW_SEGMENT_1_ENDS_AT / 4,
-    FLOW_SEGMENT_2_ENDS_AT / 4,
-    FLOW_SEGMENT_3_ENDS_AT / 4,
-    FLOW_U32S
+/* U64 indices for segmented flow classification. */
+const uint8_t flow_segment_u64s[4] = {
+    FLOW_SEGMENT_1_ENDS_AT / sizeof(uint64_t),
+    FLOW_SEGMENT_2_ENDS_AT / sizeof(uint64_t),
+    FLOW_SEGMENT_3_ENDS_AT / sizeof(uint64_t),
+    FLOW_U64S
 };
+
+/* Asserts that field 'f1' follows immediately after 'f0' in struct flow,
+ * without any intervening padding. */
+#define ASSERT_SEQUENTIAL(f0, f1)                       \
+    BUILD_ASSERT_DECL(offsetof(struct flow, f0)         \
+                      + MEMBER_SIZEOF(struct flow, f0)  \
+                      == offsetof(struct flow, f1))
+
+/* Asserts that fields 'f0' and 'f1' are in the same 32-bit aligned word within
+ * struct flow. */
+#define ASSERT_SAME_WORD(f0, f1)                        \
+    BUILD_ASSERT_DECL(offsetof(struct flow, f0) / 4     \
+                      == offsetof(struct flow, f1) / 4)
+
+/* Asserts that 'f0' and 'f1' are both sequential and within the same 32-bit
+ * aligned word in struct flow. */
+#define ASSERT_SEQUENTIAL_SAME_WORD(f0, f1)     \
+    ASSERT_SEQUENTIAL(f0, f1);                  \
+    ASSERT_SAME_WORD(f0, f1)
 
 /* miniflow_extract() assumes the following to be true to optimize the
  * extraction process. */
-BUILD_ASSERT_DECL(offsetof(struct flow, dl_type) + 2
-                  == offsetof(struct flow, vlan_tci) &&
-                  offsetof(struct flow, dl_type) / 4
-                  == offsetof(struct flow, vlan_tci) / 4 );
+ASSERT_SEQUENTIAL_SAME_WORD(dl_type, vlan_tci);
 
-BUILD_ASSERT_DECL(offsetof(struct flow, nw_frag) + 3
-                  == offsetof(struct flow, nw_proto) &&
-                  offsetof(struct flow, nw_tos) + 2
-                  == offsetof(struct flow, nw_proto) &&
-                  offsetof(struct flow, nw_ttl) + 1
-                  == offsetof(struct flow, nw_proto) &&
-                  offsetof(struct flow, nw_frag) / 4
-                  == offsetof(struct flow, nw_tos) / 4 &&
-                  offsetof(struct flow, nw_ttl) / 4
-                  == offsetof(struct flow, nw_tos) / 4 &&
-                  offsetof(struct flow, nw_proto) / 4
-                  == offsetof(struct flow, nw_tos) / 4);
+ASSERT_SEQUENTIAL_SAME_WORD(nw_frag, nw_tos);
+ASSERT_SEQUENTIAL_SAME_WORD(nw_tos, nw_ttl);
+ASSERT_SEQUENTIAL_SAME_WORD(nw_ttl, nw_proto);
 
-/* TCP flags in the first half of a BE32, zeroes in the other half. */
-BUILD_ASSERT_DECL(offsetof(struct flow, tcp_flags) + 2
-                  == offsetof(struct flow, pad) &&
-                  offsetof(struct flow, tcp_flags) / 4
-                  == offsetof(struct flow, pad) / 4);
+/* TCP flags in the middle of a BE64, zeroes in the other half. */
+BUILD_ASSERT_DECL(offsetof(struct flow, tcp_flags) % 8 == 4);
+
 #if WORDS_BIGENDIAN
 #define TCP_FLAGS_BE32(tcp_ctl) ((OVS_FORCE ovs_be32)TCP_FLAGS_BE16(tcp_ctl) \
                                  << 16)
@@ -82,18 +87,15 @@ BUILD_ASSERT_DECL(offsetof(struct flow, tcp_flags) + 2
 #define TCP_FLAGS_BE32(tcp_ctl) ((OVS_FORCE ovs_be32)TCP_FLAGS_BE16(tcp_ctl))
 #endif
 
-BUILD_ASSERT_DECL(offsetof(struct flow, tp_src) + 2
-                  == offsetof(struct flow, tp_dst) &&
-                  offsetof(struct flow, tp_src) / 4
-                  == offsetof(struct flow, tp_dst) / 4);
+ASSERT_SEQUENTIAL_SAME_WORD(tp_src, tp_dst);
 
 /* Removes 'size' bytes from the head end of '*datap', of size '*sizep', which
  * must contain at least 'size' bytes of data.  Returns the first byte of data
  * removed. */
 static inline const void *
-data_pull(void **datap, size_t *sizep, size_t size)
+data_pull(const void **datap, size_t *sizep, size_t size)
 {
-    char *data = (char *)*datap;
+    const char *data = *datap;
     *datap = data + size;
     *sizep -= size;
     return data;
@@ -103,103 +105,178 @@ data_pull(void **datap, size_t *sizep, size_t size)
  * the head end of '*datap' and returns the first byte removed.  Otherwise,
  * returns a null pointer without modifying '*datap'. */
 static inline const void *
-data_try_pull(void **datap, size_t *sizep, size_t size)
+data_try_pull(const void **datap, size_t *sizep, size_t size)
 {
     return OVS_LIKELY(*sizep >= size) ? data_pull(datap, sizep, size) : NULL;
 }
 
 /* Context for pushing data to a miniflow. */
 struct mf_ctx {
-    uint64_t map;
-    uint32_t *data;
-    uint32_t * const end;
+    struct flowmap map;
+    uint64_t *data;
+    uint64_t * const end;
 };
 
 /* miniflow_push_* macros allow filling in a miniflow data values in order.
  * Assertions are needed only when the layout of the struct flow is modified.
  * 'ofs' is a compile-time constant, which allows most of the code be optimized
- * away.  Some GCC versions gave warnigns on ALWAYS_INLINE, so these are
+ * away.  Some GCC versions gave warnings on ALWAYS_INLINE, so these are
  * defined as macros. */
 
-#if (FLOW_WC_SEQ != 26)
+#if (FLOW_WC_SEQ != 35)
 #define MINIFLOW_ASSERT(X) ovs_assert(X)
+BUILD_MESSAGE("FLOW_WC_SEQ changed: miniflow_extract() will have runtime "
+               "assertions enabled. Consider updating FLOW_WC_SEQ after "
+               "testing")
 #else
 #define MINIFLOW_ASSERT(X)
 #endif
 
-#define miniflow_push_uint32_(MF, OFS, VALUE)                   \
-{                                                               \
-    MINIFLOW_ASSERT(MF.data < MF.end && (OFS) % 4 == 0          \
-                    && !(MF.map & (UINT64_MAX << (OFS) / 4)));  \
-    *MF.data++ = VALUE;                                         \
-    MF.map |= UINT64_C(1) << (OFS) / 4;                         \
-}
-
-#define miniflow_push_be32_(MF, OFS, VALUE) \
-    miniflow_push_uint32_(MF, OFS, (OVS_FORCE uint32_t)(VALUE))
-
-#define miniflow_push_uint16_(MF, OFS, VALUE)                   \
-{                                                               \
-    MINIFLOW_ASSERT(MF.data < MF.end &&                                 \
-                    (((OFS) % 4 == 0 && !(MF.map & (UINT64_MAX << (OFS) / 4))) \
-                     || ((OFS) % 4 == 2 && MF.map & (UINT64_C(1) << (OFS) / 4) \
-                         && !(MF.map & (UINT64_MAX << ((OFS) / 4 + 1)))))); \
-                                                                        \
-    if ((OFS) % 4 == 0) {                                               \
-        *(uint16_t *)MF.data = VALUE;                                   \
-        MF.map |= UINT64_C(1) << (OFS) / 4;                             \
-    } else if ((OFS) % 4 == 2) {                                        \
-        *((uint16_t *)MF.data + 1) = VALUE;                             \
-        MF.data++;                                                      \
+/* True if 'IDX' and higher bits are not set. */
+#define ASSERT_FLOWMAP_NOT_SET(FM, IDX)                                 \
+{                                                                       \
+    MINIFLOW_ASSERT(!((FM)->bits[(IDX) / MAP_T_BITS] &                  \
+                      (FLOWMAP_MAX << ((IDX) % MAP_T_BITS))));          \
+    for (size_t i = (IDX) / MAP_T_BITS + 1; i < FLOWMAP_UNITS; i++) {   \
+        MINIFLOW_ASSERT(!(FM)->bits[i]);                                \
     }                                                                   \
 }
 
-#define miniflow_push_be16_(MF, OFS, VALUE)             \
+#define miniflow_set_map(MF, OFS)            \
+    {                                        \
+    ASSERT_FLOWMAP_NOT_SET(&MF.map, (OFS));  \
+    flowmap_set(&MF.map, (OFS), 1);          \
+}
+
+#define miniflow_assert_in_map(MF, OFS)             \
+    MINIFLOW_ASSERT(FLOWMAP_IS_SET(MF.map, (OFS))); \
+    ASSERT_FLOWMAP_NOT_SET(&MF.map, (OFS) + 1)
+
+#define miniflow_push_uint64_(MF, OFS, VALUE)              \
+{                                                          \
+    MINIFLOW_ASSERT(MF.data < MF.end && (OFS) % 8 == 0);   \
+    *MF.data++ = VALUE;                                    \
+    miniflow_set_map(MF, OFS / 8);                         \
+}
+
+#define miniflow_push_be64_(MF, OFS, VALUE)                     \
+    miniflow_push_uint64_(MF, OFS, (OVS_FORCE uint64_t)(VALUE))
+
+#define miniflow_push_uint32_(MF, OFS, VALUE)   \
+    {                                           \
+    MINIFLOW_ASSERT(MF.data < MF.end);          \
+                                                \
+    if ((OFS) % 8 == 0) {                       \
+        miniflow_set_map(MF, OFS / 8);          \
+        *(uint32_t *)MF.data = VALUE;           \
+    } else if ((OFS) % 8 == 4) {                \
+        miniflow_assert_in_map(MF, OFS / 8);    \
+        *((uint32_t *)MF.data + 1) = VALUE;     \
+        MF.data++;                              \
+    }                                           \
+}
+
+#define miniflow_push_be32_(MF, OFS, VALUE)                     \
+    miniflow_push_uint32_(MF, OFS, (OVS_FORCE uint32_t)(VALUE))
+
+#define miniflow_push_uint16_(MF, OFS, VALUE)   \
+{                                               \
+    MINIFLOW_ASSERT(MF.data < MF.end);          \
+                                                \
+    if ((OFS) % 8 == 0) {                       \
+        miniflow_set_map(MF, OFS / 8);          \
+        *(uint16_t *)MF.data = VALUE;           \
+    } else if ((OFS) % 8 == 2) {                \
+        miniflow_assert_in_map(MF, OFS / 8);    \
+        *((uint16_t *)MF.data + 1) = VALUE;     \
+    } else if ((OFS) % 8 == 4) {                \
+        miniflow_assert_in_map(MF, OFS / 8);    \
+        *((uint16_t *)MF.data + 2) = VALUE;     \
+    } else if ((OFS) % 8 == 6) {                \
+        miniflow_assert_in_map(MF, OFS / 8);    \
+        *((uint16_t *)MF.data + 3) = VALUE;     \
+        MF.data++;                              \
+    }                                           \
+}
+
+#define miniflow_pad_to_64_(MF, OFS)                            \
+{                                                               \
+    MINIFLOW_ASSERT((OFS) % 8 != 0);                            \
+    miniflow_assert_in_map(MF, OFS / 8);                        \
+                                                                \
+    memset((uint8_t *)MF.data + (OFS) % 8, 0, 8 - (OFS) % 8);   \
+    MF.data++;                                                  \
+}
+
+#define miniflow_push_be16_(MF, OFS, VALUE)                     \
     miniflow_push_uint16_(MF, OFS, (OVS_FORCE uint16_t)VALUE);
+
+#define miniflow_set_maps(MF, OFS, N_WORDS)                     \
+{                                                               \
+    size_t ofs = (OFS);                                         \
+    size_t n_words = (N_WORDS);                                 \
+                                                                \
+    MINIFLOW_ASSERT(n_words && MF.data + n_words <= MF.end);    \
+    ASSERT_FLOWMAP_NOT_SET(&MF.map, ofs);                       \
+    flowmap_set(&MF.map, ofs, n_words);                         \
+}
 
 /* Data at 'valuep' may be unaligned. */
 #define miniflow_push_words_(MF, OFS, VALUEP, N_WORDS)          \
 {                                                               \
-    int ofs32 = (OFS) / 4;                                      \
-                                                                        \
-    MINIFLOW_ASSERT(MF.data + (N_WORDS) <= MF.end && (OFS) % 4 == 0     \
-                    && !(MF.map & (UINT64_MAX << ofs32)));              \
-                                                                        \
-    memcpy(MF.data, (VALUEP), (N_WORDS) * sizeof *MF.data);             \
-    MF.data += (N_WORDS);                                               \
-    MF.map |= ((UINT64_MAX >> (64 - (N_WORDS))) << ofs32);              \
+    MINIFLOW_ASSERT((OFS) % 8 == 0);                            \
+    miniflow_set_maps(MF, (OFS) / 8, (N_WORDS));                \
+    memcpy(MF.data, (VALUEP), (N_WORDS) * sizeof *MF.data);     \
+    MF.data += (N_WORDS);                                       \
 }
 
-#define miniflow_push_uint32(MF, FIELD, VALUE)                          \
+/* Push 32-bit words padded to 64-bits. */
+#define miniflow_push_words_32_(MF, OFS, VALUEP, N_WORDS)               \
+{                                                                       \
+    miniflow_set_maps(MF, (OFS) / 8, DIV_ROUND_UP(N_WORDS, 2));         \
+    memcpy(MF.data, (VALUEP), (N_WORDS) * sizeof(uint32_t));            \
+    MF.data += DIV_ROUND_UP(N_WORDS, 2);                                \
+    if ((N_WORDS) & 1) {                                                \
+        *((uint32_t *)MF.data - 1) = 0;                                 \
+    }                                                                   \
+}
+
+/* Data at 'valuep' may be unaligned. */
+/* MACs start 64-aligned, and must be followed by other data or padding. */
+#define miniflow_push_macs_(MF, OFS, VALUEP)                    \
+{                                                               \
+    miniflow_set_maps(MF, (OFS) / 8, 2);                        \
+    memcpy(MF.data, (VALUEP), 2 * ETH_ADDR_LEN);                \
+    MF.data += 1;                   /* First word only. */      \
+}
+
+#define miniflow_push_uint32(MF, FIELD, VALUE)                      \
     miniflow_push_uint32_(MF, offsetof(struct flow, FIELD), VALUE)
 
-#define miniflow_push_be32(MF, FIELD, VALUE)                            \
+#define miniflow_push_be32(MF, FIELD, VALUE)                        \
     miniflow_push_be32_(MF, offsetof(struct flow, FIELD), VALUE)
 
-#define miniflow_push_uint32_check(MF, FIELD, VALUE)                    \
-    { if (OVS_LIKELY(VALUE)) {                                          \
-            miniflow_push_uint32_(MF, offsetof(struct flow, FIELD), VALUE); \
-        }                                                               \
-    }
-
-#define miniflow_push_be32_check(MF, FIELD, VALUE)                      \
-    { if (OVS_LIKELY(VALUE)) {                                          \
-            miniflow_push_be32_(MF, offsetof(struct flow, FIELD), VALUE); \
-        }                                                               \
-    }
-
-#define miniflow_push_uint16(MF, FIELD, VALUE)                          \
+#define miniflow_push_uint16(MF, FIELD, VALUE)                      \
     miniflow_push_uint16_(MF, offsetof(struct flow, FIELD), VALUE)
 
-#define miniflow_push_be16(MF, FIELD, VALUE)                            \
+#define miniflow_push_be16(MF, FIELD, VALUE)                        \
     miniflow_push_be16_(MF, offsetof(struct flow, FIELD), VALUE)
+
+#define miniflow_pad_to_64(MF, FIELD)                       \
+    miniflow_pad_to_64_(MF, offsetof(struct flow, FIELD))
 
 #define miniflow_push_words(MF, FIELD, VALUEP, N_WORDS)                 \
     miniflow_push_words_(MF, offsetof(struct flow, FIELD), VALUEP, N_WORDS)
 
+#define miniflow_push_words_32(MF, FIELD, VALUEP, N_WORDS)              \
+    miniflow_push_words_32_(MF, offsetof(struct flow, FIELD), VALUEP, N_WORDS)
+
+#define miniflow_push_macs(MF, FIELD, VALUEP)                       \
+    miniflow_push_macs_(MF, offsetof(struct flow, FIELD), VALUEP)
+
 /* Pulls the MPLS headers at '*datap' and returns the count of them. */
 static inline int
-parse_mpls(void **datap, size_t *sizep)
+parse_mpls(const void **datap, size_t *sizep)
 {
     const struct mpls_hdr *mh;
     int count = 0;
@@ -210,11 +287,11 @@ parse_mpls(void **datap, size_t *sizep)
             break;
         }
     }
-    return MAX(count, FLOW_MAX_MPLS_LABELS);
+    return MIN(count, FLOW_MAX_MPLS_LABELS);
 }
 
 static inline ovs_be16
-parse_vlan(void **datap, size_t *sizep)
+parse_vlan(const void **datap, size_t *sizep)
 {
     const struct eth_header *eth = *datap;
 
@@ -236,7 +313,7 @@ parse_vlan(void **datap, size_t *sizep)
 }
 
 static inline ovs_be16
-parse_ethertype(void **datap, size_t *sizep)
+parse_ethertype(const void **datap, size_t *sizep)
 {
     const struct llc_snap_header *llc;
     ovs_be16 proto;
@@ -268,10 +345,10 @@ parse_ethertype(void **datap, size_t *sizep)
     return htons(FLOW_DL_TYPE_NONE);
 }
 
-static inline bool
-parse_icmpv6(void **datap, size_t *sizep, const struct icmp6_hdr *icmp,
+static inline void
+parse_icmpv6(const void **datap, size_t *sizep, const struct icmp6_hdr *icmp,
              const struct in6_addr **nd_target,
-             uint8_t arp_buf[2][ETH_ADDR_LEN])
+             struct eth_addr arp_buf[2])
 {
     if (icmp->icmp6_code == 0 &&
         (icmp->icmp6_type == ND_NEIGHBOR_SOLICIT ||
@@ -279,48 +356,50 @@ parse_icmpv6(void **datap, size_t *sizep, const struct icmp6_hdr *icmp,
 
         *nd_target = data_try_pull(datap, sizep, sizeof **nd_target);
         if (OVS_UNLIKELY(!*nd_target)) {
-            return false;
+            return;
         }
 
         while (*sizep >= 8) {
             /* The minimum size of an option is 8 bytes, which also is
              * the size of Ethernet link-layer options. */
-            const struct nd_opt_hdr *nd_opt = *datap;
-            int opt_len = nd_opt->nd_opt_len * 8;
+            const struct ovs_nd_opt *nd_opt = *datap;
+            int opt_len = nd_opt->nd_opt_len * ND_OPT_LEN;
 
             if (!opt_len || opt_len > *sizep) {
-                goto invalid;
+                return;
             }
 
             /* Store the link layer address if the appropriate option is
              * provided.  It is considered an error if the same link
              * layer option is specified twice. */
             if (nd_opt->nd_opt_type == ND_OPT_SOURCE_LINKADDR
-                    && opt_len == 8) {
+                && opt_len == 8) {
                 if (OVS_LIKELY(eth_addr_is_zero(arp_buf[0]))) {
-                    memcpy(arp_buf[0], nd_opt + 1, ETH_ADDR_LEN);
+                    arp_buf[0] = nd_opt->nd_opt_mac;
                 } else {
                     goto invalid;
                 }
             } else if (nd_opt->nd_opt_type == ND_OPT_TARGET_LINKADDR
-                    && opt_len == 8) {
+                       && opt_len == 8) {
                 if (OVS_LIKELY(eth_addr_is_zero(arp_buf[1]))) {
-                    memcpy(arp_buf[1], nd_opt + 1, ETH_ADDR_LEN);
+                    arp_buf[1] = nd_opt->nd_opt_mac;
                 } else {
                     goto invalid;
                 }
             }
 
             if (OVS_UNLIKELY(!data_try_pull(datap, sizep, opt_len))) {
-                goto invalid;
+                return;
             }
         }
     }
 
-    return true;
+    return;
 
 invalid:
-    return false;
+    *nd_target = NULL;
+    arp_buf[0] = eth_addr_zero;
+    arp_buf[1] = eth_addr_zero;
 }
 
 /* Initializes 'flow' members from 'packet' and 'md'
@@ -341,50 +420,82 @@ invalid:
  *      otherwise UINT16_MAX.
  */
 void
-flow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
-             struct flow *flow)
+flow_extract(struct dp_packet *packet, struct flow *flow)
 {
     struct {
         struct miniflow mf;
-        uint32_t buf[FLOW_U32S];
+        uint64_t buf[FLOW_U64S];
     } m;
 
     COVERAGE_INC(flow_extract);
 
-    miniflow_initialize(&m.mf, m.buf);
-    miniflow_extract(packet, md, &m.mf);
+    miniflow_extract(packet, &m.mf);
     miniflow_expand(&m.mf, flow);
 }
 
 /* Caller is responsible for initializing 'dst' with enough storage for
- * FLOW_U32S * 4 bytes. */
+ * FLOW_U64S * 8 bytes. */
 void
-miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
-                 struct miniflow *dst)
+miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
 {
-    void *data = ofpbuf_data(packet);
-    size_t size = ofpbuf_size(packet);
-    uint32_t *values = miniflow_values(dst);
-    struct mf_ctx mf = { 0, values, values + FLOW_U32S };
-    char *l2;
+    const struct pkt_metadata *md = &packet->md;
+    const void *data = dp_packet_data(packet);
+    size_t size = dp_packet_size(packet);
+    uint64_t *values = miniflow_values(dst);
+    struct mf_ctx mf = { FLOWMAP_EMPTY_INITIALIZER, values,
+                         values + FLOW_U64S };
+    const char *l2;
     ovs_be16 dl_type;
     uint8_t nw_frag, nw_tos, nw_ttl, nw_proto;
 
     /* Metadata. */
-    if (md) {
-        if (md->tunnel.ip_dst) {
-            miniflow_push_words(mf, tunnel, &md->tunnel,
-                                sizeof md->tunnel / 4);
+    if (flow_tnl_dst_is_set(&md->tunnel)) {
+        miniflow_push_words(mf, tunnel, &md->tunnel,
+                            offsetof(struct flow_tnl, metadata) /
+                            sizeof(uint64_t));
+
+        if (!(md->tunnel.flags & FLOW_TNL_F_UDPIF)) {
+            if (md->tunnel.metadata.present.map) {
+                miniflow_push_words(mf, tunnel.metadata, &md->tunnel.metadata,
+                                    sizeof md->tunnel.metadata /
+                                    sizeof(uint64_t));
+            }
+        } else {
+            if (md->tunnel.metadata.present.len) {
+                miniflow_push_words(mf, tunnel.metadata.present,
+                                    &md->tunnel.metadata.present, 1);
+                miniflow_push_words(mf, tunnel.metadata.opts.gnv,
+                                    md->tunnel.metadata.opts.gnv,
+                                    DIV_ROUND_UP(md->tunnel.metadata.present.len,
+                                                 sizeof(uint64_t)));
+            }
         }
-        miniflow_push_uint32_check(mf, skb_priority, md->skb_priority);
-        miniflow_push_uint32_check(mf, pkt_mark, md->pkt_mark);
-        miniflow_push_uint32_check(mf, recirc_id, md->recirc_id);
-        miniflow_push_uint32(mf, in_port, odp_to_u32(md->in_port.odp_port));
+    }
+    if (md->skb_priority || md->pkt_mark) {
+        miniflow_push_uint32(mf, skb_priority, md->skb_priority);
+        miniflow_push_uint32(mf, pkt_mark, md->pkt_mark);
+    }
+    miniflow_push_uint32(mf, dp_hash, md->dp_hash);
+    miniflow_push_uint32(mf, in_port, odp_to_u32(md->in_port.odp_port));
+    if (md->recirc_id || md->ct_state) {
+        miniflow_push_uint32(mf, recirc_id, md->recirc_id);
+        miniflow_push_uint16(mf, ct_state, md->ct_state);
+        miniflow_push_uint16(mf, ct_zone, md->ct_zone);
+    }
+
+    if (md->ct_state) {
+        miniflow_push_uint32(mf, ct_mark, md->ct_mark);
+        miniflow_pad_to_64(mf, pad1);
+
+        if (!ovs_u128_is_zero(&md->ct_label)) {
+            miniflow_push_words(mf, ct_label, &md->ct_label,
+                                sizeof md->ct_label / sizeof(uint64_t));
+        }
     }
 
     /* Initialize packet's layer pointer and offsets. */
     l2 = data;
-    ofpbuf_set_frame(packet, data);
+    dp_packet_reset_offsets(packet);
 
     /* Must have full Ethernet header to proceed. */
     if (OVS_UNLIKELY(size < sizeof(struct eth_header))) {
@@ -393,9 +504,8 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
         ovs_be16 vlan_tci;
 
         /* Link layer. */
-        BUILD_ASSERT(offsetof(struct flow, dl_dst) + 6
-                     == offsetof(struct flow, dl_src));
-        miniflow_push_words(mf, dl_dst, data, ETH_ADDR_LEN * 2 / 4);
+        ASSERT_SEQUENTIAL(dl_dst, dl_src);
+        miniflow_push_macs(mf, dl_dst, data);
         /* dl_type, vlan_tci. */
         vlan_tci = parse_vlan(&data, &size);
         dl_type = parse_ethertype(&data, &size);
@@ -410,7 +520,7 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
 
         packet->l2_5_ofs = (char *)data - l2;
         count = parse_mpls(&data, &size);
-        miniflow_push_words(mf, mpls_lse, mpls, count);
+        miniflow_push_words_32(mf, mpls_lse, mpls, count);
     }
 
     /* Network layer. */
@@ -420,6 +530,7 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
     if (OVS_LIKELY(dl_type == htons(ETH_TYPE_IP))) {
         const struct ip_header *nh = data;
         int ip_len;
+        uint16_t tot_len;
 
         if (OVS_UNLIKELY(size < IP_HEADER_LEN)) {
             goto out;
@@ -429,9 +540,23 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
         if (OVS_UNLIKELY(ip_len < IP_HEADER_LEN)) {
             goto out;
         }
+        if (OVS_UNLIKELY(size < ip_len)) {
+            goto out;
+        }
+        tot_len = ntohs(nh->ip_tot_len);
+        if (OVS_UNLIKELY(tot_len > size)) {
+            goto out;
+        }
+        if (OVS_UNLIKELY(size - tot_len > UINT8_MAX)) {
+            goto out;
+        }
+        dp_packet_set_l2_pad_size(packet, size - tot_len);
+        size = tot_len;   /* Never pull padding. */
 
         /* Push both source and destination address at once. */
-        miniflow_push_words(mf, nw_src, &nh->ip_src, 2);
+        miniflow_push_words(mf, nw_src, &nh->ip_src, 1);
+
+        miniflow_push_be32(mf, ipv6_label, 0); /* Padding for IPv4. */
 
         nw_tos = nh->ip_tos;
         nw_ttl = nh->ip_ttl;
@@ -442,29 +567,37 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
                 nw_frag |= FLOW_NW_FRAG_LATER;
             }
         }
-        if (OVS_UNLIKELY(size < ip_len)) {
-            goto out;
-        }
         data_pull(&data, &size, ip_len);
-
     } else if (dl_type == htons(ETH_TYPE_IPV6)) {
         const struct ovs_16aligned_ip6_hdr *nh;
         ovs_be32 tc_flow;
+        uint16_t plen;
 
         if (OVS_UNLIKELY(size < sizeof *nh)) {
             goto out;
         }
         nh = data_pull(&data, &size, sizeof *nh);
 
+        plen = ntohs(nh->ip6_plen);
+        if (OVS_UNLIKELY(plen > size)) {
+            goto out;
+        }
+        /* Jumbo Payload option not supported yet. */
+        if (OVS_UNLIKELY(size - plen > UINT8_MAX)) {
+            goto out;
+        }
+        dp_packet_set_l2_pad_size(packet, size - plen);
+        size = plen;   /* Never pull padding. */
+
         miniflow_push_words(mf, ipv6_src, &nh->ip6_src,
-                            sizeof nh->ip6_src / 4);
+                            sizeof nh->ip6_src / 8);
         miniflow_push_words(mf, ipv6_dst, &nh->ip6_dst,
-                            sizeof nh->ip6_dst / 4);
+                            sizeof nh->ip6_dst / 8);
 
         tc_flow = get_16aligned_be32(&nh->ip6_flow);
         {
             ovs_be32 label = tc_flow & htonl(IPV6_LABEL_MASK);
-            miniflow_push_be32_check(mf, ipv6_label, label);
+            miniflow_push_be32(mf, ipv6_label, label);
         }
 
         nw_tos = ntohl(tc_flow) >> 20;
@@ -537,7 +670,7 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
     } else {
         if (dl_type == htons(ETH_TYPE_ARP) ||
             dl_type == htons(ETH_TYPE_RARP)) {
-            uint8_t arp_buf[2][ETH_ADDR_LEN];
+            struct eth_addr arp_buf[2];
             const struct arp_eth_header *arp = (const struct arp_eth_header *)
                 data_try_pull(&data, &size, ARP_ETH_HEADER_LEN);
 
@@ -545,22 +678,24 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
                 && OVS_LIKELY(arp->ar_pro == htons(ETH_TYPE_IP))
                 && OVS_LIKELY(arp->ar_hln == ETH_ADDR_LEN)
                 && OVS_LIKELY(arp->ar_pln == 4)) {
-                miniflow_push_words(mf, nw_src, &arp->ar_spa, 1);
-                miniflow_push_words(mf, nw_dst, &arp->ar_tpa, 1);
+                miniflow_push_be32(mf, nw_src,
+                                   get_16aligned_be32(&arp->ar_spa));
+                miniflow_push_be32(mf, nw_dst,
+                                   get_16aligned_be32(&arp->ar_tpa));
 
                 /* We only match on the lower 8 bits of the opcode. */
                 if (OVS_LIKELY(ntohs(arp->ar_op) <= 0xff)) {
+                    miniflow_push_be32(mf, ipv6_label, 0); /* Pad with ARP. */
                     miniflow_push_be32(mf, nw_frag, htonl(ntohs(arp->ar_op)));
                 }
 
                 /* Must be adjacent. */
-                BUILD_ASSERT(offsetof(struct flow, arp_sha) + 6
-                             == offsetof(struct flow, arp_tha));
+                ASSERT_SEQUENTIAL(arp_sha, arp_tha);
 
-                memcpy(arp_buf[0], arp->ar_sha, ETH_ADDR_LEN);
-                memcpy(arp_buf[1], arp->ar_tha, ETH_ADDR_LEN);
-                miniflow_push_words(mf, arp_sha, arp_buf,
-                                    ETH_ADDR_LEN * 2 / 4);
+                arp_buf[0] = arp->ar_sha;
+                arp_buf[1] = arp->ar_tha;
+                miniflow_push_macs(mf, arp_sha, arp_buf);
+                miniflow_pad_to_64(mf, tcp_flags);
             }
         }
         goto out;
@@ -575,21 +710,28 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
             if (OVS_LIKELY(size >= TCP_HEADER_LEN)) {
                 const struct tcp_header *tcp = data;
 
+                miniflow_push_be32(mf, arp_tha.ea[2], 0);
                 miniflow_push_be32(mf, tcp_flags,
                                    TCP_FLAGS_BE32(tcp->tcp_ctl));
-                miniflow_push_words(mf, tp_src, &tcp->tcp_src, 1);
+                miniflow_push_be16(mf, tp_src, tcp->tcp_src);
+                miniflow_push_be16(mf, tp_dst, tcp->tcp_dst);
+                miniflow_pad_to_64(mf, igmp_group_ip4);
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_UDP)) {
             if (OVS_LIKELY(size >= UDP_HEADER_LEN)) {
                 const struct udp_header *udp = data;
 
-                miniflow_push_words(mf, tp_src, &udp->udp_src, 1);
+                miniflow_push_be16(mf, tp_src, udp->udp_src);
+                miniflow_push_be16(mf, tp_dst, udp->udp_dst);
+                miniflow_pad_to_64(mf, igmp_group_ip4);
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_SCTP)) {
             if (OVS_LIKELY(size >= SCTP_HEADER_LEN)) {
                 const struct sctp_header *sctp = data;
 
-                miniflow_push_words(mf, tp_src, &sctp->sctp_src, 1);
+                miniflow_push_be16(mf, tp_src, sctp->sctp_src);
+                miniflow_push_be16(mf, tp_dst, sctp->sctp_dst);
+                miniflow_pad_to_64(mf, igmp_group_ip4);
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_ICMP)) {
             if (OVS_LIKELY(size >= ICMP_HEADER_LEN)) {
@@ -597,30 +739,35 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
 
                 miniflow_push_be16(mf, tp_src, htons(icmp->icmp_type));
                 miniflow_push_be16(mf, tp_dst, htons(icmp->icmp_code));
+                miniflow_pad_to_64(mf, igmp_group_ip4);
+            }
+        } else if (OVS_LIKELY(nw_proto == IPPROTO_IGMP)) {
+            if (OVS_LIKELY(size >= IGMP_HEADER_LEN)) {
+                const struct igmp_header *igmp = data;
+
+                miniflow_push_be16(mf, tp_src, htons(igmp->igmp_type));
+                miniflow_push_be16(mf, tp_dst, htons(igmp->igmp_code));
+                miniflow_push_be32(mf, igmp_group_ip4,
+                                   get_16aligned_be32(&igmp->group));
             }
         } else if (OVS_LIKELY(nw_proto == IPPROTO_ICMPV6)) {
             if (OVS_LIKELY(size >= sizeof(struct icmp6_hdr))) {
                 const struct in6_addr *nd_target = NULL;
-                uint8_t arp_buf[2][ETH_ADDR_LEN];
+                struct eth_addr arp_buf[2] = { { { { 0 } } } };
                 const struct icmp6_hdr *icmp = data_pull(&data, &size,
                                                          sizeof *icmp);
-                memset(arp_buf, 0, sizeof arp_buf);
-                if (OVS_LIKELY(parse_icmpv6(&data, &size, icmp, &nd_target,
-                                            arp_buf))) {
-                    miniflow_push_words(mf, arp_sha, arp_buf,
-                                             ETH_ADDR_LEN * 2 / 4);
-                    if (nd_target) {
-                        miniflow_push_words(mf, nd_target, nd_target,
-                                            sizeof *nd_target / 4);
-                    }
-                    miniflow_push_be16(mf, tp_src, htons(icmp->icmp6_type));
-                    miniflow_push_be16(mf, tp_dst, htons(icmp->icmp6_code));
+                parse_icmpv6(&data, &size, icmp, &nd_target, arp_buf);
+                if (nd_target) {
+                    miniflow_push_words(mf, nd_target, nd_target,
+                                        sizeof *nd_target / sizeof(uint64_t));
                 }
+                miniflow_push_macs(mf, arp_sha, arp_buf);
+                miniflow_pad_to_64(mf, tcp_flags);
+                miniflow_push_be16(mf, tp_src, htons(icmp->icmp6_type));
+                miniflow_push_be16(mf, tp_dst, htons(icmp->icmp6_code));
+                miniflow_pad_to_64(mf, igmp_group_ip4);
             }
         }
-    }
-    if (md) {
-        miniflow_push_uint32_check(mf, dp_hash, md->dp_hash);
     }
  out:
     dst->map = mf.map;
@@ -631,12 +778,12 @@ miniflow_extract(struct ofpbuf *packet, const struct pkt_metadata *md,
 void
 flow_zero_wildcards(struct flow *flow, const struct flow_wildcards *wildcards)
 {
-    uint32_t *flow_u32 = (uint32_t *) flow;
-    const uint32_t *wc_u32 = (const uint32_t *) &wildcards->masks;
+    uint64_t *flow_u64 = (uint64_t *) flow;
+    const uint64_t *wc_u64 = (const uint64_t *) &wildcards->masks;
     size_t i;
 
-    for (i = 0; i < FLOW_U32S; i++) {
-        flow_u32[i] &= wc_u32[i];
+    for (i = 0; i < FLOW_U64S; i++) {
+        flow_u64[i] &= wc_u64[i];
     }
 }
 
@@ -652,21 +799,88 @@ flow_unwildcard_tp_ports(const struct flow *flow, struct flow_wildcards *wc)
     }
 }
 
-/* Initializes 'fmd' with the metadata found in 'flow'. */
+/* Initializes 'flow_metadata' with the metadata found in 'flow'. */
 void
-flow_get_metadata(const struct flow *flow, struct flow_metadata *fmd)
+flow_get_metadata(const struct flow *flow, struct match *flow_metadata)
 {
-    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 26);
+    int i;
 
-    fmd->dp_hash = flow->dp_hash;
-    fmd->recirc_id = flow->recirc_id;
-    fmd->tun_id = flow->tunnel.tun_id;
-    fmd->tun_src = flow->tunnel.ip_src;
-    fmd->tun_dst = flow->tunnel.ip_dst;
-    fmd->metadata = flow->metadata;
-    memcpy(fmd->regs, flow->regs, sizeof fmd->regs);
-    fmd->pkt_mark = flow->pkt_mark;
-    fmd->in_port = flow->in_port.ofp_port;
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 35);
+
+    match_init_catchall(flow_metadata);
+    if (flow->tunnel.tun_id != htonll(0)) {
+        match_set_tun_id(flow_metadata, flow->tunnel.tun_id);
+    }
+    if (flow->tunnel.flags & FLOW_TNL_PUB_F_MASK) {
+        match_set_tun_flags(flow_metadata,
+                            flow->tunnel.flags & FLOW_TNL_PUB_F_MASK);
+    }
+    if (flow->tunnel.ip_src) {
+        match_set_tun_src(flow_metadata, flow->tunnel.ip_src);
+    }
+    if (flow->tunnel.ip_dst) {
+        match_set_tun_dst(flow_metadata, flow->tunnel.ip_dst);
+    }
+    if (ipv6_addr_is_set(&flow->tunnel.ipv6_src)) {
+        match_set_tun_ipv6_src(flow_metadata, &flow->tunnel.ipv6_src);
+    }
+    if (ipv6_addr_is_set(&flow->tunnel.ipv6_dst)) {
+        match_set_tun_ipv6_dst(flow_metadata, &flow->tunnel.ipv6_dst);
+    }
+    if (flow->tunnel.gbp_id != htons(0)) {
+        match_set_tun_gbp_id(flow_metadata, flow->tunnel.gbp_id);
+    }
+    if (flow->tunnel.gbp_flags) {
+        match_set_tun_gbp_flags(flow_metadata, flow->tunnel.gbp_flags);
+    }
+    tun_metadata_get_fmd(&flow->tunnel, flow_metadata);
+    if (flow->metadata != htonll(0)) {
+        match_set_metadata(flow_metadata, flow->metadata);
+    }
+
+    for (i = 0; i < FLOW_N_REGS; i++) {
+        if (flow->regs[i]) {
+            match_set_reg(flow_metadata, i, flow->regs[i]);
+        }
+    }
+
+    if (flow->pkt_mark != 0) {
+        match_set_pkt_mark(flow_metadata, flow->pkt_mark);
+    }
+
+    match_set_in_port(flow_metadata, flow->in_port.ofp_port);
+    if (flow->ct_state != 0) {
+        match_set_ct_state(flow_metadata, flow->ct_state);
+    }
+    if (flow->ct_zone != 0) {
+        match_set_ct_zone(flow_metadata, flow->ct_zone);
+    }
+    if (flow->ct_mark != 0) {
+        match_set_ct_mark(flow_metadata, flow->ct_mark);
+    }
+    if (!ovs_u128_is_zero(&flow->ct_label)) {
+        match_set_ct_label(flow_metadata, flow->ct_label);
+    }
+}
+
+const char *ct_state_to_string(uint32_t state)
+{
+    switch (state) {
+    case CS_REPLY_DIR:
+        return "rpl";
+    case CS_TRACKED:
+        return "trk";
+    case CS_NEW:
+        return "new";
+    case CS_ESTABLISHED:
+        return "est";
+    case CS_RELATED:
+        return "rel";
+    case CS_INVALID:
+        return "inv";
+    default:
+        return NULL;
+    }
 }
 
 char *
@@ -687,6 +901,8 @@ flow_tun_flag_to_string(uint32_t flags)
         return "csum";
     case FLOW_TNL_F_KEY:
         return "key";
+    case FLOW_TNL_F_OAM:
+        return "oam";
     default:
         return NULL;
     }
@@ -699,6 +915,7 @@ format_flags(struct ds *ds, const char *(*bit_to_string)(uint32_t),
     uint32_t bad = 0;
 
     if (!flags) {
+        ds_put_char(ds, '0');
         return;
     }
     while (flags) {
@@ -724,11 +941,22 @@ format_flags(struct ds *ds, const char *(*bit_to_string)(uint32_t),
 void
 format_flags_masked(struct ds *ds, const char *name,
                     const char *(*bit_to_string)(uint32_t), uint32_t flags,
-                    uint32_t mask)
+                    uint32_t mask, uint32_t max_mask)
 {
     if (name) {
         ds_put_format(ds, "%s=", name);
     }
+
+    if (mask == max_mask) {
+        format_flags(ds, bit_to_string, flags, '|');
+        return;
+    }
+
+    if (!mask) {
+        ds_put_cstr(ds, "0/0");
+        return;
+    }
+
     while (mask) {
         uint32_t bit = rightmost_1bit(mask);
         const char *s = bit_to_string(bit);
@@ -739,12 +967,216 @@ format_flags_masked(struct ds *ds, const char *name,
     }
 }
 
+/* Scans a string 's' of flags to determine their numerical value and
+ * returns the number of characters parsed using 'bit_to_string' to
+ * lookup flag names. Scanning continues until the character 'end' is
+ * reached.
+ *
+ * In the event of a failure, a negative error code will be returned. In
+ * addition, if 'res_string' is non-NULL then a descriptive string will
+ * be returned incorporating the identifying string 'field_name'. This
+ * error string must be freed by the caller.
+ *
+ * Upon success, the flag values will be stored in 'res_flags' and
+ * optionally 'res_mask', if it is non-NULL (if it is NULL then any masks
+ * present in the original string will be considered an error). The
+ * caller may restrict the acceptable set of values through the mask
+ * 'allowed'. */
+int
+parse_flags(const char *s, const char *(*bit_to_string)(uint32_t),
+            char end, const char *field_name, char **res_string,
+            uint32_t *res_flags, uint32_t allowed, uint32_t *res_mask)
+{
+    uint32_t result = 0;
+    int n;
+
+    /* Parse masked flags in numeric format? */
+    if (res_mask && ovs_scan(s, "%"SCNi32"/%"SCNi32"%n",
+                             res_flags, res_mask, &n) && n > 0) {
+        if (*res_flags & ~allowed || *res_mask & ~allowed) {
+            goto unknown;
+        }
+        return n;
+    }
+
+    n = 0;
+
+    if (res_mask && (*s == '+' || *s == '-')) {
+        uint32_t flags = 0, mask = 0;
+
+        /* Parse masked flags. */
+        while (s[0] != end) {
+            bool set;
+            uint32_t bit;
+            size_t len;
+
+            if (s[0] == '+') {
+                set = true;
+            } else if (s[0] == '-') {
+                set = false;
+            } else {
+                if (res_string) {
+                    *res_string = xasprintf("%s: %s must be preceded by '+' "
+                                            "(for SET) or '-' (NOT SET)", s,
+                                            field_name);
+                }
+                return -EINVAL;
+            }
+            s++;
+            n++;
+
+            for (bit = 1; bit; bit <<= 1) {
+                const char *fname = bit_to_string(bit);
+
+                if (!fname) {
+                    continue;
+                }
+
+                len = strlen(fname);
+                if (strncmp(s, fname, len) ||
+                    (s[len] != '+' && s[len] != '-' && s[len] != end)) {
+                    continue;
+                }
+
+                if (mask & bit) {
+                    /* bit already set. */
+                    if (res_string) {
+                        *res_string = xasprintf("%s: Each %s flag can be "
+                                                "specified only once", s,
+                                                field_name);
+                    }
+                    return -EINVAL;
+                }
+                if (!(bit & allowed)) {
+                    goto unknown;
+                }
+                if (set) {
+                   flags |= bit;
+                }
+                mask |= bit;
+                break;
+            }
+
+            if (!bit) {
+                goto unknown;
+            }
+            s += len;
+            n += len;
+        }
+
+        *res_flags = flags;
+        *res_mask = mask;
+        return n;
+    }
+
+    /* Parse unmasked flags.  If a flag is present, it is set, otherwise
+     * it is not set. */
+    while (s[n] != end) {
+        unsigned long long int flags;
+        uint32_t bit;
+        int n0;
+
+        if (ovs_scan(&s[n], "%lli%n", &flags, &n0)) {
+            if (flags & ~allowed) {
+                goto unknown;
+            }
+            n += n0 + (s[n + n0] == '|');
+            result |= flags;
+            continue;
+        }
+
+        for (bit = 1; bit; bit <<= 1) {
+            const char *name = bit_to_string(bit);
+            size_t len;
+
+            if (!name) {
+                continue;
+            }
+
+            len = strlen(name);
+            if (!strncmp(s + n, name, len) &&
+                (s[n + len] == '|' || s[n + len] == end)) {
+                if (!(bit & allowed)) {
+                    goto unknown;
+                }
+                result |= bit;
+                n += len + (s[n + len] == '|');
+                break;
+            }
+        }
+
+        if (!bit) {
+            goto unknown;
+        }
+    }
+
+    *res_flags = result;
+    if (res_mask) {
+        *res_mask = UINT32_MAX;
+    }
+    if (res_string) {
+        *res_string = NULL;
+    }
+    return n;
+
+unknown:
+    if (res_string) {
+        *res_string = xasprintf("%s: unknown %s flag(s)", s, field_name);
+    }
+    return -EINVAL;
+}
+
 void
 flow_format(struct ds *ds, const struct flow *flow)
 {
     struct match match;
+    struct flow_wildcards *wc = &match.wc;
 
     match_wc_init(&match, flow);
+
+    /* As this function is most often used for formatting a packet in a
+     * packet-in message, skip formatting the packet context fields that are
+     * all-zeroes to make the print-out easier on the eyes.  This means that a
+     * missing context field implies a zero value for that field.  This is
+     * similar to OpenFlow encoding of these fields, as the specification
+     * states that all-zeroes context fields should not be encoded in the
+     * packet-in messages. */
+    if (!flow->in_port.ofp_port) {
+        WC_UNMASK_FIELD(wc, in_port);
+    }
+    if (!flow->skb_priority) {
+        WC_UNMASK_FIELD(wc, skb_priority);
+    }
+    if (!flow->pkt_mark) {
+        WC_UNMASK_FIELD(wc, pkt_mark);
+    }
+    if (!flow->recirc_id) {
+        WC_UNMASK_FIELD(wc, recirc_id);
+    }
+    if (!flow->dp_hash) {
+        WC_UNMASK_FIELD(wc, dp_hash);
+    }
+    if (!flow->ct_state) {
+        WC_UNMASK_FIELD(wc, ct_state);
+    }
+    if (!flow->ct_zone) {
+        WC_UNMASK_FIELD(wc, ct_zone);
+    }
+    if (!flow->ct_mark) {
+        WC_UNMASK_FIELD(wc, ct_mark);
+    }
+    if (ovs_u128_is_zero(&flow->ct_label)) {
+        WC_UNMASK_FIELD(wc, ct_label);
+    }
+    for (int i = 0; i < FLOW_N_REGS; i++) {
+        if (!flow->regs[i]) {
+            WC_UNMASK_FIELD(wc, regs[i]);
+        }
+    }
+    if (!flow->metadata) {
+        WC_UNMASK_FIELD(wc, metadata);
+    }
+
     match_format(&match, ds, OFP_DEFAULT_PRIORITY);
 }
 
@@ -765,13 +1197,223 @@ flow_wildcards_init_catchall(struct flow_wildcards *wc)
     memset(&wc->masks, 0, sizeof wc->masks);
 }
 
+/* Converts a flow into flow wildcards.  It sets the wildcard masks based on
+ * the packet headers extracted to 'flow'.  It will not set the mask for fields
+ * that do not make sense for the packet type.  OpenFlow-only metadata is
+ * wildcarded, but other metadata is unconditionally exact-matched. */
+void flow_wildcards_init_for_packet(struct flow_wildcards *wc,
+                                    const struct flow *flow)
+{
+    memset(&wc->masks, 0x0, sizeof wc->masks);
+
+    /* Update this function whenever struct flow changes. */
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 35);
+
+    if (flow_tnl_dst_is_set(&flow->tunnel)) {
+        if (flow->tunnel.flags & FLOW_TNL_F_KEY) {
+            WC_MASK_FIELD(wc, tunnel.tun_id);
+        }
+        WC_MASK_FIELD(wc, tunnel.ip_src);
+        WC_MASK_FIELD(wc, tunnel.ip_dst);
+        WC_MASK_FIELD(wc, tunnel.ipv6_src);
+        WC_MASK_FIELD(wc, tunnel.ipv6_dst);
+        WC_MASK_FIELD(wc, tunnel.flags);
+        WC_MASK_FIELD(wc, tunnel.ip_tos);
+        WC_MASK_FIELD(wc, tunnel.ip_ttl);
+        WC_MASK_FIELD(wc, tunnel.tp_src);
+        WC_MASK_FIELD(wc, tunnel.tp_dst);
+        WC_MASK_FIELD(wc, tunnel.gbp_id);
+        WC_MASK_FIELD(wc, tunnel.gbp_flags);
+
+        if (!(flow->tunnel.flags & FLOW_TNL_F_UDPIF)) {
+            if (flow->tunnel.metadata.present.map) {
+                wc->masks.tunnel.metadata.present.map =
+                                              flow->tunnel.metadata.present.map;
+                WC_MASK_FIELD(wc, tunnel.metadata.opts.u8);
+            }
+        } else {
+            WC_MASK_FIELD(wc, tunnel.metadata.present.len);
+            memset(wc->masks.tunnel.metadata.opts.gnv, 0xff,
+                   flow->tunnel.metadata.present.len);
+        }
+    } else if (flow->tunnel.tun_id) {
+        WC_MASK_FIELD(wc, tunnel.tun_id);
+    }
+
+    /* metadata, regs, and conj_id wildcarded. */
+
+    WC_MASK_FIELD(wc, skb_priority);
+    WC_MASK_FIELD(wc, pkt_mark);
+    WC_MASK_FIELD(wc, ct_state);
+    WC_MASK_FIELD(wc, ct_zone);
+    WC_MASK_FIELD(wc, ct_mark);
+    WC_MASK_FIELD(wc, ct_label);
+    WC_MASK_FIELD(wc, recirc_id);
+    WC_MASK_FIELD(wc, dp_hash);
+    WC_MASK_FIELD(wc, in_port);
+
+    /* actset_output wildcarded. */
+
+    WC_MASK_FIELD(wc, dl_dst);
+    WC_MASK_FIELD(wc, dl_src);
+    WC_MASK_FIELD(wc, dl_type);
+    WC_MASK_FIELD(wc, vlan_tci);
+
+    if (flow->dl_type == htons(ETH_TYPE_IP)) {
+        WC_MASK_FIELD(wc, nw_src);
+        WC_MASK_FIELD(wc, nw_dst);
+    } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+        WC_MASK_FIELD(wc, ipv6_src);
+        WC_MASK_FIELD(wc, ipv6_dst);
+        WC_MASK_FIELD(wc, ipv6_label);
+    } else if (flow->dl_type == htons(ETH_TYPE_ARP) ||
+               flow->dl_type == htons(ETH_TYPE_RARP)) {
+        WC_MASK_FIELD(wc, nw_src);
+        WC_MASK_FIELD(wc, nw_dst);
+        WC_MASK_FIELD(wc, nw_proto);
+        WC_MASK_FIELD(wc, arp_sha);
+        WC_MASK_FIELD(wc, arp_tha);
+        return;
+    } else if (eth_type_mpls(flow->dl_type)) {
+        for (int i = 0; i < FLOW_MAX_MPLS_LABELS; i++) {
+            WC_MASK_FIELD(wc, mpls_lse[i]);
+            if (flow->mpls_lse[i] & htonl(MPLS_BOS_MASK)) {
+                break;
+            }
+        }
+        return;
+    } else {
+        return; /* Unknown ethertype. */
+    }
+
+    /* IPv4 or IPv6. */
+    WC_MASK_FIELD(wc, nw_frag);
+    WC_MASK_FIELD(wc, nw_tos);
+    WC_MASK_FIELD(wc, nw_ttl);
+    WC_MASK_FIELD(wc, nw_proto);
+
+    /* No transport layer header in later fragments. */
+    if (!(flow->nw_frag & FLOW_NW_FRAG_LATER) &&
+        (flow->nw_proto == IPPROTO_ICMP ||
+         flow->nw_proto == IPPROTO_ICMPV6 ||
+         flow->nw_proto == IPPROTO_TCP ||
+         flow->nw_proto == IPPROTO_UDP ||
+         flow->nw_proto == IPPROTO_SCTP ||
+         flow->nw_proto == IPPROTO_IGMP)) {
+        WC_MASK_FIELD(wc, tp_src);
+        WC_MASK_FIELD(wc, tp_dst);
+
+        if (flow->nw_proto == IPPROTO_TCP) {
+            WC_MASK_FIELD(wc, tcp_flags);
+        } else if (flow->nw_proto == IPPROTO_ICMPV6) {
+            WC_MASK_FIELD(wc, arp_sha);
+            WC_MASK_FIELD(wc, arp_tha);
+            WC_MASK_FIELD(wc, nd_target);
+        } else if (flow->nw_proto == IPPROTO_IGMP) {
+            WC_MASK_FIELD(wc, igmp_group_ip4);
+        }
+    }
+}
+
+/* Return a map of possible fields for a packet of the same type as 'flow'.
+ * Including extra bits in the returned mask is not wrong, it is just less
+ * optimal.
+ *
+ * This is a less precise version of flow_wildcards_init_for_packet() above. */
+void
+flow_wc_map(const struct flow *flow, struct flowmap *map)
+{
+    /* Update this function whenever struct flow changes. */
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 35);
+
+    flowmap_init(map);
+
+    if (flow_tnl_dst_is_set(&flow->tunnel)) {
+        FLOWMAP_SET__(map, tunnel, offsetof(struct flow_tnl, metadata));
+        if (!(flow->tunnel.flags & FLOW_TNL_F_UDPIF)) {
+            if (flow->tunnel.metadata.present.map) {
+                FLOWMAP_SET(map, tunnel.metadata);
+            }
+        } else {
+            FLOWMAP_SET(map, tunnel.metadata.present.len);
+            FLOWMAP_SET__(map, tunnel.metadata.opts.gnv,
+                          flow->tunnel.metadata.present.len);
+        }
+    }
+
+    /* Metadata fields that can appear on packet input. */
+    FLOWMAP_SET(map, skb_priority);
+    FLOWMAP_SET(map, pkt_mark);
+    FLOWMAP_SET(map, recirc_id);
+    FLOWMAP_SET(map, dp_hash);
+    FLOWMAP_SET(map, in_port);
+    FLOWMAP_SET(map, dl_dst);
+    FLOWMAP_SET(map, dl_src);
+    FLOWMAP_SET(map, dl_type);
+    FLOWMAP_SET(map, vlan_tci);
+    FLOWMAP_SET(map, ct_state);
+    FLOWMAP_SET(map, ct_zone);
+    FLOWMAP_SET(map, ct_mark);
+    FLOWMAP_SET(map, ct_label);
+
+    /* Ethertype-dependent fields. */
+    if (OVS_LIKELY(flow->dl_type == htons(ETH_TYPE_IP))) {
+        FLOWMAP_SET(map, nw_src);
+        FLOWMAP_SET(map, nw_dst);
+        FLOWMAP_SET(map, nw_proto);
+        FLOWMAP_SET(map, nw_frag);
+        FLOWMAP_SET(map, nw_tos);
+        FLOWMAP_SET(map, nw_ttl);
+
+        if (OVS_UNLIKELY(flow->nw_proto == IPPROTO_IGMP)) {
+            FLOWMAP_SET(map, igmp_group_ip4);
+        } else {
+            FLOWMAP_SET(map, tcp_flags);
+            FLOWMAP_SET(map, tp_src);
+            FLOWMAP_SET(map, tp_dst);
+        }
+    } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+        FLOWMAP_SET(map, ipv6_src);
+        FLOWMAP_SET(map, ipv6_dst);
+        FLOWMAP_SET(map, ipv6_label);
+        FLOWMAP_SET(map, nw_proto);
+        FLOWMAP_SET(map, nw_frag);
+        FLOWMAP_SET(map, nw_tos);
+        FLOWMAP_SET(map, nw_ttl);
+
+        if (OVS_UNLIKELY(flow->nw_proto == IPPROTO_ICMPV6)) {
+            FLOWMAP_SET(map, nd_target);
+            FLOWMAP_SET(map, arp_sha);
+            FLOWMAP_SET(map, arp_tha);
+        } else {
+            FLOWMAP_SET(map, tcp_flags);
+            FLOWMAP_SET(map, tp_src);
+            FLOWMAP_SET(map, tp_dst);
+        }
+    } else if (eth_type_mpls(flow->dl_type)) {
+        FLOWMAP_SET(map, mpls_lse);
+    } else if (flow->dl_type == htons(ETH_TYPE_ARP) ||
+               flow->dl_type == htons(ETH_TYPE_RARP)) {
+        FLOWMAP_SET(map, nw_src);
+        FLOWMAP_SET(map, nw_dst);
+        FLOWMAP_SET(map, nw_proto);
+        FLOWMAP_SET(map, arp_sha);
+        FLOWMAP_SET(map, arp_tha);
+    }
+}
+
 /* Clear the metadata and register wildcard masks. They are not packet
  * header fields. */
 void
 flow_wildcards_clear_non_packet_fields(struct flow_wildcards *wc)
 {
+    /* Update this function whenever struct flow changes. */
+    BUILD_ASSERT_DECL(FLOW_WC_SEQ == 35);
+
     memset(&wc->masks.metadata, 0, sizeof wc->masks.metadata);
     memset(&wc->masks.regs, 0, sizeof wc->masks.regs);
+    wc->masks.actset_output = 0;
+    wc->masks.conj_id = 0;
 }
 
 /* Returns true if 'wc' matches every packet, false if 'wc' fixes any bits or
@@ -779,11 +1421,11 @@ flow_wildcards_clear_non_packet_fields(struct flow_wildcards *wc)
 bool
 flow_wildcards_is_catchall(const struct flow_wildcards *wc)
 {
-    const uint32_t *wc_u32 = (const uint32_t *) &wc->masks;
+    const uint64_t *wc_u64 = (const uint64_t *) &wc->masks;
     size_t i;
 
-    for (i = 0; i < FLOW_U32S; i++) {
-        if (wc_u32[i]) {
+    for (i = 0; i < FLOW_U64S; i++) {
+        if (wc_u64[i]) {
             return false;
         }
     }
@@ -798,13 +1440,13 @@ flow_wildcards_and(struct flow_wildcards *dst,
                    const struct flow_wildcards *src1,
                    const struct flow_wildcards *src2)
 {
-    uint32_t *dst_u32 = (uint32_t *) &dst->masks;
-    const uint32_t *src1_u32 = (const uint32_t *) &src1->masks;
-    const uint32_t *src2_u32 = (const uint32_t *) &src2->masks;
+    uint64_t *dst_u64 = (uint64_t *) &dst->masks;
+    const uint64_t *src1_u64 = (const uint64_t *) &src1->masks;
+    const uint64_t *src2_u64 = (const uint64_t *) &src2->masks;
     size_t i;
 
-    for (i = 0; i < FLOW_U32S; i++) {
-        dst_u32[i] = src1_u32[i] & src2_u32[i];
+    for (i = 0; i < FLOW_U64S; i++) {
+        dst_u64[i] = src1_u64[i] & src2_u64[i];
     }
 }
 
@@ -816,13 +1458,13 @@ flow_wildcards_or(struct flow_wildcards *dst,
                   const struct flow_wildcards *src1,
                   const struct flow_wildcards *src2)
 {
-    uint32_t *dst_u32 = (uint32_t *) &dst->masks;
-    const uint32_t *src1_u32 = (const uint32_t *) &src1->masks;
-    const uint32_t *src2_u32 = (const uint32_t *) &src2->masks;
+    uint64_t *dst_u64 = (uint64_t *) &dst->masks;
+    const uint64_t *src1_u64 = (const uint64_t *) &src1->masks;
+    const uint64_t *src2_u64 = (const uint64_t *) &src2->masks;
     size_t i;
 
-    for (i = 0; i < FLOW_U32S; i++) {
-        dst_u32[i] = src1_u32[i] | src2_u32[i];
+    for (i = 0; i < FLOW_U64S; i++) {
+        dst_u64[i] = src1_u64[i] | src2_u64[i];
     }
 }
 
@@ -848,12 +1490,12 @@ bool
 flow_wildcards_has_extra(const struct flow_wildcards *a,
                          const struct flow_wildcards *b)
 {
-    const uint32_t *a_u32 = (const uint32_t *) &a->masks;
-    const uint32_t *b_u32 = (const uint32_t *) &b->masks;
+    const uint64_t *a_u64 = (const uint64_t *) &a->masks;
+    const uint64_t *b_u64 = (const uint64_t *) &b->masks;
     size_t i;
 
-    for (i = 0; i < FLOW_U32S; i++) {
-        if ((a_u32[i] & b_u32[i]) != b_u32[i]) {
+    for (i = 0; i < FLOW_U64S; i++) {
+        if ((a_u64[i] & b_u64[i]) != b_u64[i]) {
             return true;
         }
     }
@@ -866,13 +1508,13 @@ bool
 flow_equal_except(const struct flow *a, const struct flow *b,
                   const struct flow_wildcards *wc)
 {
-    const uint32_t *a_u32 = (const uint32_t *) a;
-    const uint32_t *b_u32 = (const uint32_t *) b;
-    const uint32_t *wc_u32 = (const uint32_t *) &wc->masks;
+    const uint64_t *a_u64 = (const uint64_t *) a;
+    const uint64_t *b_u64 = (const uint64_t *) b;
+    const uint64_t *wc_u64 = (const uint64_t *) &wc->masks;
     size_t i;
 
-    for (i = 0; i < FLOW_U32S; i++) {
-        if ((a_u32[i] ^ b_u32[i]) & wc_u32[i]) {
+    for (i = 0; i < FLOW_U64S; i++) {
+        if ((a_u64[i] ^ b_u64[i]) & wc_u64[i]) {
             return false;
         }
     }
@@ -887,6 +1529,14 @@ flow_wildcards_set_reg_mask(struct flow_wildcards *wc, int idx, uint32_t mask)
     wc->masks.regs[idx] = mask;
 }
 
+/* Sets the wildcard mask for register 'idx' in 'wc' to 'mask'.
+ * (A 0-bit indicates a wildcard bit.) */
+void
+flow_wildcards_set_xreg_mask(struct flow_wildcards *wc, int idx, uint64_t mask)
+{
+    flow_set_xreg(&wc->masks, idx, mask);
+}
+
 /* Calculates the 5-tuple hash from the given miniflow.
  * This returns the same value as flow_hash_5tuple for the corresponding
  * flow. */
@@ -898,37 +1548,32 @@ miniflow_hash_5tuple(const struct miniflow *flow, uint32_t basis)
     if (flow) {
         ovs_be16 dl_type = MINIFLOW_GET_BE16(flow, dl_type);
 
-        hash = mhash_add(hash, MINIFLOW_GET_U8(flow, nw_proto));
+        hash = hash_add(hash, MINIFLOW_GET_U8(flow, nw_proto));
 
         /* Separate loops for better optimization. */
         if (dl_type == htons(ETH_TYPE_IPV6)) {
-            uint64_t map = MINIFLOW_MAP(ipv6_src) | MINIFLOW_MAP(ipv6_dst)
-                | MINIFLOW_MAP(tp_src); /* Covers both ports */
-            uint32_t value;
+            struct flowmap map = FLOWMAP_EMPTY_INITIALIZER;
+            uint64_t value;
 
-            MINIFLOW_FOR_EACH_IN_MAP(value, flow, map) {
-                hash = mhash_add(hash, value);
+            FLOWMAP_SET(&map, ipv6_src);
+            FLOWMAP_SET(&map, ipv6_dst);
+
+            MINIFLOW_FOR_EACH_IN_FLOWMAP(value, flow, map) {
+                hash = hash_add64(hash, value);
             }
         } else {
-            uint64_t map = MINIFLOW_MAP(nw_src) | MINIFLOW_MAP(nw_dst)
-                | MINIFLOW_MAP(tp_src); /* Covers both ports */
-            uint32_t value;
-
-            MINIFLOW_FOR_EACH_IN_MAP(value, flow, map) {
-                hash = mhash_add(hash, value);
-            }
+            hash = hash_add(hash, MINIFLOW_GET_U32(flow, nw_src));
+            hash = hash_add(hash, MINIFLOW_GET_U32(flow, nw_dst));
         }
-        hash = mhash_finish(hash, 42); /* Arbitrary number. */
+        /* Add both ports at once. */
+        hash = hash_add(hash, MINIFLOW_GET_U32(flow, tp_src));
+        hash = hash_finish(hash, 42); /* Arbitrary number. */
     }
     return hash;
 }
 
-BUILD_ASSERT_DECL(offsetof(struct flow, tp_src) + 2
-                  == offsetof(struct flow, tp_dst) &&
-                  offsetof(struct flow, tp_src) / 4
-                  == offsetof(struct flow, tp_dst) / 4);
-BUILD_ASSERT_DECL(offsetof(struct flow, ipv6_src) + 16
-                  == offsetof(struct flow, ipv6_dst));
+ASSERT_SEQUENTIAL_SAME_WORD(tp_src, tp_dst);
+ASSERT_SEQUENTIAL(ipv6_src, ipv6_dst);
 
 /* Calculates the 5-tuple hash from the given flow. */
 uint32_t
@@ -937,24 +1582,25 @@ flow_hash_5tuple(const struct flow *flow, uint32_t basis)
     uint32_t hash = basis;
 
     if (flow) {
-        const uint32_t *flow_u32 = (const uint32_t *)flow;
-
-        hash = mhash_add(hash, flow->nw_proto);
+        hash = hash_add(hash, flow->nw_proto);
 
         if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
-            int ofs = offsetof(struct flow, ipv6_src) / 4;
-            int end = ofs + 2 * sizeof flow->ipv6_src / 4;
+            const uint64_t *flow_u64 = (const uint64_t *)flow;
+            int ofs = offsetof(struct flow, ipv6_src) / 8;
+            int end = ofs + 2 * sizeof flow->ipv6_src / 8;
 
-            while (ofs < end) {
-                hash = mhash_add(hash, flow_u32[ofs++]);
+            for (;ofs < end; ofs++) {
+                hash = hash_add64(hash, flow_u64[ofs]);
             }
         } else {
-            hash = mhash_add(hash, (OVS_FORCE uint32_t) flow->nw_src);
-            hash = mhash_add(hash, (OVS_FORCE uint32_t) flow->nw_dst);
+            hash = hash_add(hash, (OVS_FORCE uint32_t) flow->nw_src);
+            hash = hash_add(hash, (OVS_FORCE uint32_t) flow->nw_dst);
         }
-        hash = mhash_add(hash, flow_u32[offsetof(struct flow, tp_src) / 4]);
-
-        hash = mhash_finish(hash, 42); /* Arbitrary number. */
+        /* Add both ports at once. */
+        hash = hash_add(hash,
+                        ((const uint32_t *)flow)[offsetof(struct flow, tp_src)
+                                                 / sizeof(uint32_t)]);
+        hash = hash_finish(hash, 42); /* Arbitrary number. */
     }
     return hash;
 }
@@ -971,15 +1617,15 @@ flow_hash_symmetric_l4(const struct flow *flow, uint32_t basis)
         ovs_be16 eth_type;
         ovs_be16 vlan_tci;
         ovs_be16 tp_port;
-        uint8_t eth_addr[ETH_ADDR_LEN];
+        struct eth_addr eth_addr;
         uint8_t ip_proto;
     } fields;
 
     int i;
 
     memset(&fields, 0, sizeof fields);
-    for (i = 0; i < ETH_ADDR_LEN; i++) {
-        fields.eth_addr[i] = flow->dl_src[i] ^ flow->dl_dst[i];
+    for (i = 0; i < ARRAY_SIZE(fields.eth_addr.be16); i++) {
+        fields.eth_addr.be16[i] = flow->dl_src.be16[i] ^ flow->dl_dst.be16[i];
     }
     fields.vlan_tci = flow->vlan_tci & htons(VLAN_VID_MASK);
     fields.eth_type = flow->dl_type;
@@ -1008,6 +1654,40 @@ flow_hash_symmetric_l4(const struct flow *flow, uint32_t basis)
     return jhash_bytes(&fields, sizeof fields, basis);
 }
 
+/* Hashes 'flow' based on its L3 through L4 protocol information */
+uint32_t
+flow_hash_symmetric_l3l4(const struct flow *flow, uint32_t basis,
+                         bool inc_udp_ports)
+{
+    uint32_t hash = basis;
+
+    /* UDP source and destination port are also taken into account. */
+    if (flow->dl_type == htons(ETH_TYPE_IP)) {
+        hash = hash_add(hash,
+                        (OVS_FORCE uint32_t) (flow->nw_src ^ flow->nw_dst));
+    } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+        /* IPv6 addresses are 64-bit aligned inside struct flow. */
+        const uint64_t *a = ALIGNED_CAST(uint64_t *, flow->ipv6_src.s6_addr);
+        const uint64_t *b = ALIGNED_CAST(uint64_t *, flow->ipv6_dst.s6_addr);
+
+        for (int i = 0; i < 4; i++) {
+            hash = hash_add64(hash, a[i] ^ b[i]);
+        }
+    } else {
+        /* Cannot hash non-IP flows */
+        return 0;
+    }
+
+    hash = hash_add(hash, flow->nw_proto);
+    if (flow->nw_proto == IPPROTO_TCP || flow->nw_proto == IPPROTO_SCTP ||
+         (inc_udp_ports && flow->nw_proto == IPPROTO_UDP)) {
+        hash = hash_add(hash,
+                        (OVS_FORCE uint16_t) (flow->tp_src ^ flow->tp_dst));
+    }
+
+    return hash_finish(hash, basis);
+}
+
 /* Initialize a flow with random fields that matter for nx_hash_fields. */
 void
 flow_random_hash_fields(struct flow *flow)
@@ -1017,8 +1697,8 @@ flow_random_hash_fields(struct flow *flow)
     /* Initialize to all zeros. */
     memset(flow, 0, sizeof *flow);
 
-    eth_addr_random(flow->dl_src);
-    eth_addr_random(flow->dl_dst);
+    eth_addr_random(&flow->dl_src);
+    eth_addr_random(&flow->dl_dst);
 
     flow->vlan_tci = (OVS_FORCE ovs_be16) (random_uint16() & VLAN_VID_MASK);
 
@@ -1075,6 +1755,30 @@ flow_mask_hash_fields(const struct flow *flow, struct flow_wildcards *wc,
         wc->masks.vlan_tci |= htons(VLAN_VID_MASK | VLAN_CFI);
         break;
 
+    case NX_HASH_FIELDS_SYMMETRIC_L3L4_UDP:
+        if (is_ip_any(flow) && flow->nw_proto == IPPROTO_UDP) {
+            memset(&wc->masks.tp_src, 0xff, sizeof wc->masks.tp_src);
+            memset(&wc->masks.tp_dst, 0xff, sizeof wc->masks.tp_dst);
+        }
+        /* no break */
+    case NX_HASH_FIELDS_SYMMETRIC_L3L4:
+        if (flow->dl_type == htons(ETH_TYPE_IP)) {
+            memset(&wc->masks.nw_src, 0xff, sizeof wc->masks.nw_src);
+            memset(&wc->masks.nw_dst, 0xff, sizeof wc->masks.nw_dst);
+        } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+            memset(&wc->masks.ipv6_src, 0xff, sizeof wc->masks.ipv6_src);
+            memset(&wc->masks.ipv6_dst, 0xff, sizeof wc->masks.ipv6_dst);
+        } else {
+            break; /* non-IP flow */
+        }
+
+        memset(&wc->masks.nw_proto, 0xff, sizeof wc->masks.nw_proto);
+        if (flow->nw_proto == IPPROTO_TCP || flow->nw_proto == IPPROTO_SCTP) {
+            memset(&wc->masks.tp_src, 0xff, sizeof wc->masks.tp_src);
+            memset(&wc->masks.tp_dst, 0xff, sizeof wc->masks.tp_dst);
+        }
+        break;
+
     default:
         OVS_NOT_REACHED();
     }
@@ -1088,10 +1792,17 @@ flow_hash_fields(const struct flow *flow, enum nx_hash_fields fields,
     switch (fields) {
 
     case NX_HASH_FIELDS_ETH_SRC:
-        return jhash_bytes(flow->dl_src, sizeof flow->dl_src, basis);
+        return jhash_bytes(&flow->dl_src, sizeof flow->dl_src, basis);
 
     case NX_HASH_FIELDS_SYMMETRIC_L4:
         return flow_hash_symmetric_l4(flow, basis);
+
+    case NX_HASH_FIELDS_SYMMETRIC_L3L4:
+        return flow_hash_symmetric_l3l4(flow, basis, false);
+
+    case NX_HASH_FIELDS_SYMMETRIC_L3L4_UDP:
+        return flow_hash_symmetric_l3l4(flow, basis, true);
+
     }
 
     OVS_NOT_REACHED();
@@ -1104,6 +1815,8 @@ flow_hash_fields_to_str(enum nx_hash_fields fields)
     switch (fields) {
     case NX_HASH_FIELDS_ETH_SRC: return "eth_src";
     case NX_HASH_FIELDS_SYMMETRIC_L4: return "symmetric_l4";
+    case NX_HASH_FIELDS_SYMMETRIC_L3L4: return "symmetric_l3l4";
+    case NX_HASH_FIELDS_SYMMETRIC_L3L4_UDP: return "symmetric_l3l4+udp";
     default: return "<unknown>";
     }
 }
@@ -1113,7 +1826,9 @@ bool
 flow_hash_fields_valid(enum nx_hash_fields fields)
 {
     return fields == NX_HASH_FIELDS_ETH_SRC
-        || fields == NX_HASH_FIELDS_SYMMETRIC_L4;
+        || fields == NX_HASH_FIELDS_SYMMETRIC_L4
+        || fields == NX_HASH_FIELDS_SYMMETRIC_L3L4
+        || fields == NX_HASH_FIELDS_SYMMETRIC_L3L4_UDP;
 }
 
 /* Returns a hash value for the bits of 'flow' that are active based on
@@ -1122,16 +1837,16 @@ uint32_t
 flow_hash_in_wildcards(const struct flow *flow,
                        const struct flow_wildcards *wc, uint32_t basis)
 {
-    const uint32_t *wc_u32 = (const uint32_t *) &wc->masks;
-    const uint32_t *flow_u32 = (const uint32_t *) flow;
+    const uint64_t *wc_u64 = (const uint64_t *) &wc->masks;
+    const uint64_t *flow_u64 = (const uint64_t *) flow;
     uint32_t hash;
     size_t i;
 
     hash = basis;
-    for (i = 0; i < FLOW_U32S; i++) {
-        hash = mhash_add(hash, flow_u32[i] & wc_u32[i]);
+    for (i = 0; i < FLOW_U64S; i++) {
+        hash = hash_add64(hash, flow_u64[i] & wc_u64[i]);
     }
-    return mhash_finish(hash, 4 * FLOW_U32S);
+    return hash_finish(hash, 8 * FLOW_U64S);
 }
 
 /* Sets the VLAN VID that 'flow' matches to 'vid', which is interpreted as an
@@ -1193,23 +1908,24 @@ flow_set_vlan_pcp(struct flow *flow, uint8_t pcp)
 int
 flow_count_mpls_labels(const struct flow *flow, struct flow_wildcards *wc)
 {
-    if (wc) {
-        wc->masks.dl_type = OVS_BE16_MAX;
-    }
+    /* dl_type is always masked. */
     if (eth_type_mpls(flow->dl_type)) {
         int i;
-        int len = FLOW_MAX_MPLS_LABELS;
+        int cnt;
 
-        for (i = 0; i < len; i++) {
+        cnt = 0;
+        for (i = 0; i < FLOW_MAX_MPLS_LABELS; i++) {
             if (wc) {
                 wc->masks.mpls_lse[i] |= htonl(MPLS_BOS_MASK);
             }
             if (flow->mpls_lse[i] & htonl(MPLS_BOS_MASK)) {
                 return i + 1;
             }
+            if (flow->mpls_lse[i]) {
+                cnt++;
+            }
         }
-
-        return len;
+        return cnt;
     } else {
         return 0;
     }
@@ -1264,7 +1980,7 @@ flow_count_common_mpls_labels(const struct flow *a, int an,
  *
  *     - BoS: 1.
  *
- * If the new label is the second or label MPLS label in 'flow', it is
+ * If the new label is the second or later label MPLS label in 'flow', it is
  * generated as;
  *
  *     - label: Copied from outer label.
@@ -1285,15 +2001,16 @@ flow_push_mpls(struct flow *flow, int n, ovs_be16 mpls_eth_type,
     ovs_assert(eth_type_mpls(mpls_eth_type));
     ovs_assert(n < FLOW_MAX_MPLS_LABELS);
 
-    memset(wc->masks.mpls_lse, 0xff, sizeof wc->masks.mpls_lse);
     if (n) {
         int i;
 
+        if (wc) {
+            memset(&wc->masks.mpls_lse, 0xff, sizeof *wc->masks.mpls_lse * n);
+        }
         for (i = n; i >= 1; i--) {
             flow->mpls_lse[i] = flow->mpls_lse[i - 1];
         }
-        flow->mpls_lse[0] = (flow->mpls_lse[1]
-                             & htonl(~MPLS_BOS_MASK));
+        flow->mpls_lse[0] = (flow->mpls_lse[1] & htonl(~MPLS_BOS_MASK));
     } else {
         int label = 0;          /* IPv4 Explicit Null. */
         int tc = 0;
@@ -1305,20 +2022,23 @@ flow_push_mpls(struct flow *flow, int n, ovs_be16 mpls_eth_type,
 
         if (is_ip_any(flow)) {
             tc = (flow->nw_tos & IP_DSCP_MASK) >> 2;
-            wc->masks.nw_tos |= IP_DSCP_MASK;
+            if (wc) {
+                wc->masks.nw_tos |= IP_DSCP_MASK;
+                wc->masks.nw_ttl = 0xff;
+            }
 
             if (flow->nw_ttl) {
                 ttl = flow->nw_ttl;
             }
-            wc->masks.nw_ttl = 0xff;
         }
 
         flow->mpls_lse[0] = set_mpls_lse_values(ttl, tc, 1, htonl(label));
 
-        /* Clear all L3 and L4 fields. */
-        BUILD_ASSERT(FLOW_WC_SEQ == 26);
+        /* Clear all L3 and L4 fields and dp_hash. */
+        BUILD_ASSERT(FLOW_WC_SEQ == 35);
         memset((char *) flow + FLOW_SEGMENT_2_ENDS_AT, 0,
                sizeof(struct flow) - FLOW_SEGMENT_2_ENDS_AT);
+        flow->dp_hash = 0;
     }
     flow->dl_type = mpls_eth_type;
 }
@@ -1337,13 +2057,20 @@ flow_pop_mpls(struct flow *flow, int n, ovs_be16 eth_type,
     if (n == 0) {
         /* Nothing to pop. */
         return false;
-    } else if (n == FLOW_MAX_MPLS_LABELS
-               && !(flow->mpls_lse[n - 1] & htonl(MPLS_BOS_MASK))) {
-        /* Can't pop because we don't know what to fill in mpls_lse[n - 1]. */
-        return false;
+    } else if (n == FLOW_MAX_MPLS_LABELS) {
+        if (wc) {
+            wc->masks.mpls_lse[n - 1] |= htonl(MPLS_BOS_MASK);
+        }
+        if (!(flow->mpls_lse[n - 1] & htonl(MPLS_BOS_MASK))) {
+            /* Can't pop because don't know what to fill in mpls_lse[n - 1]. */
+            return false;
+        }
     }
 
-    memset(wc->masks.mpls_lse, 0xff, sizeof wc->masks.mpls_lse);
+    if (wc) {
+        memset(&wc->masks.mpls_lse[1], 0xff,
+               sizeof *wc->masks.mpls_lse * (n - 1));
+    }
     for (i = 1; i < n; i++) {
         flow->mpls_lse[i - 1] = flow->mpls_lse[i];
     }
@@ -1391,7 +2118,7 @@ flow_set_mpls_lse(struct flow *flow, int idx, ovs_be32 lse)
 }
 
 static size_t
-flow_compose_l4(struct ofpbuf *b, const struct flow *flow)
+flow_compose_l4(struct dp_packet *p, const struct flow *flow)
 {
     size_t l4_len = 0;
 
@@ -1401,7 +2128,7 @@ flow_compose_l4(struct ofpbuf *b, const struct flow *flow)
             struct tcp_header *tcp;
 
             l4_len = sizeof *tcp;
-            tcp = ofpbuf_put_zeros(b, l4_len);
+            tcp = dp_packet_put_zeros(p, l4_len);
             tcp->tcp_src = flow->tp_src;
             tcp->tcp_dst = flow->tp_dst;
             tcp->tcp_ctl = TCP_CTL(ntohs(flow->tcp_flags), 5);
@@ -1409,29 +2136,38 @@ flow_compose_l4(struct ofpbuf *b, const struct flow *flow)
             struct udp_header *udp;
 
             l4_len = sizeof *udp;
-            udp = ofpbuf_put_zeros(b, l4_len);
+            udp = dp_packet_put_zeros(p, l4_len);
             udp->udp_src = flow->tp_src;
             udp->udp_dst = flow->tp_dst;
         } else if (flow->nw_proto == IPPROTO_SCTP) {
             struct sctp_header *sctp;
 
             l4_len = sizeof *sctp;
-            sctp = ofpbuf_put_zeros(b, l4_len);
+            sctp = dp_packet_put_zeros(p, l4_len);
             sctp->sctp_src = flow->tp_src;
             sctp->sctp_dst = flow->tp_dst;
         } else if (flow->nw_proto == IPPROTO_ICMP) {
             struct icmp_header *icmp;
 
             l4_len = sizeof *icmp;
-            icmp = ofpbuf_put_zeros(b, l4_len);
+            icmp = dp_packet_put_zeros(p, l4_len);
             icmp->icmp_type = ntohs(flow->tp_src);
             icmp->icmp_code = ntohs(flow->tp_dst);
             icmp->icmp_csum = csum(icmp, ICMP_HEADER_LEN);
+        } else if (flow->nw_proto == IPPROTO_IGMP) {
+            struct igmp_header *igmp;
+
+            l4_len = sizeof *igmp;
+            igmp = dp_packet_put_zeros(p, l4_len);
+            igmp->igmp_type = ntohs(flow->tp_src);
+            igmp->igmp_code = ntohs(flow->tp_dst);
+            put_16aligned_be32(&igmp->group, flow->igmp_group_ip4);
+            igmp->igmp_csum = csum(igmp, IGMP_HEADER_LEN);
         } else if (flow->nw_proto == IPPROTO_ICMPV6) {
             struct icmp6_hdr *icmp;
 
             l4_len = sizeof *icmp;
-            icmp = ofpbuf_put_zeros(b, l4_len);
+            icmp = dp_packet_put_zeros(p, l4_len);
             icmp->icmp6_type = ntohs(flow->tp_src);
             icmp->icmp6_code = ntohs(flow->tp_dst);
 
@@ -1439,29 +2175,29 @@ flow_compose_l4(struct ofpbuf *b, const struct flow *flow)
                 (icmp->icmp6_type == ND_NEIGHBOR_SOLICIT ||
                  icmp->icmp6_type == ND_NEIGHBOR_ADVERT)) {
                 struct in6_addr *nd_target;
-                struct nd_opt_hdr *nd_opt;
+                struct ovs_nd_opt *nd_opt;
 
                 l4_len += sizeof *nd_target;
-                nd_target = ofpbuf_put_zeros(b, sizeof *nd_target);
+                nd_target = dp_packet_put_zeros(p, sizeof *nd_target);
                 *nd_target = flow->nd_target;
 
                 if (!eth_addr_is_zero(flow->arp_sha)) {
                     l4_len += 8;
-                    nd_opt = ofpbuf_put_zeros(b, 8);
+                    nd_opt = dp_packet_put_zeros(p, 8);
                     nd_opt->nd_opt_len = 1;
                     nd_opt->nd_opt_type = ND_OPT_SOURCE_LINKADDR;
-                    memcpy(nd_opt + 1, flow->arp_sha, ETH_ADDR_LEN);
+                    nd_opt->nd_opt_mac = flow->arp_sha;
                 }
                 if (!eth_addr_is_zero(flow->arp_tha)) {
                     l4_len += 8;
-                    nd_opt = ofpbuf_put_zeros(b, 8);
+                    nd_opt = dp_packet_put_zeros(p, 8);
                     nd_opt->nd_opt_len = 1;
                     nd_opt->nd_opt_type = ND_OPT_TARGET_LINKADDR;
-                    memcpy(nd_opt + 1, flow->arp_tha, ETH_ADDR_LEN);
+                    nd_opt->nd_opt_mac = flow->arp_tha;
                 }
             }
             icmp->icmp6_cksum = (OVS_FORCE uint16_t)
-                csum(icmp, (char *)ofpbuf_tail(b) - (char *)icmp);
+                csum(icmp, (char *)dp_packet_tail(p) - (char *)icmp);
         }
     }
     return l4_len;
@@ -1474,26 +2210,26 @@ flow_compose_l4(struct ofpbuf *b, const struct flow *flow)
  * valid. It hasn't got some checksums filled in, for one, and lots of fields
  * are just zeroed.) */
 void
-flow_compose(struct ofpbuf *b, const struct flow *flow)
+flow_compose(struct dp_packet *p, const struct flow *flow)
 {
     size_t l4_len;
 
     /* eth_compose() sets l3 pointer and makes sure it is 32-bit aligned. */
-    eth_compose(b, flow->dl_dst, flow->dl_src, ntohs(flow->dl_type), 0);
+    eth_compose(p, flow->dl_dst, flow->dl_src, ntohs(flow->dl_type), 0);
     if (flow->dl_type == htons(FLOW_DL_TYPE_NONE)) {
-        struct eth_header *eth = ofpbuf_l2(b);
-        eth->eth_type = htons(ofpbuf_size(b));
+        struct eth_header *eth = dp_packet_l2(p);
+        eth->eth_type = htons(dp_packet_size(p));
         return;
     }
 
     if (flow->vlan_tci & htons(VLAN_CFI)) {
-        eth_push_vlan(b, htons(ETH_TYPE_VLAN), flow->vlan_tci);
+        eth_push_vlan(p, htons(ETH_TYPE_VLAN), flow->vlan_tci);
     }
 
     if (flow->dl_type == htons(ETH_TYPE_IP)) {
         struct ip_header *ip;
 
-        ip = ofpbuf_put_zeros(b, sizeof *ip);
+        ip = dp_packet_put_zeros(p, sizeof *ip);
         ip->ip_ihl_ver = IP_IHL_VER(5, 4);
         ip->ip_tos = flow->nw_tos;
         ip->ip_ttl = flow->nw_ttl;
@@ -1508,17 +2244,17 @@ flow_compose(struct ofpbuf *b, const struct flow *flow)
             }
         }
 
-        ofpbuf_set_l4(b, ofpbuf_tail(b));
+        dp_packet_set_l4(p, dp_packet_tail(p));
 
-        l4_len = flow_compose_l4(b, flow);
+        l4_len = flow_compose_l4(p, flow);
 
-        ip = ofpbuf_l3(b);
-        ip->ip_tot_len = htons(b->l4_ofs - b->l3_ofs + l4_len);
+        ip = dp_packet_l3(p);
+        ip->ip_tot_len = htons(p->l4_ofs - p->l3_ofs + l4_len);
         ip->ip_csum = csum(ip, sizeof *ip);
     } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
         struct ovs_16aligned_ip6_hdr *nh;
 
-        nh = ofpbuf_put_zeros(b, sizeof *nh);
+        nh = dp_packet_put_zeros(p, sizeof *nh);
         put_16aligned_be32(&nh->ip6_flow, htonl(6 << 28) |
                            htonl(flow->nw_tos << 20) | flow->ipv6_label);
         nh->ip6_hlim = flow->nw_ttl;
@@ -1527,18 +2263,18 @@ flow_compose(struct ofpbuf *b, const struct flow *flow)
         memcpy(&nh->ip6_src, &flow->ipv6_src, sizeof(nh->ip6_src));
         memcpy(&nh->ip6_dst, &flow->ipv6_dst, sizeof(nh->ip6_dst));
 
-        ofpbuf_set_l4(b, ofpbuf_tail(b));
+        dp_packet_set_l4(p, dp_packet_tail(p));
 
-        l4_len = flow_compose_l4(b, flow);
+        l4_len = flow_compose_l4(p, flow);
 
-        nh = ofpbuf_l3(b);
+        nh = dp_packet_l3(p);
         nh->ip6_plen = htons(l4_len);
     } else if (flow->dl_type == htons(ETH_TYPE_ARP) ||
                flow->dl_type == htons(ETH_TYPE_RARP)) {
         struct arp_eth_header *arp;
 
-        arp = ofpbuf_put_zeros(b, sizeof *arp);
-        ofpbuf_set_l3(b, arp);
+        arp = dp_packet_put_zeros(p, sizeof *arp);
+        dp_packet_set_l3(p, arp);
         arp->ar_hrd = htons(1);
         arp->ar_pro = htons(ETH_TYPE_IP);
         arp->ar_hln = ETH_ADDR_LEN;
@@ -1549,174 +2285,105 @@ flow_compose(struct ofpbuf *b, const struct flow *flow)
             flow->nw_proto == ARP_OP_REPLY) {
             put_16aligned_be32(&arp->ar_spa, flow->nw_src);
             put_16aligned_be32(&arp->ar_tpa, flow->nw_dst);
-            memcpy(arp->ar_sha, flow->arp_sha, ETH_ADDR_LEN);
-            memcpy(arp->ar_tha, flow->arp_tha, ETH_ADDR_LEN);
+            arp->ar_sha = flow->arp_sha;
+            arp->ar_tha = flow->arp_tha;
         }
     }
 
     if (eth_type_mpls(flow->dl_type)) {
         int n;
 
-        b->l2_5_ofs = b->l3_ofs;
+        p->l2_5_ofs = p->l3_ofs;
         for (n = 1; n < FLOW_MAX_MPLS_LABELS; n++) {
             if (flow->mpls_lse[n - 1] & htonl(MPLS_BOS_MASK)) {
                 break;
             }
         }
         while (n > 0) {
-            push_mpls(b, flow->dl_type, flow->mpls_lse[--n]);
+            push_mpls(p, flow->dl_type, flow->mpls_lse[--n]);
         }
     }
 }
 
 /* Compressed flow. */
 
-static int
-miniflow_n_values(const struct miniflow *flow)
-{
-    return count_1bits(flow->map);
-}
-
-static uint32_t *
-miniflow_alloc_values(struct miniflow *flow, int n)
-{
-    int size = MINIFLOW_VALUES_SIZE(n);
-
-    if (size <= sizeof flow->inline_values) {
-        flow->values_inline = true;
-        return flow->inline_values;
-    } else {
-        COVERAGE_INC(miniflow_malloc);
-        flow->values_inline = false;
-        flow->offline_values = xmalloc(size);
-        return flow->offline_values;
-    }
-}
-
 /* Completes an initialization of 'dst' as a miniflow copy of 'src' begun by
- * the caller.  The caller must have already initialized 'dst->map' properly
- * to indicate the significant uint32_t elements of 'src'.  'n' must be the
- * number of 1-bits in 'dst->map'.
+ * the caller.  The caller must have already computed 'dst->map' properly to
+ * indicate the significant uint64_t elements of 'src'.
  *
  * Normally the significant elements are the ones that are non-zero.  However,
  * when a miniflow is initialized from a (mini)mask, the values can be zeroes,
- * so that the flow and mask always have the same maps.
- *
- * This function initializes values (either inline if possible or with
- * malloc() otherwise) and copies the uint32_t elements of 'src' indicated by
- * 'dst->map' into it. */
-static void
-miniflow_init__(struct miniflow *dst, const struct flow *src, int n)
-{
-    const uint32_t *src_u32 = (const uint32_t *) src;
-    uint32_t *dst_u32 = miniflow_alloc_values(dst, n);
-    uint64_t map;
-
-    for (map = dst->map; map; map = zero_rightmost_1bit(map)) {
-        *dst_u32++ = src_u32[raw_ctz(map)];
-    }
-}
-
-/* Initializes 'dst' as a copy of 'src'.  The caller must eventually free 'dst'
- * with miniflow_destroy().
- * Always allocates offline storage. */
+ * so that the flow and mask always have the same maps. */
 void
 miniflow_init(struct miniflow *dst, const struct flow *src)
 {
-    const uint32_t *src_u32 = (const uint32_t *) src;
-    unsigned int i;
-    int n;
+    uint64_t *dst_u64 = miniflow_values(dst);
+    size_t idx;
 
-    /* Initialize dst->map, counting the number of nonzero elements. */
-    n = 0;
-    dst->map = 0;
+    FLOWMAP_FOR_EACH_INDEX(idx, dst->map) {
+        *dst_u64++ = flow_u64_value(src, idx);
+    }
+}
 
-    for (i = 0; i < FLOW_U32S; i++) {
-        if (src_u32[i]) {
-            dst->map |= UINT64_C(1) << i;
-            n++;
+/* Initialize the maps of 'flow' from 'src'. */
+void
+miniflow_map_init(struct miniflow *flow, const struct flow *src)
+{
+    /* Initialize map, counting the number of nonzero elements. */
+    flowmap_init(&flow->map);
+    for (size_t i = 0; i < FLOW_U64S; i++) {
+        if (flow_u64_value(src, i)) {
+            flowmap_set(&flow->map, i, 1);
         }
     }
-
-    miniflow_init__(dst, src, n);
 }
 
-/* Initializes 'dst' as a copy of 'src', using 'mask->map' as 'dst''s map.  The
- * caller must eventually free 'dst' with miniflow_destroy(). */
-void
-miniflow_init_with_minimask(struct miniflow *dst, const struct flow *src,
-                            const struct minimask *mask)
+/* Allocates 'n' count of miniflows, consecutive in memory, initializing the
+ * map of each from 'src'.
+ * Returns the size of the miniflow data. */
+size_t
+miniflow_alloc(struct miniflow *dsts[], size_t n, const struct miniflow *src)
 {
-    dst->map = mask->masks.map;
-    miniflow_init__(dst, src, miniflow_n_values(dst));
-}
+    size_t n_values = miniflow_n_values(src);
+    size_t data_size = MINIFLOW_VALUES_SIZE(n_values);
+    struct miniflow *dst = xmalloc(n * (sizeof *src + data_size));
+    size_t i;
 
-/* Initializes 'dst' as a copy of 'src'.  The caller must eventually free 'dst'
- * with miniflow_destroy(). */
-void
-miniflow_clone(struct miniflow *dst, const struct miniflow *src)
-{
-    int size = MINIFLOW_VALUES_SIZE(miniflow_n_values(src));
-    uint32_t *values;
+    COVERAGE_INC(miniflow_malloc);
 
-    dst->map = src->map;
-    if (size <= sizeof dst->inline_values) {
-        dst->values_inline = true;
-        values = dst->inline_values;
-    } else {
-        dst->values_inline = false;
-        COVERAGE_INC(miniflow_malloc);
-        dst->offline_values = xmalloc(size);
-        values = dst->offline_values;
+    for (i = 0; i < n; i++) {
+        *dst = *src;   /* Copy maps. */
+        dsts[i] = dst;
+        dst += 1;      /* Just past the maps. */
+        dst = (struct miniflow *)((uint64_t *)dst + n_values); /* Skip data. */
     }
-    memcpy(values, miniflow_get_values(src), size);
+    return data_size;
+}
+
+/* Returns a miniflow copy of 'src'.  The caller must eventually free() the
+ * returned miniflow. */
+struct miniflow *
+miniflow_create(const struct flow *src)
+{
+    struct miniflow tmp;
+    struct miniflow *dst;
+
+    miniflow_map_init(&tmp, src);
+
+    miniflow_alloc(&dst, 1, &tmp);
+    miniflow_init(dst, src);
+    return dst;
 }
 
 /* Initializes 'dst' as a copy of 'src'.  The caller must have allocated
- * 'dst' to have inline space all data in 'src'. */
+ * 'dst' to have inline space for 'n_values' data in 'src'. */
 void
-miniflow_clone_inline(struct miniflow *dst, const struct miniflow *src,
-                      size_t n_values)
+miniflow_clone(struct miniflow *dst, const struct miniflow *src,
+               size_t n_values)
 {
-    dst->values_inline = true;
-    dst->map = src->map;
-    memcpy(dst->inline_values, miniflow_get_values(src),
+    *dst = *src;   /* Copy maps. */
+    memcpy(miniflow_values(dst), miniflow_get_values(src),
            MINIFLOW_VALUES_SIZE(n_values));
-}
-
-/* Initializes 'dst' with the data in 'src', destroying 'src'.
- * The caller must eventually free 'dst' with miniflow_destroy().
- * 'dst' must be regularly sized miniflow, but 'src' can have
- * larger than default inline values. */
-void
-miniflow_move(struct miniflow *dst, struct miniflow *src)
-{
-    int size = MINIFLOW_VALUES_SIZE(miniflow_n_values(src));
-
-    dst->map = src->map;
-    if (size <= sizeof dst->inline_values) {
-        dst->values_inline = true;
-        memcpy(dst->inline_values, miniflow_get_values(src), size);
-        miniflow_destroy(src);
-    } else if (src->values_inline) {
-        dst->values_inline = false;
-        COVERAGE_INC(miniflow_malloc);
-        dst->offline_values = xmalloc(size);
-        memcpy(dst->offline_values, src->inline_values, size);
-    } else {
-        dst->values_inline = false;
-        dst->offline_values = src->offline_values;
-    }
-}
-
-/* Frees any memory owned by 'flow'.  Does not free the storage in which 'flow'
- * itself resides; the caller is responsible for that. */
-void
-miniflow_destroy(struct miniflow *flow)
-{
-    if (!flow->values_inline) {
-        free(flow->offline_values);
-    }
 }
 
 /* Initializes 'dst' as a copy of 'src'. */
@@ -1727,43 +2394,23 @@ miniflow_expand(const struct miniflow *src, struct flow *dst)
     flow_union_with_miniflow(dst, src);
 }
 
-/* Returns the uint32_t that would be at byte offset '4 * u32_ofs' if 'flow'
- * were expanded into a "struct flow". */
-static uint32_t
-miniflow_get(const struct miniflow *flow, unsigned int u32_ofs)
-{
-    return (flow->map & UINT64_C(1) << u32_ofs)
-        ? *(miniflow_get_u32_values(flow) +
-            count_1bits(flow->map & ((UINT64_C(1) << u32_ofs) - 1)))
-        : 0;
-}
-
-/* Returns true if 'a' and 'b' are the same flow, false otherwise.  */
+/* Returns true if 'a' and 'b' are equal miniflows, false otherwise. */
 bool
 miniflow_equal(const struct miniflow *a, const struct miniflow *b)
 {
-    const uint32_t *ap = miniflow_get_u32_values(a);
-    const uint32_t *bp = miniflow_get_u32_values(b);
-    const uint64_t a_map = a->map;
-    const uint64_t b_map = b->map;
+    const uint64_t *ap = miniflow_get_values(a);
+    const uint64_t *bp = miniflow_get_values(b);
 
-    if (OVS_LIKELY(a_map == b_map)) {
-        int count = miniflow_n_values(a);
-
-        while (count--) {
-            if (*ap++ != *bp++) {
-                return false;
-            }
-        }
+    /* This is mostly called after a matching hash, so it is highly likely that
+     * the maps are equal as well. */
+    if (OVS_LIKELY(flowmap_equal(a->map, b->map))) {
+        return !memcmp(ap, bp, miniflow_n_values(a) * sizeof *ap);
     } else {
-        uint64_t map;
+        size_t idx;
 
-        for (map = a_map | b_map; map; map = zero_rightmost_1bit(map)) {
-            uint64_t bit = rightmost_1bit(map);
-            uint64_t a_value = a_map & bit ? *ap++ : 0;
-            uint64_t b_value = b_map & bit ? *bp++ : 0;
-
-            if (a_value != b_value) {
+        FLOWMAP_FOR_EACH_INDEX (idx, flowmap_or(a->map, b->map)) {
+            if ((flowmap_is_set(&a->map, idx) ? *ap++ : 0)
+                != (flowmap_is_set(&b->map, idx) ? *bp++ : 0)) {
                 return false;
             }
         }
@@ -1772,19 +2419,17 @@ miniflow_equal(const struct miniflow *a, const struct miniflow *b)
     return true;
 }
 
-/* Returns true if 'a' and 'b' are equal at the places where there are 1-bits
- * in 'mask', false if they differ. */
+/* Returns false if 'a' and 'b' differ at the places where there are 1-bits
+ * in 'mask', true otherwise. */
 bool
 miniflow_equal_in_minimask(const struct miniflow *a, const struct miniflow *b,
                            const struct minimask *mask)
 {
-    const uint32_t *p = miniflow_get_u32_values(&mask->masks);
-    uint64_t map;
+    const uint64_t *p = miniflow_get_values(&mask->masks);
+    size_t idx;
 
-    for (map = mask->masks.map; map; map = zero_rightmost_1bit(map)) {
-        int ofs = raw_ctz(map);
-
-        if ((miniflow_get(a, ofs) ^ miniflow_get(b, ofs)) & *p++) {
+    FLOWMAP_FOR_EACH_INDEX(idx, mask->masks.map) {
+        if ((miniflow_get(a, idx) ^ miniflow_get(b, idx)) & *p++) {
             return false;
         }
     }
@@ -1798,14 +2443,11 @@ bool
 miniflow_equal_flow_in_minimask(const struct miniflow *a, const struct flow *b,
                                 const struct minimask *mask)
 {
-    const uint32_t *b_u32 = (const uint32_t *) b;
-    const uint32_t *p = miniflow_get_u32_values(&mask->masks);
-    uint64_t map;
+    const uint64_t *p = miniflow_get_values(&mask->masks);
+    size_t idx;
 
-    for (map = mask->masks.map; map; map = zero_rightmost_1bit(map)) {
-        int ofs = raw_ctz(map);
-
-        if ((miniflow_get(a, ofs) ^ b_u32[ofs]) & *p++) {
+    FLOWMAP_FOR_EACH_INDEX(idx, mask->masks.map) {
+        if ((miniflow_get(a, idx) ^ flow_u64_value(b, idx)) & *p++) {
             return false;
         }
     }
@@ -1814,89 +2456,64 @@ miniflow_equal_flow_in_minimask(const struct miniflow *a, const struct flow *b,
 }
 
 
-/* Initializes 'dst' as a copy of 'src'.  The caller must eventually free 'dst'
- * with minimask_destroy(). */
 void
 minimask_init(struct minimask *mask, const struct flow_wildcards *wc)
 {
     miniflow_init(&mask->masks, &wc->masks);
 }
 
-/* Initializes 'dst' as a copy of 'src'.  The caller must eventually free 'dst'
- * with minimask_destroy(). */
-void
-minimask_clone(struct minimask *dst, const struct minimask *src)
+/* Returns a minimask copy of 'wc'.  The caller must eventually free the
+ * returned minimask with free(). */
+struct minimask *
+minimask_create(const struct flow_wildcards *wc)
 {
-    miniflow_clone(&dst->masks, &src->masks);
-}
-
-/* Initializes 'dst' with the data in 'src', destroying 'src'.
- * The caller must eventually free 'dst' with minimask_destroy(). */
-void
-minimask_move(struct minimask *dst, struct minimask *src)
-{
-    miniflow_move(&dst->masks, &src->masks);
+    return (struct minimask *)miniflow_create(&wc->masks);
 }
 
 /* Initializes 'dst_' as the bit-wise "and" of 'a_' and 'b_'.
  *
- * The caller must provide room for FLOW_U32S "uint32_t"s in 'storage', for use
- * by 'dst_'.  The caller must *not* free 'dst_' with minimask_destroy(). */
+ * The caller must provide room for FLOW_U64S "uint64_t"s in 'storage', which
+ * must follow '*dst_' in memory, for use by 'dst_'.  The caller must *not*
+ * free 'dst_' free(). */
 void
 minimask_combine(struct minimask *dst_,
                  const struct minimask *a_, const struct minimask *b_,
-                 uint32_t storage[FLOW_U32S])
+                 uint64_t storage[FLOW_U64S])
 {
     struct miniflow *dst = &dst_->masks;
-    uint32_t *dst_values = storage;
+    uint64_t *dst_values = storage;
     const struct miniflow *a = &a_->masks;
     const struct miniflow *b = &b_->masks;
-    uint64_t map;
-    int n = 0;
+    size_t idx;
 
-    dst->values_inline = false;
-    dst->offline_values = storage;
+    flowmap_init(&dst->map);
 
-    dst->map = 0;
-    for (map = a->map & b->map; map; map = zero_rightmost_1bit(map)) {
-        int ofs = raw_ctz(map);
-        uint32_t mask = miniflow_get(a, ofs) & miniflow_get(b, ofs);
+    FLOWMAP_FOR_EACH_INDEX(idx, flowmap_and(a->map, b->map)) {
+        /* Both 'a' and 'b' have non-zero data at 'idx'. */
+        uint64_t mask = *miniflow_get__(a, idx) & *miniflow_get__(b, idx);
 
         if (mask) {
-            dst->map |= rightmost_1bit(map);
-            dst_values[n++] = mask;
+            flowmap_set(&dst->map, idx, 1);
+            *dst_values++ = mask;
         }
     }
 }
 
-/* Frees any memory owned by 'mask'.  Does not free the storage in which 'mask'
- * itself resides; the caller is responsible for that. */
-void
-minimask_destroy(struct minimask *mask)
-{
-    miniflow_destroy(&mask->masks);
-}
-
-/* Initializes 'dst' as a copy of 'src'. */
+/* Initializes 'wc' as a copy of 'mask'. */
 void
 minimask_expand(const struct minimask *mask, struct flow_wildcards *wc)
 {
     miniflow_expand(&mask->masks, &wc->masks);
 }
 
-/* Returns the uint32_t that would be at byte offset '4 * u32_ofs' if 'mask'
- * were expanded into a "struct flow_wildcards". */
-uint32_t
-minimask_get(const struct minimask *mask, unsigned int u32_ofs)
-{
-    return miniflow_get(&mask->masks, u32_ofs);
-}
-
-/* Returns true if 'a' and 'b' are the same flow mask, false otherwise.  */
+/* Returns true if 'a' and 'b' are the same flow mask, false otherwise.
+ * Minimasks may not have zero data values, so for the minimasks to be the
+ * same, they need to have the same map and the same data values. */
 bool
 minimask_equal(const struct minimask *a, const struct minimask *b)
 {
-    return miniflow_equal(&a->masks, &b->masks);
+    return !memcmp(a, b, sizeof *a
+                   + MINIFLOW_VALUES_SIZE(miniflow_n_values(&a->masks)));
 }
 
 /* Returns true if at least one bit matched by 'b' is wildcarded by 'a',
@@ -1904,15 +2521,17 @@ minimask_equal(const struct minimask *a, const struct minimask *b)
 bool
 minimask_has_extra(const struct minimask *a, const struct minimask *b)
 {
-    const uint32_t *p = miniflow_get_u32_values(&b->masks);
-    uint64_t map;
+    const uint64_t *bp = miniflow_get_values(&b->masks);
+    size_t idx;
 
-    for (map = b->masks.map; map; map = zero_rightmost_1bit(map)) {
-        uint32_t a_u32 = minimask_get(a, raw_ctz(map));
-        uint32_t b_u32 = *p++;
+    FLOWMAP_FOR_EACH_INDEX(idx, b->masks.map) {
+        uint64_t b_u64 = *bp++;
 
-        if ((a_u32 & b_u32) != b_u32) {
-            return true;
+        /* 'b_u64' is non-zero, check if the data in 'a' is either zero
+         * or misses some of the bits in 'b_u64'. */
+        if (!MINIFLOW_IN_MAP(&a->masks, idx)
+            || ((*miniflow_get__(&a->masks, idx) & b_u64) != b_u64)) {
+            return true; /* 'a' wildcards some bits 'b' doesn't. */
         }
     }
 

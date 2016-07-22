@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@
 #include "timeval.h"
 #include "unixctl.h"
 #include "util.h"
+#include "openvswitch/vlog.h"
 
 static void usage(void);
 static const char *parse_command_line(int argc, char *argv[]);
@@ -88,13 +89,14 @@ usage: %s [TARGET] COMMAND [ARG...]\n\
 Targets:\n\
   -t, --target=TARGET  pidfile or socket to contact\n\
 Common commands:\n\
-  help               List commands supported by the target\n\
+  list-commands      List commands supported by the target\n\
   version            Print version of the target\n\
   vlog/list          List current logging levels\n\
+  vlog/list-pattern  List logging patterns for each destination.\n\
   vlog/set [SPEC]\n\
       Set log levels as detailed in SPEC, which may include:\n\
       A valid module name (all modules, by default)\n\
-      'syslog', 'console', 'file' (all facilities, by default))\n\
+      'syslog', 'console', 'file' (all destinations, by default))\n\
       'off', 'emer', 'err', 'warn', 'info', or 'dbg' ('dbg', bydefault)\n\
   vlog/reopen        Make the program reopen its log file\n\
 Other options:\n\
@@ -108,14 +110,22 @@ Other options:\n\
 static const char *
 parse_command_line(int argc, char *argv[])
 {
+    enum {
+        OPT_START = UCHAR_MAX + 1,
+        VLOG_OPTION_ENUMS
+    };
     static const struct option long_options[] = {
         {"target", required_argument, NULL, 't'},
         {"execute", no_argument, NULL, 'e'},
         {"help", no_argument, NULL, 'h'},
+        {"option", no_argument, NULL, 'o'},
         {"version", no_argument, NULL, 'V'},
         {"timeout", required_argument, NULL, 'T'},
+        VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
+    char *short_options_ = ovs_cmdl_long_options_to_short_options(long_options);
+    char *short_options = xasprintf("+%s", short_options_);
     const char *target;
     int e_options;
 
@@ -124,7 +134,7 @@ parse_command_line(int argc, char *argv[])
     for (;;) {
         int option;
 
-        option = getopt_long(argc, argv, "+t:hVe", long_options, NULL);
+        option = getopt_long(argc, argv, short_options, long_options, NULL);
         if (option == -1) {
             break;
         }
@@ -150,6 +160,10 @@ parse_command_line(int argc, char *argv[])
             usage();
             break;
 
+        case 'o':
+            ovs_cmdl_print_options(long_options);
+            exit(EXIT_SUCCESS);
+
         case 'T':
             time_alarm(atoi(optarg));
             break;
@@ -158,6 +172,8 @@ parse_command_line(int argc, char *argv[])
             ovs_print_version(0, 0);
             exit(EXIT_SUCCESS);
 
+        VLOG_OPTION_HANDLERS
+
         case '?':
             exit(EXIT_FAILURE);
 
@@ -165,6 +181,8 @@ parse_command_line(int argc, char *argv[])
             OVS_NOT_REACHED();
         }
     }
+    free(short_options_);
+    free(short_options);
 
     if (optind >= argc) {
         ovs_fatal(0, "at least one non-option argument is required "

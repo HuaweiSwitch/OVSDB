@@ -13,14 +13,17 @@
  * limitations under the License. */
 
 #include <config.h>
-#include "route-table.h"
 
 #include "compiler.h"
+#include "ovs-router.h"
+#include "route-table.h"
 
 bool
-route_table_get_name(ovs_be32 ip OVS_UNUSED, char name[IFNAMSIZ] OVS_UNUSED)
+route_table_fallback_lookup(ovs_be32 ip_dst OVS_UNUSED,
+                            char output_bridge[] OVS_UNUSED,
+                            ovs_be32 *gw)
 {
-    name[0] = '\0';
+    *gw = 0;
     return false;
 }
 
@@ -31,13 +34,9 @@ route_table_get_change_seq(void)
 }
 
 void
-route_table_register(void)
+route_table_init(void)
 {
-}
-
-void
-route_table_unregister(void)
-{
+    ovs_router_init();
 }
 
 void

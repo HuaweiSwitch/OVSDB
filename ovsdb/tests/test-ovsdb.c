@@ -49,31 +49,41 @@
 #include "tests/idltest.h"
 #include "timeval.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
-static void usage(void) NO_RETURN;
-static void parse_options(int argc, char *argv[]);
-static struct command *get_all_commands(void);
+struct test_ovsdb_pvt_context {
+    bool track;
+};
+
+OVS_NO_RETURN static void usage(void);
+static void parse_options(int argc, char *argv[],
+    struct test_ovsdb_pvt_context *pvt);
+static struct ovs_cmdl_command *get_all_commands(void);
 
 int
 main(int argc, char *argv[])
 {
+    struct test_ovsdb_pvt_context pvt = {.track = false};
+    struct ovs_cmdl_context ctx = { .argc = 0, .pvt = &pvt};
     set_program_name(argv[0]);
-    parse_options(argc, argv);
-    run_command(argc - optind, argv + optind, get_all_commands());
+    parse_options(argc, argv, &pvt);
+    ctx.argc = argc - optind;
+    ctx.argv = argv + optind;
+    ovs_cmdl_run_command(&ctx, get_all_commands());
     return 0;
 }
 
 static void
-parse_options(int argc, char *argv[])
+parse_options(int argc, char *argv[], struct test_ovsdb_pvt_context *pvt)
 {
     static const struct option long_options[] = {
         {"timeout", required_argument, NULL, 't'},
         {"verbose", optional_argument, NULL, 'v'},
+        {"change-track", optional_argument, NULL, 'c'},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
 
     for (;;) {
         unsigned long int timeout;
@@ -100,6 +110,10 @@ parse_options(int argc, char *argv[])
 
         case 'v':
             vlog_set_verbosity(optarg);
+            break;
+
+        case 'c':
+            pvt->track = true;
             break;
 
         case '?':
@@ -188,7 +202,9 @@ usage(void)
     vlog_usage();
     printf("\nOther options:\n"
            "  -t, --timeout=SECS          give up after SECS seconds\n"
-           "  -h, --help                  display this help message\n");
+           "  -h, --help                  display this help message\n"
+           "  -c, --change-track          used with the 'idl' command to\n"
+           "                              enable tracking of IDL changes\n");
     exit(EXIT_SUCCESS);
 }
 
@@ -256,10 +272,10 @@ die_if_error(char *error)
 /* Command implementations. */
 
 static void
-do_log_io(int argc, char *argv[])
+do_log_io(struct ovs_cmdl_context *ctx)
 {
-    const char *name = argv[1];
-    char *mode_string = argv[2];
+    const char *name = ctx->argv[1];
+    char *mode_string = ctx->argv[2];
 
     struct ovsdb_error *error;
     enum ovsdb_log_open_mode mode;
@@ -279,8 +295,8 @@ do_log_io(int argc, char *argv[])
     check_ovsdb_error(ovsdb_log_open(name, mode, -1, &log));
     printf("%s: open successful\n", name);
 
-    for (i = 3; i < argc; i++) {
-        const char *command = argv[i];
+    for (i = 3; i < ctx->argc; i++) {
+        const char *command = ctx->argv[i];
         if (!strcmp(command, "read")) {
             struct json *json;
 
@@ -317,7 +333,7 @@ do_log_io(int argc, char *argv[])
 }
 
 static void
-do_default_atoms(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_default_atoms(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int type;
 
@@ -342,7 +358,7 @@ do_default_atoms(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-do_default_data(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_default_data(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     unsigned int n_min;
     int key, value;
@@ -382,24 +398,24 @@ do_default_data(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-do_parse_atomic_type(int argc OVS_UNUSED, char *argv[])
+do_parse_atomic_type(struct ovs_cmdl_context *ctx)
 {
     enum ovsdb_atomic_type type;
     struct json *json;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_atomic_type_from_json(&type, json));
     json_destroy(json);
     print_and_free_json(ovsdb_atomic_type_to_json(type));
 }
 
 static void
-do_parse_base_type(int argc OVS_UNUSED, char *argv[])
+do_parse_base_type(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_base_type base;
     struct json *json;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_base_type_from_json(&base, json));
     json_destroy(json);
     print_and_free_json(ovsdb_base_type_to_json(&base));
@@ -407,12 +423,12 @@ do_parse_base_type(int argc OVS_UNUSED, char *argv[])
 }
 
 static void
-do_parse_type(int argc OVS_UNUSED, char *argv[])
+do_parse_type(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_type type;
     struct json *json;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_type_from_json(&type, json));
     json_destroy(json);
     print_and_free_json(ovsdb_type_to_json(&type));
@@ -420,21 +436,21 @@ do_parse_type(int argc OVS_UNUSED, char *argv[])
 }
 
 static void
-do_parse_atoms(int argc, char *argv[])
+do_parse_atoms(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_base_type base;
     struct json *json;
     int i;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_base_type_from_json(&base, json));
     json_destroy(json);
 
-    for (i = 2; i < argc; i++) {
+    for (i = 2; i < ctx->argc; i++) {
         struct ovsdb_error *error;
         union ovsdb_atom atom;
 
-        json = unbox_json(parse_json(argv[i]));
+        json = unbox_json(parse_json(ctx->argv[i]));
         error = ovsdb_atom_from_json(&atom, &base, json, NULL);
         json_destroy(json);
 
@@ -449,21 +465,21 @@ do_parse_atoms(int argc, char *argv[])
 }
 
 static void
-do_parse_atom_strings(int argc, char *argv[])
+do_parse_atom_strings(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_base_type base;
     struct json *json;
     int i;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_base_type_from_json(&base, json));
     json_destroy(json);
 
-    for (i = 2; i < argc; i++) {
+    for (i = 2; i < ctx->argc; i++) {
         union ovsdb_atom atom;
         struct ds out;
 
-        die_if_error(ovsdb_atom_from_string(&atom, &base, argv[i], NULL));
+        die_if_error(ovsdb_atom_from_string(&atom, &base, ctx->argv[i], NULL));
 
         ds_init(&out);
         ovsdb_atom_to_string(&atom, base.type, &out);
@@ -506,27 +522,27 @@ do_parse_data__(int argc, char *argv[],
 }
 
 static void
-do_parse_data(int argc, char *argv[])
+do_parse_data(struct ovs_cmdl_context *ctx)
 {
-    do_parse_data__(argc, argv, ovsdb_datum_from_json);
+    do_parse_data__(ctx->argc, ctx->argv, ovsdb_datum_from_json);
 }
 
 static void
-do_parse_data_strings(int argc, char *argv[])
+do_parse_data_strings(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_type type;
     struct json *json;
     int i;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_type_from_json(&type, json));
     json_destroy(json);
 
-    for (i = 2; i < argc; i++) {
+    for (i = 2; i < ctx->argc; i++) {
         struct ovsdb_datum datum;
         struct ds out;
 
-        die_if_error(ovsdb_datum_from_string(&datum, &type, argv[i], NULL));
+        die_if_error(ovsdb_datum_from_string(&datum, &type, ctx->argv[i], NULL));
 
         ds_init(&out);
         ovsdb_datum_to_string(&datum, &type, &out);
@@ -550,7 +566,7 @@ compare_atoms(const void *a_, const void *b_)
 }
 
 static void
-do_sort_atoms(int argc OVS_UNUSED, char *argv[])
+do_sort_atoms(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_base_type base;
     union ovsdb_atom *atoms;
@@ -558,11 +574,11 @@ do_sort_atoms(int argc OVS_UNUSED, char *argv[])
     size_t n_atoms;
     int i;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_base_type_from_json(&base, json));
     json_destroy(json);
 
-    json = unbox_json(parse_json(argv[2]));
+    json = unbox_json(parse_json(ctx->argv[2]));
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "second argument must be array");
     }
@@ -592,36 +608,36 @@ do_sort_atoms(int argc OVS_UNUSED, char *argv[])
 }
 
 static void
-do_parse_column(int argc OVS_UNUSED, char *argv[])
+do_parse_column(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_column *column;
     struct json *json;
 
-    json = parse_json(argv[2]);
-    check_ovsdb_error(ovsdb_column_from_json(json, argv[1], &column));
+    json = parse_json(ctx->argv[2]);
+    check_ovsdb_error(ovsdb_column_from_json(json, ctx->argv[1], &column));
     json_destroy(json);
     print_and_free_json(ovsdb_column_to_json(column));
     ovsdb_column_destroy(column);
 }
 
 static void
-do_parse_table(int argc OVS_UNUSED, char *argv[])
+do_parse_table(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_table_schema *ts;
     bool default_is_root;
     struct json *json;
 
-    default_is_root = argc > 3 && !strcmp(argv[3], "true");
+    default_is_root = ctx->argc > 3 && !strcmp(ctx->argv[3], "true");
 
-    json = parse_json(argv[2]);
-    check_ovsdb_error(ovsdb_table_schema_from_json(json, argv[1], &ts));
+    json = parse_json(ctx->argv[2]);
+    check_ovsdb_error(ovsdb_table_schema_from_json(json, ctx->argv[1], &ts));
     json_destroy(json);
     print_and_free_json(ovsdb_table_schema_to_json(ts, default_is_root));
     ovsdb_table_schema_destroy(ts);
 }
 
 static void
-do_parse_rows(int argc, char *argv[])
+do_parse_rows(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_column_set all_columns;
     struct ovsdb_table_schema *ts;
@@ -629,7 +645,7 @@ do_parse_rows(int argc, char *argv[])
     struct json *json;
     int i;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
@@ -637,14 +653,14 @@ do_parse_rows(int argc, char *argv[])
     ovsdb_column_set_init(&all_columns);
     ovsdb_column_set_add_all(&all_columns, table);
 
-    for (i = 2; i < argc; i++) {
+    for (i = 2; i < ctx->argc; i++) {
         struct ovsdb_column_set columns;
         struct ovsdb_row *row;
 
         ovsdb_column_set_init(&columns);
         row = ovsdb_row_create(table);
 
-        json = unbox_json(parse_json(argv[i]));
+        json = unbox_json(parse_json(ctx->argv[i]));
         check_ovsdb_error(ovsdb_row_from_json(row, json, NULL, &columns));
         json_destroy(json);
 
@@ -677,7 +693,7 @@ do_parse_rows(int argc, char *argv[])
 }
 
 static void
-do_compare_rows(int argc, char *argv[])
+do_compare_rows(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_column_set all_columns;
     struct ovsdb_table_schema *ts;
@@ -688,7 +704,7 @@ do_compare_rows(int argc, char *argv[])
     int n_rows;
     int i, j;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
@@ -696,17 +712,17 @@ do_compare_rows(int argc, char *argv[])
     ovsdb_column_set_init(&all_columns);
     ovsdb_column_set_add_all(&all_columns, table);
 
-    n_rows = argc - 2;
+    n_rows = ctx->argc - 2;
     rows = xmalloc(sizeof *rows * n_rows);
     names = xmalloc(sizeof *names * n_rows);
     for (i = 0; i < n_rows; i++) {
         rows[i] = ovsdb_row_create(table);
 
-        json = parse_json(argv[i + 2]);
+        json = parse_json(ctx->argv[i + 2]);
         if (json->type != JSON_ARRAY || json->u.array.n != 2
             || json->u.array.elems[0]->type != JSON_STRING) {
             ovs_fatal(0, "\"%s\" does not have expected form "
-                      "[\"name\", {data}]", argv[i]);
+                      "[\"name\", {data}]", ctx->argv[i]);
         }
         names[i] = xstrdup(json->u.array.elems[0]->u.string);
         check_ovsdb_error(ovsdb_row_from_json(rows[i], json->u.array.elems[1],
@@ -740,22 +756,22 @@ do_compare_rows(int argc, char *argv[])
 }
 
 static void
-do_parse_conditions(int argc, char *argv[])
+do_parse_conditions(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_table_schema *ts;
     struct json *json;
     int exit_code = 0;
     int i;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
-    for (i = 2; i < argc; i++) {
+    for (i = 2; i < ctx->argc; i++) {
         struct ovsdb_condition cnd;
         struct ovsdb_error *error;
 
-        json = parse_json(argv[i]);
+        json = parse_json(ctx->argv[i]);
         error = ovsdb_condition_from_json(ts, json, NULL, &cnd);
         if (!error) {
             print_and_free_json(ovsdb_condition_to_json(&cnd));
@@ -776,7 +792,7 @@ do_parse_conditions(int argc, char *argv[])
 }
 
 static void
-do_evaluate_conditions(int argc OVS_UNUSED, char *argv[])
+do_evaluate_conditions(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_table_schema *ts;
     struct ovsdb_table *table;
@@ -788,14 +804,14 @@ do_evaluate_conditions(int argc OVS_UNUSED, char *argv[])
     size_t i, j;
 
     /* Parse table schema, create table. */
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
     table = ovsdb_table_create(ts);
 
     /* Parse conditions. */
-    json = parse_json(argv[2]);
+    json = parse_json(ctx->argv[2]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "CONDITION argument is not JSON array");
     }
@@ -808,7 +824,7 @@ do_evaluate_conditions(int argc OVS_UNUSED, char *argv[])
     json_destroy(json);
 
     /* Parse rows. */
-    json = parse_json(argv[3]);
+    json = parse_json(ctx->argv[3]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "ROW argument is not JSON array");
     }
@@ -845,22 +861,22 @@ do_evaluate_conditions(int argc OVS_UNUSED, char *argv[])
 }
 
 static void
-do_parse_mutations(int argc, char *argv[])
+do_parse_mutations(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_table_schema *ts;
     struct json *json;
     int exit_code = 0;
     int i;
 
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
-    for (i = 2; i < argc; i++) {
+    for (i = 2; i < ctx->argc; i++) {
         struct ovsdb_mutation_set set;
         struct ovsdb_error *error;
 
-        json = parse_json(argv[i]);
+        json = parse_json(ctx->argv[i]);
         error = ovsdb_mutation_set_from_json(ts, json, NULL, &set);
         if (!error) {
             print_and_free_json(ovsdb_mutation_set_to_json(&set));
@@ -881,7 +897,7 @@ do_parse_mutations(int argc, char *argv[])
 }
 
 static void
-do_execute_mutations(int argc OVS_UNUSED, char *argv[])
+do_execute_mutations(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_table_schema *ts;
     struct ovsdb_table *table;
@@ -893,14 +909,14 @@ do_execute_mutations(int argc OVS_UNUSED, char *argv[])
     size_t i, j;
 
     /* Parse table schema, create table. */
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
     table = ovsdb_table_create(ts);
 
     /* Parse mutations. */
-    json = parse_json(argv[2]);
+    json = parse_json(ctx->argv[2]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "MUTATION argument is not JSON array");
     }
@@ -914,7 +930,7 @@ do_execute_mutations(int argc OVS_UNUSED, char *argv[])
     json_destroy(json);
 
     /* Parse rows. */
-    json = parse_json(argv[3]);
+    json = parse_json(ctx->argv[3]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "ROW argument is not JSON array");
     }
@@ -1007,7 +1023,7 @@ do_query_cb(const struct ovsdb_row *row, void *cbdata_)
 }
 
 static void
-do_query(int argc OVS_UNUSED, char *argv[])
+do_query(struct ovs_cmdl_context *ctx)
 {
     struct do_query_cbdata cbdata;
     struct ovsdb_table_schema *ts;
@@ -1017,14 +1033,14 @@ do_query(int argc OVS_UNUSED, char *argv[])
     size_t i;
 
     /* Parse table schema, create table. */
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
     table = ovsdb_table_create(ts);
 
     /* Parse rows, add to table. */
-    json = parse_json(argv[2]);
+    json = parse_json(ctx->argv[2]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "ROW argument is not JSON array");
     }
@@ -1046,7 +1062,7 @@ do_query(int argc OVS_UNUSED, char *argv[])
     json_destroy(json);
 
     /* Parse conditions and execute queries. */
-    json = parse_json(argv[3]);
+    json = parse_json(ctx->argv[3]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "CONDITION argument is not JSON array");
     }
@@ -1097,7 +1113,7 @@ struct do_query_distinct_row {
 };
 
 static void
-do_query_distinct(int argc OVS_UNUSED, char *argv[])
+do_query_distinct(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_column_set columns;
     struct ovsdb_table_schema *ts;
@@ -1111,20 +1127,20 @@ do_query_distinct(int argc OVS_UNUSED, char *argv[])
     size_t i;
 
     /* Parse table schema, create table. */
-    json = unbox_json(parse_json(argv[1]));
+    json = unbox_json(parse_json(ctx->argv[1]));
     check_ovsdb_error(ovsdb_table_schema_from_json(json, "mytable", &ts));
     json_destroy(json);
 
     table = ovsdb_table_create(ts);
 
     /* Parse column set. */
-    json = parse_json(argv[4]);
+    json = parse_json(ctx->argv[4]);
     check_ovsdb_error(ovsdb_column_set_from_json(json, table->schema,
                                                  &columns));
     json_destroy(json);
 
     /* Parse rows, add to table. */
-    json = parse_json(argv[2]);
+    json = parse_json(ctx->argv[2]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "ROW argument is not JSON array");
     }
@@ -1168,7 +1184,7 @@ do_query_distinct(int argc OVS_UNUSED, char *argv[])
     json_destroy(json);
 
     /* Parse conditions and execute queries. */
-    json = parse_json(argv[3]);
+    json = parse_json(ctx->argv[3]);
     if (json->type != JSON_ARRAY) {
         ovs_fatal(0, "CONDITION argument is not JSON array");
     }
@@ -1226,12 +1242,12 @@ do_query_distinct(int argc OVS_UNUSED, char *argv[])
 }
 
 static void
-do_parse_schema(int argc OVS_UNUSED, char *argv[])
+do_parse_schema(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_schema *schema;
     struct json *json;
 
-    json = parse_json(argv[1]);
+    json = parse_json(ctx->argv[1]);
     check_ovsdb_error(ovsdb_schema_from_json(json, &schema));
     json_destroy(json);
     print_and_free_json(ovsdb_schema_to_json(schema));
@@ -1239,7 +1255,7 @@ do_parse_schema(int argc OVS_UNUSED, char *argv[])
 }
 
 static void
-do_execute(int argc OVS_UNUSED, char *argv[])
+do_execute(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_schema *schema;
     struct json *json;
@@ -1247,16 +1263,16 @@ do_execute(int argc OVS_UNUSED, char *argv[])
     int i;
 
     /* Create database. */
-    json = parse_json(argv[1]);
+    json = parse_json(ctx->argv[1]);
     check_ovsdb_error(ovsdb_schema_from_json(json, &schema));
     json_destroy(json);
     db = ovsdb_create(schema);
 
-    for (i = 2; i < argc; i++) {
+    for (i = 2; i < ctx->argc; i++) {
         struct json *params, *result;
         char *s;
 
-        params = parse_json(argv[i]);
+        params = parse_json(ctx->argv[i]);
         result = ovsdb_execute(db, NULL, params, 0, NULL);
         s = json_to_string(result, JSSF_SORT);
         printf("%s\n", s);
@@ -1289,7 +1305,7 @@ do_trigger_dump(struct test_trigger *t, long long int now, const char *title)
 }
 
 static void
-do_trigger(int argc OVS_UNUSED, char *argv[])
+do_trigger(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_schema *schema;
     struct ovsdb_session session;
@@ -1301,7 +1317,7 @@ do_trigger(int argc OVS_UNUSED, char *argv[])
     int i;
 
     /* Create database. */
-    json = parse_json(argv[1]);
+    json = parse_json(ctx->argv[1]);
     check_ovsdb_error(ovsdb_schema_from_json(json, &schema));
     json_destroy(json);
     db = ovsdb_create(schema);
@@ -1312,8 +1328,8 @@ do_trigger(int argc OVS_UNUSED, char *argv[])
 
     now = 0;
     number = 0;
-    for (i = 2; i < argc; i++) {
-        struct json *params = parse_json(argv[i]);
+    for (i = 2; i < ctx->argc; i++) {
+        struct json *params = parse_json(ctx->argv[i]);
         if (params->type == JSON_ARRAY
             && json_array(params)->n == 2
             && json_array(params)->elems[0]->type == JSON_STRING
@@ -1349,7 +1365,7 @@ do_trigger(int argc OVS_UNUSED, char *argv[])
 }
 
 static void
-do_help(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_help(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     usage();
 }
@@ -1361,14 +1377,14 @@ static struct ovsdb_txn *do_transact_txn;
 static struct ovsdb_table *do_transact_table;
 
 static void
-do_transact_commit(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_transact_commit(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     ovsdb_error_destroy(ovsdb_txn_commit(do_transact_txn, false));
     do_transact_txn = NULL;
 }
 
 static void
-do_transact_abort(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_transact_abort(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     ovsdb_txn_abort(do_transact_txn);
     do_transact_txn = NULL;
@@ -1428,7 +1444,7 @@ do_transact_set_i_j(struct ovsdb_row *row,
 }
 
 static void
-do_transact_insert(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_transact_insert(struct ovs_cmdl_context *ctx)
 {
     struct ovsdb_row *row;
     struct uuid *uuid;
@@ -1437,34 +1453,34 @@ do_transact_insert(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
     /* Set UUID. */
     uuid = ovsdb_row_get_uuid_rw(row);
-    uuid_from_integer(atoi(argv[1]), uuid);
+    uuid_from_integer(atoi(ctx->argv[1]), uuid);
     if (ovsdb_table_get_row(do_transact_table, uuid)) {
         ovs_fatal(0, "table already contains row with UUID "UUID_FMT,
                   UUID_ARGS(uuid));
     }
 
-    do_transact_set_i_j(row, argv[2], argv[3]);
+    do_transact_set_i_j(row, ctx->argv[2], ctx->argv[3]);
 
     /* Insert row. */
     ovsdb_txn_row_insert(do_transact_txn, row);
 }
 
 static void
-do_transact_delete(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_transact_delete(struct ovs_cmdl_context *ctx)
 {
-    const struct ovsdb_row *row = do_transact_find_row(argv[1]);
+    const struct ovsdb_row *row = do_transact_find_row(ctx->argv[1]);
     ovsdb_txn_row_delete(do_transact_txn, row);
 }
 
 static void
-do_transact_modify(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_transact_modify(struct ovs_cmdl_context *ctx)
 {
     const struct ovsdb_row *row_ro;
     struct ovsdb_row *row_rw;
 
-    row_ro = do_transact_find_row(argv[1]);
+    row_ro = do_transact_find_row(ctx->argv[1]);
     row_rw = ovsdb_txn_row_modify(do_transact_txn, row_ro);
-    do_transact_set_i_j(row_rw, argv[2], argv[3]);
+    do_transact_set_i_j(row_rw, ctx->argv[2], ctx->argv[3]);
 }
 
 static int
@@ -1477,7 +1493,7 @@ compare_rows_by_uuid(const void *a_, const void *b_)
 }
 
 static void
-do_transact_print(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_transact_print(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     const struct ovsdb_row **rows;
     const struct ovsdb_row *row;
@@ -1505,16 +1521,16 @@ do_transact_print(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-do_transact(int argc, char *argv[])
+do_transact(struct ovs_cmdl_context *ctx)
 {
-    static const struct command do_transact_commands[] = {
-        { "commit", 0, 0, do_transact_commit },
-        { "abort", 0, 0, do_transact_abort },
-        { "insert", 2, 3, do_transact_insert },
-        { "delete", 1, 1, do_transact_delete },
-        { "modify", 2, 3, do_transact_modify },
-        { "print", 0, 0, do_transact_print },
-        { NULL, 0, 0, NULL },
+    static const struct ovs_cmdl_command do_transact_commands[] = {
+        { "commit", NULL, 0, 0, do_transact_commit },
+        { "abort", NULL, 0, 0, do_transact_abort },
+        { "insert", NULL, 2, 3, do_transact_insert },
+        { "delete", NULL, 1, 1, do_transact_delete },
+        { "modify", NULL, 2, 3, do_transact_modify },
+        { "print", NULL, 0, 0, do_transact_print },
+        { NULL, NULL, 0, 0, NULL },
     };
 
     struct ovsdb_schema *schema;
@@ -1534,13 +1550,14 @@ do_transact(int argc, char *argv[])
     do_transact_table = ovsdb_get_table(do_transact_db, "mytable");
     assert(do_transact_table != NULL);
 
-    for (i = 1; i < argc; i++) {
+    for (i = 1; i < ctx->argc; i++) {
         struct json *command;
         size_t n_args;
         char **args;
         int j;
+        struct ovs_cmdl_context transact_ctx = { .argc = 0, };
 
-        command = parse_json(argv[i]);
+        command = parse_json(ctx->argv[i]);
         if (command->type != JSON_ARRAY) {
             ovs_fatal(0, "transaction %d must be JSON array "
                       "with at least 1 element", i);
@@ -1569,7 +1586,9 @@ do_transact(int argc, char *argv[])
             fputs(args[j], stdout);
         }
         fputs(":", stdout);
-        run_command(n_args, args, do_transact_commands);
+        transact_ctx.argc = n_args;
+        transact_ctx.argv = args;
+        ovs_cmdl_run_command(&transact_ctx, do_transact_commands);
         putchar('\n');
 
         for (j = 0; j < n_args; j++) {
@@ -1594,6 +1613,70 @@ compare_link1(const void *a_, const void *b_)
 }
 
 static void
+print_idl_row_simple(const struct idltest_simple *s, int step)
+{
+    size_t i;
+
+    printf("%03d: i=%"PRId64" r=%g b=%s s=%s u="UUID_FMT" ia=[",
+           step, s->i, s->r, s->b ? "true" : "false",
+           s->s, UUID_ARGS(&s->u));
+    for (i = 0; i < s->n_ia; i++) {
+        printf("%s%"PRId64, i ? " " : "", s->ia[i]);
+    }
+    printf("] ra=[");
+    for (i = 0; i < s->n_ra; i++) {
+        printf("%s%g", i ? " " : "", s->ra[i]);
+    }
+    printf("] ba=[");
+    for (i = 0; i < s->n_ba; i++) {
+        printf("%s%s", i ? " " : "", s->ba[i] ? "true" : "false");
+    }
+    printf("] sa=[");
+    for (i = 0; i < s->n_sa; i++) {
+        printf("%s%s", i ? " " : "", s->sa[i]);
+    }
+    printf("] ua=[");
+    for (i = 0; i < s->n_ua; i++) {
+        printf("%s"UUID_FMT, i ? " " : "", UUID_ARGS(&s->ua[i]));
+    }
+    printf("] uuid="UUID_FMT"\n", UUID_ARGS(&s->header_.uuid));
+}
+
+static void
+print_idl_row_link1(const struct idltest_link1 *l1, int step)
+{
+    struct idltest_link1 **links;
+    size_t i;
+
+    printf("%03d: i=%"PRId64" k=", step, l1->i);
+    if (l1->k) {
+        printf("%"PRId64, l1->k->i);
+    }
+    printf(" ka=[");
+    links = xmemdup(l1->ka, l1->n_ka * sizeof *l1->ka);
+    qsort(links, l1->n_ka, sizeof *links, compare_link1);
+    for (i = 0; i < l1->n_ka; i++) {
+        printf("%s%"PRId64, i ? " " : "", links[i]->i);
+    }
+    free(links);
+    printf("] l2=");
+    if (l1->l2) {
+        printf("%"PRId64, l1->l2->i);
+    }
+    printf(" uuid="UUID_FMT"\n", UUID_ARGS(&l1->header_.uuid));
+}
+
+static void
+print_idl_row_link2(const struct idltest_link2 *l2, int step)
+{
+    printf("%03d: i=%"PRId64" l1=", step, l2->i);
+    if (l2->l1) {
+        printf("%"PRId64, l2->l1->i);
+    }
+    printf(" uuid="UUID_FMT"\n", UUID_ARGS(&l2->header_.uuid));
+}
+
+static void
 print_idl(struct ovsdb_idl *idl, int step)
 {
     const struct idltest_simple *s;
@@ -1602,61 +1685,52 @@ print_idl(struct ovsdb_idl *idl, int step)
     int n = 0;
 
     IDLTEST_SIMPLE_FOR_EACH (s, idl) {
-        size_t i;
-
-        printf("%03d: i=%"PRId64" r=%g b=%s s=%s u="UUID_FMT" ia=[",
-               step, s->i, s->r, s->b ? "true" : "false",
-               s->s, UUID_ARGS(&s->u));
-        for (i = 0; i < s->n_ia; i++) {
-            printf("%s%"PRId64, i ? " " : "", s->ia[i]);
-        }
-        printf("] ra=[");
-        for (i = 0; i < s->n_ra; i++) {
-            printf("%s%g", i ? " " : "", s->ra[i]);
-        }
-        printf("] ba=[");
-        for (i = 0; i < s->n_ba; i++) {
-            printf("%s%s", i ? " " : "", s->ba[i] ? "true" : "false");
-        }
-        printf("] sa=[");
-        for (i = 0; i < s->n_sa; i++) {
-            printf("%s%s", i ? " " : "", s->sa[i]);
-        }
-        printf("] ua=[");
-        for (i = 0; i < s->n_ua; i++) {
-            printf("%s"UUID_FMT, i ? " " : "", UUID_ARGS(&s->ua[i]));
-        }
-        printf("] uuid="UUID_FMT"\n", UUID_ARGS(&s->header_.uuid));
+        print_idl_row_simple(s, step);
         n++;
     }
     IDLTEST_LINK1_FOR_EACH (l1, idl) {
-        struct idltest_link1 **links;
-        size_t i;
-
-        printf("%03d: i=%"PRId64" k=", step, l1->i);
-        if (l1->k) {
-            printf("%"PRId64, l1->k->i);
-        }
-        printf(" ka=[");
-        links = xmemdup(l1->ka, l1->n_ka * sizeof *l1->ka);
-        qsort(links, l1->n_ka, sizeof *links, compare_link1);
-        for (i = 0; i < l1->n_ka; i++) {
-            printf("%s%"PRId64, i ? " " : "", links[i]->i);
-        }
-        free(links);
-        printf("] l2=");
-        if (l1->l2) {
-            printf("%"PRId64, l1->l2->i);
-        }
-        printf(" uuid="UUID_FMT"\n", UUID_ARGS(&l1->header_.uuid));
+        print_idl_row_link1(l1, step);
         n++;
     }
     IDLTEST_LINK2_FOR_EACH (l2, idl) {
-        printf("%03d: i=%"PRId64" l1=", step, l2->i);
-        if (l2->l1) {
-            printf("%"PRId64, l2->l1->i);
+        print_idl_row_link2(l2, step);
+        n++;
+    }
+    if (!n) {
+        printf("%03d: empty\n", step);
+    }
+}
+
+static void
+print_idl_track(struct ovsdb_idl *idl, int step, unsigned int seqno)
+{
+    const struct idltest_simple *s;
+    const struct idltest_link1 *l1;
+    const struct idltest_link2 *l2;
+    int n = 0;
+
+    IDLTEST_SIMPLE_FOR_EACH_TRACKED (s, idl) {
+        if (idltest_simple_row_get_seqno(s, OVSDB_IDL_CHANGE_DELETE) >= seqno) {
+            printf("%03d: ##deleted## uuid="UUID_FMT"\n", step, UUID_ARGS(&s->header_.uuid));
+        } else {
+            print_idl_row_simple(s, step);
         }
-        printf(" uuid="UUID_FMT"\n", UUID_ARGS(&l2->header_.uuid));
+        n++;
+    }
+    IDLTEST_LINK1_FOR_EACH_TRACKED (l1, idl) {
+        if (idltest_simple_row_get_seqno(s, OVSDB_IDL_CHANGE_DELETE) >= seqno) {
+            printf("%03d: ##deleted## uuid="UUID_FMT"\n", step, UUID_ARGS(&s->header_.uuid));
+        } else {
+            print_idl_row_link1(l1, step);
+        }
+        n++;
+    }
+    IDLTEST_LINK2_FOR_EACH_TRACKED (l2, idl) {
+        if (idltest_simple_row_get_seqno(s, OVSDB_IDL_CHANGE_DELETE) >= seqno) {
+            printf("%03d: ##deleted## uuid="UUID_FMT"\n", step, UUID_ARGS(&s->header_.uuid));
+        } else {
+            print_idl_row_link2(l2, step);
+        }
         n++;
     }
     if (!n) {
@@ -1866,7 +1940,7 @@ idl_set(struct ovsdb_idl *idl, char *commands, int step)
 }
 
 static void
-do_idl(int argc, char *argv[])
+do_idl(struct ovs_cmdl_context *ctx)
 {
     struct jsonrpc *rpc;
     struct ovsdb_idl *idl;
@@ -1876,28 +1950,35 @@ do_idl(int argc, char *argv[])
     int step = 0;
     int error;
     int i;
+    bool track;
 
     idltest_init();
 
-    idl = ovsdb_idl_create(argv[1], &idltest_idl_class, true, true);
-    if (argc > 2) {
+    track = ((struct test_ovsdb_pvt_context *)(ctx->pvt))->track;
+
+    idl = ovsdb_idl_create(ctx->argv[1], &idltest_idl_class, true, true);
+    if (ctx->argc > 2) {
         struct stream *stream;
 
-        error = stream_open_block(jsonrpc_stream_open(argv[1], &stream,
+        error = stream_open_block(jsonrpc_stream_open(ctx->argv[1], &stream,
                                   DSCP_DEFAULT), &stream);
         if (error) {
-            ovs_fatal(error, "failed to connect to \"%s\"", argv[1]);
+            ovs_fatal(error, "failed to connect to \"%s\"", ctx->argv[1]);
         }
         rpc = jsonrpc_open(stream);
     } else {
         rpc = NULL;
     }
 
+    if (track) {
+        ovsdb_idl_track_add_all(idl);
+    }
+
     setvbuf(stdout, NULL, _IONBF, 0);
 
     symtab = ovsdb_symbol_table_create();
-    for (i = 2; i < argc; i++) {
-        char *arg = argv[i];
+    for (i = 2; i < ctx->argc; i++) {
+        char *arg = ctx->argv[i];
         struct jsonrpc_msg *request, *reply;
 
         if (*arg == '+') {
@@ -1918,7 +1999,12 @@ do_idl(int argc, char *argv[])
             }
 
             /* Print update. */
-            print_idl(idl, step++);
+            if (track) {
+                print_idl_track(idl, step++, ovsdb_idl_get_seqno(idl));
+                ovsdb_idl_track_clear(idl);
+            } else {
+                print_idl(idl, step++);
+            }
         }
         seqno = ovsdb_idl_get_seqno(idl);
 
@@ -1958,42 +2044,43 @@ do_idl(int argc, char *argv[])
         poll_block();
     }
     print_idl(idl, step++);
+    ovsdb_idl_track_clear(idl);
     ovsdb_idl_destroy(idl);
     printf("%03d: done\n", step);
 }
 
-static struct command all_commands[] = {
-    { "log-io", 2, INT_MAX, do_log_io },
-    { "default-atoms", 0, 0, do_default_atoms },
-    { "default-data", 0, 0, do_default_data },
-    { "parse-atomic-type", 1, 1, do_parse_atomic_type },
-    { "parse-base-type", 1, 1, do_parse_base_type },
-    { "parse-type", 1, 1, do_parse_type },
-    { "parse-atoms", 2, INT_MAX, do_parse_atoms },
-    { "parse-atom-strings", 2, INT_MAX, do_parse_atom_strings },
-    { "parse-data", 2, INT_MAX, do_parse_data },
-    { "parse-data-strings", 2, INT_MAX, do_parse_data_strings },
-    { "sort-atoms", 2, 2, do_sort_atoms },
-    { "parse-column", 2, 2, do_parse_column },
-    { "parse-table", 2, 3, do_parse_table },
-    { "parse-rows", 2, INT_MAX, do_parse_rows },
-    { "compare-rows", 2, INT_MAX, do_compare_rows },
-    { "parse-conditions", 2, INT_MAX, do_parse_conditions },
-    { "evaluate-conditions", 3, 3, do_evaluate_conditions },
-    { "parse-mutations", 2, INT_MAX, do_parse_mutations },
-    { "execute-mutations", 3, 3, do_execute_mutations },
-    { "query", 3, 3, do_query },
-    { "query-distinct", 4, 4, do_query_distinct },
-    { "transact", 1, INT_MAX, do_transact },
-    { "parse-schema", 1, 1, do_parse_schema },
-    { "execute", 2, INT_MAX, do_execute },
-    { "trigger", 2, INT_MAX, do_trigger },
-    { "idl", 1, INT_MAX, do_idl },
-    { "help", 0, INT_MAX, do_help },
-    { NULL, 0, 0, NULL },
+static struct ovs_cmdl_command all_commands[] = {
+    { "log-io", NULL, 2, INT_MAX, do_log_io },
+    { "default-atoms", NULL, 0, 0, do_default_atoms },
+    { "default-data", NULL, 0, 0, do_default_data },
+    { "parse-atomic-type", NULL, 1, 1, do_parse_atomic_type },
+    { "parse-base-type", NULL, 1, 1, do_parse_base_type },
+    { "parse-type", NULL, 1, 1, do_parse_type },
+    { "parse-atoms", NULL, 2, INT_MAX, do_parse_atoms },
+    { "parse-atom-strings", NULL, 2, INT_MAX, do_parse_atom_strings },
+    { "parse-data", NULL, 2, INT_MAX, do_parse_data },
+    { "parse-data-strings", NULL, 2, INT_MAX, do_parse_data_strings },
+    { "sort-atoms", NULL, 2, 2, do_sort_atoms },
+    { "parse-column", NULL, 2, 2, do_parse_column },
+    { "parse-table", NULL, 2, 3, do_parse_table },
+    { "parse-rows", NULL, 2, INT_MAX, do_parse_rows },
+    { "compare-rows", NULL, 2, INT_MAX, do_compare_rows },
+    { "parse-conditions", NULL, 2, INT_MAX, do_parse_conditions },
+    { "evaluate-conditions", NULL, 3, 3, do_evaluate_conditions },
+    { "parse-mutations", NULL, 2, INT_MAX, do_parse_mutations },
+    { "execute-mutations", NULL, 3, 3, do_execute_mutations },
+    { "query", NULL, 3, 3, do_query },
+    { "query-distinct", NULL, 4, 4, do_query_distinct },
+    { "transact", NULL, 1, INT_MAX, do_transact },
+    { "parse-schema", NULL, 1, 1, do_parse_schema },
+    { "execute", NULL, 2, INT_MAX, do_execute },
+    { "trigger", NULL, 2, INT_MAX, do_trigger },
+    { "idl", NULL, 1, INT_MAX, do_idl },
+    { "help", NULL, 0, INT_MAX, do_help },
+    { NULL, NULL, 0, 0, NULL },
 };
 
-static struct command *
+static struct ovs_cmdl_command *
 get_all_commands(void)
 {
     return all_commands;

@@ -19,8 +19,10 @@
 #include "daemon-private.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include "dirs.h"
+#include "ovs-thread.h"
 #include "poll-loop.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(daemon_windows);
 
@@ -107,7 +109,7 @@ service_start(int *argcp, char **argvp[])
             VLOG_FATAL("Failed to create a event (%s).", msg_buf);
         }
 
-        poll_fd_wait_event(0, wevent, POLLIN);
+        poll_wevent_wait(wevent);
 
         /* Register the control handler. This function is called by the service
          * manager to stop the service. */
@@ -206,7 +208,7 @@ should_service_stop(void)
         if (service_status.dwCurrentState != SERVICE_RUNNING) {
             return true;
         } else {
-            poll_fd_wait_event(0, wevent, POLLIN);
+            poll_wevent_wait(wevent);
         }
     }
     return false;
@@ -218,6 +220,11 @@ should_service_stop(void)
 void
 service_stop()
 {
+    if (!service_started) {
+        return;
+    }
+    fatal_signal_atexit_handler();
+
     ResetEvent(wevent);
     CloseHandle(wevent);
 
@@ -440,7 +447,8 @@ make_pidfile(void)
     /* Don't close the pidfile till the process exits. */
 }
 
-void daemonize_start(void)
+void
+daemonize_start(bool access_datapath OVS_UNUSED)
 {
     if (pidfile) {
         make_pidfile();
@@ -467,14 +475,25 @@ daemonize_complete(void)
     service_complete();
 }
 
+void
+daemon_become_new_user(bool access_datapath OVS_UNUSED)
+{
+}
+
 /* Returns the file name that would be used for a pidfile if 'name' were
  * provided to set_pidfile().  The caller must free the returned string. */
 char *
 make_pidfile_name(const char *name)
 {
     if (name && strchr(name, ':')) {
-        return strdup(name);
+        return xstrdup(name);
     } else {
         return xasprintf("%s/%s.pid", ovs_rundir(), program_name);
     }
+}
+
+void
+daemon_set_new_user(const char *user_spec OVS_UNUSED)
+{
+    VLOG_FATAL("--user options is not currently supported.");
 }

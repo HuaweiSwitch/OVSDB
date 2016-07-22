@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2014 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -117,7 +117,7 @@ static struct json *json_create(enum json_type type);
 static void json_parser_input(struct json_parser *, struct json_token *);
 
 static void json_error(struct json_parser *p, const char *format, ...)
-    PRINTF_FORMAT(2, 3);
+    OVS_PRINTF_FORMAT(2, 3);
 
 const char *
 json_type_to_string(enum json_type type)
@@ -461,6 +461,7 @@ json_hash_object(const struct shash *object, size_t basis)
         basis = hash_string(node->name, basis);
         basis = json_hash(node->data, basis);
     }
+    free(nodes);
     return basis;
 }
 
@@ -745,13 +746,14 @@ static const char *
 json_lex_4hex(const char *cp, const char *end, int *valuep)
 {
     unsigned int value;
+    bool ok;
 
     if (cp + 4 > end) {
         return "quoted string ends within \\u escape";
     }
 
-    value = hexits_value(cp, 4, NULL);
-    if (value == UINT_MAX) {
+    value = hexits_value(cp, 4, &ok);
+    if (!ok) {
         return "malformed \\u escape";
     }
     if (!value) {
@@ -829,6 +831,7 @@ json_string_unescape(const char *in, size_t in_len, char **outp)
              * lexer will never pass in a string that ends in a single
              * backslash, but json_string_unescape() has other callers that
              * are not as careful.*/
+            ds_clear(&out);
             ds_put_cstr(&out, "quoted string may not end with backslash");
             goto exit;
         }
@@ -875,6 +878,16 @@ json_string_unescape(const char *in, size_t in_len, char **outp)
 exit:
     *outp = ds_cstr(&out);
     return ok;
+}
+
+void
+json_string_escape(const char *in, struct ds *out)
+{
+    struct json json = {
+        .type = JSON_STRING,
+        .u.string = CONST_CAST(char *, in),
+    };
+    json_to_ds(&json, 0, out);
 }
 
 static void

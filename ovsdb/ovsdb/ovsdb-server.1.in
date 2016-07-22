@@ -21,6 +21,7 @@ ovsdb\-server \- Open vSwitch database server
 .so lib/vlog-syn.man
 .so lib/ssl-syn.man
 .so lib/ssl-bootstrap-syn.man
+.so lib/ssl-peer-ca-cert-syn.man
 .so lib/unixctl-syn.man
 .so lib/common-syn.man
 .
@@ -111,6 +112,7 @@ as the file name.  (This means that ordinarily there should be at most
 one row in \fItable\fR.)
 .so lib/ssl.man
 .so lib/ssl-bootstrap.man
+.so lib/ssl-peer-ca-cert.man
 .SS "Other Options"
 .so lib/unixctl.man
 .so lib/common.man
@@ -194,6 +196,22 @@ RFC 4627 says that names within a JSON object should be unique.
 The Open vSwitch JSON parser discards all but the last value
 for a name that is specified more than once.
 .
+.IP
+The definition of <error> allows for implementation extensions.
+Currently \fBovsdb\-server\fR uses the following additional "error"
+strings which might change in later releases):
+.
+.RS
+.IP "\fBsyntax error\fR or \fBunknown column\fR"
+The request could not be parsed as an OVSDB request.  An additional
+"syntax" member, whose value is a string that contains JSON, may
+narrow down the particular syntax that could not be parsed.
+.IP "\fBinternal error\fR"
+The request triggered a bug in \fBovsdb\-server\fR.
+.IP "\fBovsdb error\fR"
+A map or set contains a duplicate key.
+.RE
+.
 .IP "3.2. Schema Format"
 RFC 7047 requires the "version" field in <database-schema>.  Current
 versions of \fBovsdb\-server\fR allow it to be omitted (future
@@ -227,10 +245,42 @@ notifications (see below) to the request, it must be unique among all
 active monitors.  \fBovsdb\-server\fR rejects attempt to create two
 monitors with the same identifier.
 .
-.IP "6. IANA Considerations"
-\fBovsdb\-server\fR currently defaults to its historical port number
-6632.  Future versions will adopt IANA-assigned port 6640 as default.
-
+.IP "5.1. Notation"
+For <condition>, RFC 7047 only allows the use of \fB!=\fR, \fB==\fR,
+\fBincludes\fR, and \fBexcludes\fR operators with set types.  Open
+vSwitch 2.4 and later extend <condition> to allow the use of \fB<\fR,
+\fB<=\fR, \fB>=\fR, and \fB>\fR operators with columns with type ``set
+of 0 or 1 integer'' and ``set of 0 or 1 real''.  These conditions
+evaluate to false when the column is empty, and otherwise as described
+in RFC 7047 for integer and real types.
+.
+.SH "BUGS"
+.
+In Open vSwitch before version 2.4, when \fBovsdb\-server\fR sent
+JSON-RPC error responses to some requests, it incorrectly formulated
+them with the \fBresult\fR and \fBerror\fR swapped, so that the
+response appeared to indicate success (with a nonsensical result)
+rather than an error.  The requests that suffered from this problem
+were:
+.
+.IP \fBtransact\fR
+.IQ \fBget_schema\fR
+Only if the request names a nonexistent database.
+.IP \fBmonitor\fR
+.IQ \fBlock\fR
+.IQ \fBunlock\fR
+In all error cases.
+.
+.PP
+Of these cases, the only error that a well-written application is
+likely to encounter in practice is \fBmonitor\fR of tables or columns
+that do not exist, in an situation where the application has been
+upgraded but the old database schema is still temporarily in use.  To
+handle this situation gracefully, we recommend that clients should
+treat a \fBmonitor\fR response with a \fBresult\fR that contains an
+\fBerror\fR key-value pair as an error (assuming that the database
+being monitored does not contain a table named \fBerror\fR).
+.
 .SH "SEE ALSO"
 .
 .BR ovsdb\-tool (1).

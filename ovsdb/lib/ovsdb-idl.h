@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,10 @@
  * raw JSON into data structures that are easier for clients to digest.  Most
  * notably, references to rows via UUID become C pointers.
  *
+ * The IDL always presents a consistent snapshot of the database to its client,
+ * that is, it won't present the effects of some part of a transaction applied
+ * at the database server without presenting all of its effects.
+ *
  * The IDL also assists with issuing database transactions.  The client creates
  * a transaction, manipulates the IDL data structures, and commits or aborts
  * the transaction.  The IDL then composes and issues the necessary JSON-RPC
@@ -38,6 +42,7 @@
 struct json;
 struct ovsdb_datum;
 struct ovsdb_idl_class;
+struct ovsdb_idl_row;
 struct ovsdb_idl_column;
 struct ovsdb_idl_table_class;
 struct uuid;
@@ -89,9 +94,14 @@ int ovsdb_idl_get_last_error(const struct ovsdb_idl *);
  *     is suitable only for use by a client that "owns" a particular column.
  *
  *   - OVDSB_IDL_ALERT without OVSDB_IDL_MONITOR is not valid.
+ *
+ *   - (OVSDB_IDL_MONITOR | OVSDB_IDL_ALERT | OVSDB_IDL_TRACK), for a column
+ *     that a client wants to track using the change tracking
+ *     ovsdb_idl_track_get_*() functions.
  */
 #define OVSDB_IDL_MONITOR (1 << 0) /* Monitor this column? */
 #define OVSDB_IDL_ALERT   (1 << 1) /* Alert client when column updated? */
+#define OVSDB_IDL_TRACK   (1 << 2)
 
 void ovsdb_idl_add_column(struct ovsdb_idl *, const struct ovsdb_idl_column *);
 void ovsdb_idl_add_table(struct ovsdb_idl *,
@@ -99,6 +109,31 @@ void ovsdb_idl_add_table(struct ovsdb_idl *,
 
 void ovsdb_idl_omit(struct ovsdb_idl *, const struct ovsdb_idl_column *);
 void ovsdb_idl_omit_alert(struct ovsdb_idl *, const struct ovsdb_idl_column *);
+
+/* Change tracking. */
+enum ovsdb_idl_change {
+    OVSDB_IDL_CHANGE_INSERT,
+    OVSDB_IDL_CHANGE_MODIFY,
+    OVSDB_IDL_CHANGE_DELETE,
+    OVSDB_IDL_CHANGE_MAX
+};
+
+/* Row, table sequence numbers */
+unsigned int ovsdb_idl_table_get_seqno(
+    const struct ovsdb_idl *idl,
+    const struct ovsdb_idl_table_class *table_class);
+unsigned int ovsdb_idl_row_get_seqno(
+    const struct ovsdb_idl_row *row,
+    enum ovsdb_idl_change change);
+
+void ovsdb_idl_track_add_column(struct ovsdb_idl *idl,
+                                const struct ovsdb_idl_column *column);
+void ovsdb_idl_track_add_all(struct ovsdb_idl *idl);
+const struct ovsdb_idl_row *ovsdb_idl_track_get_first(
+    const struct ovsdb_idl *, const struct ovsdb_idl_table_class *);
+const struct ovsdb_idl_row *ovsdb_idl_track_get_next(const struct ovsdb_idl_row *);
+void ovsdb_idl_track_clear(const struct ovsdb_idl *);
+
 
 /* Reading the database replica. */
 
@@ -115,6 +150,8 @@ const struct ovsdb_datum *ovsdb_idl_get(const struct ovsdb_idl_row *,
                                         const struct ovsdb_idl_column *,
                                         enum ovsdb_atomic_type key_type,
                                         enum ovsdb_atomic_type value_type);
+bool ovsdb_idl_is_mutable(const struct ovsdb_idl_row *,
+                          const struct ovsdb_idl_column *);
 
 bool ovsdb_idl_row_is_synthetic(const struct ovsdb_idl_row *);
 
@@ -187,7 +224,7 @@ const char *ovsdb_idl_txn_status_to_string(enum ovsdb_idl_txn_status);
 
 struct ovsdb_idl_txn *ovsdb_idl_txn_create(struct ovsdb_idl *);
 void ovsdb_idl_txn_add_comment(struct ovsdb_idl_txn *, const char *, ...)
-    PRINTF_FORMAT (2, 3);
+    OVS_PRINTF_FORMAT (2, 3);
 void ovsdb_idl_txn_set_dry_run(struct ovsdb_idl_txn *);
 void ovsdb_idl_txn_increment(struct ovsdb_idl_txn *,
                              const struct ovsdb_idl_row *,
@@ -216,5 +253,25 @@ const struct ovsdb_idl_row *ovsdb_idl_txn_insert(
     const struct uuid *);
 
 struct ovsdb_idl *ovsdb_idl_txn_get_idl (struct ovsdb_idl_txn *);
+void ovsdb_idl_get_initial_snapshot(struct ovsdb_idl *);
+
+
+/* ovsdb_idl_loop provides an easy way to manage the transactions related
+ * to 'idl' and to cope with different status during transaction. */
+struct ovsdb_idl_loop {
+    struct ovsdb_idl *idl;
+    unsigned int skip_seqno;
+
+    struct ovsdb_idl_txn *committing_txn;
+    unsigned int precommit_seqno;
+
+    struct ovsdb_idl_txn *open_txn;
+};
+
+#define OVSDB_IDL_LOOP_INITIALIZER(IDL) { .idl = (IDL) }
+
+void ovsdb_idl_loop_destroy(struct ovsdb_idl_loop *);
+struct ovsdb_idl_txn *ovsdb_idl_loop_run(struct ovsdb_idl_loop *);
+void ovsdb_idl_loop_commit_and_wait(struct ovsdb_idl_loop *);
 
 #endif /* ovsdb-idl.h */

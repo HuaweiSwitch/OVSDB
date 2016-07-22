@@ -247,7 +247,7 @@ parse_table(struct ovsdb_execution *x,
     return table;
 }
 
-static WARN_UNUSED_RESULT struct ovsdb_error *
+static OVS_WARN_UNUSED_RESULT struct ovsdb_error *
 parse_row(const struct json *json, const struct ovsdb_table *table,
           struct ovsdb_symbol_table *symtab,
           struct ovsdb_row **rowp, struct ovsdb_column_set *columns)
@@ -643,6 +643,8 @@ ovsdb_execute_wait(struct ovsdb_execution *x, struct ovsdb_parser *parser,
         } else {
             timeout_msec = LLONG_MAX;
         }
+    }
+    if (!error) {
         if (strcmp(json_string(until), "==")
             && strcmp(json_string(until), "!=")) {
             error = ovsdb_syntax_error(until, NULL,
@@ -659,6 +661,7 @@ ovsdb_execute_wait(struct ovsdb_execution *x, struct ovsdb_parser *parser,
             error = ovsdb_row_from_json(row, rows->u.array.elems[i], x->symtab,
                                         NULL);
             if (error) {
+                ovsdb_row_destroy(row);
                 break;
             }
 

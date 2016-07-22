@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@
 #include "packets.h"
 #include "poll-loop.h"
 #include "timeval.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(in_band);
 
@@ -67,10 +67,10 @@ enum {
 
 /* Track one remote IP and next hop information. */
 struct in_band_remote {
-    struct sockaddr_in remote_addr; /* IP address, in network byte order. */
-    uint8_t remote_mac[ETH_ADDR_LEN]; /* Next-hop MAC, all-zeros if unknown. */
-    uint8_t last_remote_mac[ETH_ADDR_LEN]; /* Previous nonzero next-hop MAC. */
-    struct netdev *remote_netdev; /* Device to send to next-hop MAC. */
+    struct sockaddr_in remote_addr;  /* IP address, in network byte order. */
+    struct eth_addr remote_mac;      /* Next-hop MAC, all-zeros if unknown. */
+    struct eth_addr last_remote_mac; /* Previous nonzero next-hop MAC. */
+    struct netdev *remote_netdev;    /* Device to send to next-hop MAC. */
 };
 
 /* What to do to an in_band_rule. */
@@ -83,7 +83,7 @@ enum in_band_op {
 struct in_band_rule {
     struct hmap_node hmap_node; /* In struct in_band's "rules" hmap. */
     struct match match;
-    unsigned int priority;
+    int priority;
     enum in_band_op op;
 };
 
@@ -98,7 +98,7 @@ struct in_band {
 
     /* Local information. */
     time_t next_local_refresh;       /* Refresh timer. */
-    uint8_t local_mac[ETH_ADDR_LEN]; /* Current MAC. */
+    struct eth_addr local_mac;       /* Current MAC. */
     struct netdev *local_netdev;     /* Local port's network device. */
 
     /* Flow tracking. */
@@ -115,12 +115,12 @@ refresh_remote(struct in_band *ib, struct in_band_remote *r)
     int retval;
 
     /* Find the next-hop IP address. */
-    memset(r->remote_mac, 0, sizeof r->remote_mac);
+    r->remote_mac = eth_addr_zero;
     retval = netdev_get_next_hop(ib->local_netdev, &r->remote_addr.sin_addr,
                                  &next_hop_inaddr, &next_hop_dev);
     if (retval) {
-        VLOG_WARN("cannot find route for controller ("IP_FMT"): %s",
-                  IP_ARGS(r->remote_addr.sin_addr.s_addr),
+        VLOG_WARN("%s: cannot find route for controller ("IP_FMT"): %s",
+                  ib->ofproto->name, IP_ARGS(r->remote_addr.sin_addr.s_addr),
                   ovs_strerror(retval));
         return 1;
     }
@@ -136,9 +136,10 @@ refresh_remote(struct in_band *ib, struct in_band_remote *r)
 
         retval = netdev_open(next_hop_dev, "system", &r->remote_netdev);
         if (retval) {
-            VLOG_WARN_RL(&rl, "cannot open netdev %s (next hop "
+            VLOG_WARN_RL(&rl, "%s: cannot open netdev %s (next hop "
                          "to controller "IP_FMT"): %s",
-                         next_hop_dev, IP_ARGS(r->remote_addr.sin_addr.s_addr),
+                         ib->ofproto->name, next_hop_dev,
+                         IP_ARGS(r->remote_addr.sin_addr.s_addr),
                          ovs_strerror(retval));
             free(next_hop_dev);
             return 1;
@@ -148,10 +149,11 @@ refresh_remote(struct in_band *ib, struct in_band_remote *r)
 
     /* Look up the MAC address of the next-hop IP address. */
     retval = netdev_arp_lookup(r->remote_netdev, next_hop_inaddr.s_addr,
-                               r->remote_mac);
+                               &r->remote_mac);
     if (retval) {
-        VLOG_DBG_RL(&rl, "cannot look up remote MAC address ("IP_FMT"): %s",
-                    IP_ARGS(next_hop_inaddr.s_addr), ovs_strerror(retval));
+        VLOG_DBG_RL(&rl, "%s: cannot look up remote MAC address ("IP_FMT"): %s",
+                    ib->ofproto->name, IP_ARGS(next_hop_inaddr.s_addr),
+                    ovs_strerror(retval));
     }
 
     /* If we don't have a MAC address, then refresh quickly, since we probably
@@ -173,11 +175,11 @@ refresh_remotes(struct in_band *ib)
     any_changes = false;
     ib->next_remote_refresh = TIME_MAX;
     for (r = ib->remotes; r < &ib->remotes[ib->n_remotes]; r++) {
-        uint8_t old_remote_mac[ETH_ADDR_LEN];
+        struct eth_addr old_remote_mac;
         time_t next_refresh;
 
         /* Save old MAC. */
-        memcpy(old_remote_mac, r->remote_mac, ETH_ADDR_LEN);
+        old_remote_mac = r->remote_mac;
 
         /* Refresh remote information. */
         next_refresh = refresh_remote(ib, r) + time_now();
@@ -188,11 +190,12 @@ refresh_remotes(struct in_band *ib)
             any_changes = true;
             if (!eth_addr_is_zero(r->remote_mac)
                 && !eth_addr_equals(r->last_remote_mac, r->remote_mac)) {
-                VLOG_DBG("remote MAC address changed from "ETH_ADDR_FMT
+                VLOG_DBG("%s: remote MAC address changed from "ETH_ADDR_FMT
                          " to "ETH_ADDR_FMT,
+                         ib->ofproto->name,
                          ETH_ADDR_ARGS(r->last_remote_mac),
                          ETH_ADDR_ARGS(r->remote_mac));
-                memcpy(r->last_remote_mac, r->remote_mac, ETH_ADDR_LEN);
+                r->last_remote_mac = r->remote_mac;
             }
         }
     }
@@ -205,7 +208,7 @@ refresh_remotes(struct in_band *ib)
 static bool
 refresh_local(struct in_band *ib)
 {
-    uint8_t ea[ETH_ADDR_LEN];
+    struct eth_addr ea;
     time_t now;
 
     now = time_now();
@@ -214,12 +217,12 @@ refresh_local(struct in_band *ib)
     }
     ib->next_local_refresh = now + 1;
 
-    if (netdev_get_etheraddr(ib->local_netdev, ea)
+    if (netdev_get_etheraddr(ib->local_netdev, &ea)
         || eth_addr_equals(ea, ib->local_mac)) {
         return false;
     }
 
-    memcpy(ib->local_mac, ea, ETH_ADDR_LEN);
+    ib->local_mac = ea;
     return true;
 }
 
@@ -235,8 +238,16 @@ in_band_must_output_to_local_port(const struct flow *flow)
             && flow->tp_dst == htons(DHCP_CLIENT_PORT));
 }
 
+/* Returns the number of in-band rules currently installed in the flow
+ * table. */
+int
+in_band_count_rules(const struct in_band *ib)
+{
+    return hmap_count(&ib->rules);
+}
+
 static void
-add_rule(struct in_band *ib, const struct match *match, unsigned int priority)
+add_rule(struct in_band *ib, const struct match *match, int priority)
 {
     uint32_t hash = match_hash(match, 0);
     struct in_band_rule *rule;
@@ -295,23 +306,21 @@ update_rules(struct in_band *ib)
     }
 
     for (r = ib->remotes; r < &ib->remotes[ib->n_remotes]; r++) {
-        const uint8_t *remote_mac = r->remote_mac;
-
-        if (eth_addr_is_zero(remote_mac)) {
+        if (eth_addr_is_zero(r->remote_mac)) {
             continue;
         }
 
         /* (d) Allow ARP replies to the next hop's MAC address. */
         match_init_catchall(&match);
         match_set_dl_type(&match, htons(ETH_TYPE_ARP));
-        match_set_dl_dst(&match, remote_mac);
+        match_set_dl_dst(&match, r->remote_mac);
         match_set_nw_proto(&match, ARP_OP_REPLY);
         add_rule(ib, &match, IBR_TO_NEXT_HOP_ARP);
 
         /* (e) Allow ARP requests from the next hop's MAC address. */
         match_init_catchall(&match);
         match_set_dl_type(&match, htons(ETH_TYPE_ARP));
-        match_set_dl_src(&match, remote_mac);
+        match_set_dl_src(&match, r->remote_mac);
         match_set_nw_proto(&match, ARP_OP_REQUEST);
         add_rule(ib, &match, IBR_FROM_NEXT_HOP_ARP);
     }
@@ -382,17 +391,13 @@ in_band_run(struct in_band *ib)
         switch (rule->op) {
         case ADD:
             ofproto_add_flow(ib->ofproto, &rule->match, rule->priority,
-                             ofpbuf_data(&ofpacts), ofpbuf_size(&ofpacts));
+                             ofpacts.data, ofpacts.size);
             break;
 
         case DEL:
-            if (ofproto_delete_flow(ib->ofproto,
-                                    &rule->match, rule->priority)) {
-                /* ofproto doesn't have the rule anymore so there's no reason
-                 * for us to track it any longer. */
-                hmap_remove(&ib->rules, &rule->hmap_node);
-                free(rule);
-            }
+            ofproto_delete_flow(ib->ofproto, &rule->match, rule->priority);
+            hmap_remove(&ib->rules, &rule->hmap_node);
+            free(rule);
             break;
         }
     }
@@ -421,8 +426,8 @@ in_band_create(struct ofproto *ofproto, const char *local_name,
     *in_bandp = NULL;
     error = netdev_open(local_name, "internal", &local_netdev);
     if (error) {
-        VLOG_ERR("failed to initialize in-band control: cannot open "
-                 "datapath local port %s (%s)",
+        VLOG_ERR("%s: failed to initialize in-band control: cannot open "
+                 "datapath local port %s (%s)", ofproto->name,
                  local_name, ovs_strerror(error));
         return error;
     }

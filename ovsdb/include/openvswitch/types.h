@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2013 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,9 @@
 #ifndef OPENVSWITCH_TYPES_H
 #define OPENVSWITCH_TYPES_H 1
 
-#include <linux/types.h>
 #include <sys/types.h>
 #include <stdint.h>
+#include "openvswitch/compiler.h"
 
 #ifdef __CHECKER__
 #define OVS_BITWISE __attribute__((bitwise))
@@ -30,14 +30,10 @@
 #endif
 
 /* The ovs_be<N> types indicate that an object is in big-endian, not
- * native-endian, byte order.  They are otherwise equivalent to uint<N>_t.
- *
- * We bootstrap these from the Linux __be<N> types.  If we instead define our
- * own independently then __be<N> and ovs_be<N> become mutually
- * incompatible. */
-typedef __be16 ovs_be16;
-typedef __be32 ovs_be32;
-typedef __be64 ovs_be64;
+ * native-endian, byte order.  They are otherwise equivalent to uint<N>_t. */
+typedef uint16_t OVS_BITWISE ovs_be16;
+typedef uint32_t OVS_BITWISE ovs_be32;
+typedef uint64_t OVS_BITWISE ovs_be64;
 
 #define OVS_BE16_MAX ((OVS_FORCE ovs_be16) 0xffff)
 #define OVS_BE32_MAX ((OVS_FORCE ovs_be32) 0xffffffff)
@@ -86,6 +82,32 @@ typedef struct {
 #endif
 } ovs_32aligned_u64;
 
+typedef union {
+    uint32_t u32[4];
+    struct {
+#ifdef WORDS_BIGENDIAN
+        uint64_t hi, lo;
+#else
+        uint64_t lo, hi;
+#endif
+    } u64;
+} ovs_u128;
+
+typedef union {
+    ovs_be32 be32[4];
+    struct {
+        ovs_be64 hi, lo;
+    } be64;
+} ovs_be128;
+
+/* MSVC2015 doesn't support designated initializers when compiling C++,
+ * and doesn't support ternary operators with non-designated initializers.
+ * So we use these static definitions rather than using initializer macros. */
+static const ovs_u128 OVS_U128_MAX = { { UINT32_MAX, UINT32_MAX,
+                                         UINT32_MAX, UINT32_MAX } };
+static const ovs_be128 OVS_BE128_MAX OVS_UNUSED = { { OVS_BE32_MAX, OVS_BE32_MAX,
+                                           OVS_BE32_MAX, OVS_BE32_MAX } };
+
 /* A 64-bit value, in network byte order, that is only aligned on a 32-bit
  * boundary. */
 typedef struct {
@@ -103,5 +125,15 @@ typedef uint32_t OVS_BITWISE ofp11_port_t;
 #define OFP_PORT_C(X) ((OVS_FORCE ofp_port_t) (X))
 #define ODP_PORT_C(X) ((OVS_FORCE odp_port_t) (X))
 #define OFP11_PORT_C(X) ((OVS_FORCE ofp11_port_t) (X))
+
+/* Using this struct instead of a bare array makes an ethernet address field
+ * assignable.  The size of the array is also part of the type, so it is easier
+ * to deal with. */
+struct eth_addr {
+    union {
+        uint8_t ea[6];
+        ovs_be16 be16[3];
+    };
+};
 
 #endif /* openvswitch/types.h */

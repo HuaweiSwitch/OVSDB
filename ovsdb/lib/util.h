@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #ifndef UTIL_H
 #define UTIL_H 1
 
+#include <arpa/inet.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -28,6 +29,7 @@
 #include <string.h>
 #include "compiler.h"
 #include "openvswitch/types.h"
+#include "openvswitch/util.h"
 
 #ifndef va_copy
 #ifdef __va_copy
@@ -65,16 +67,17 @@
 #define BUILD_ASSERT_DECL_GCCONLY(EXPR) ((void) 0)
 #endif
 
-/* Like the standard assert macro, except:
- *
- *   - Writes the failure message to the log.
- *
- *   - Not affected by NDEBUG. */
+/* Like the standard assert macro, except writes the failure message to the
+ * log. */
+#ifndef NDEBUG
 #define ovs_assert(CONDITION)                                           \
     if (!OVS_LIKELY(CONDITION)) {                                       \
-        ovs_assert_failure(SOURCE_LOCATOR, __func__, #CONDITION);       \
+        ovs_assert_failure(OVS_SOURCE_LOCATOR, __func__, #CONDITION);       \
     }
-void ovs_assert_failure(const char *, const char *, const char *) NO_RETURN;
+#else
+#define ovs_assert(CONDITION) ((void) (CONDITION))
+#endif
+OVS_NO_RETURN void ovs_assert_failure(const char *, const char *, const char *);
 
 /* Casts 'pointer' to 'type' and issues a compiler warning if the cast changes
  * anything other than an outermost "const" or "volatile" qualifier.
@@ -172,14 +175,6 @@ ovs_prefetch_range(const void *start, size_t size)
 
 #define OVS_NOT_REACHED() abort()
 
-/* Expands to a string that looks like "<file>:<line>", e.g. "tmp.c:10".
- *
- * See http://c-faq.com/ansi/stringize.html for an explanation of STRINGIZE and
- * STRINGIZE2. */
-#define SOURCE_LOCATOR __FILE__ ":" STRINGIZE(__LINE__)
-#define STRINGIZE(ARG) STRINGIZE2(ARG)
-#define STRINGIZE2(ARG) #ARG
-
 /* Given a pointer-typed lvalue OBJECT, expands to a pointer type that may be
  * assigned to OBJECT. */
 #ifdef __GNUC__
@@ -203,6 +198,9 @@ ovs_prefetch_range(const void *start, size_t size)
 #define OBJECT_OFFSETOF(OBJECT, MEMBER) \
     ((char *) &(OBJECT)->MEMBER - (char *) (OBJECT))
 #endif
+
+/* Yields the size of MEMBER within STRUCT. */
+#define MEMBER_SIZEOF(STRUCT, MEMBER) (sizeof(((STRUCT *) NULL)->MEMBER))
 
 /* Given POINTER, the address of the given MEMBER in a STRUCT object, returns
    the STRUCT object. */
@@ -228,6 +226,13 @@ ovs_prefetch_range(const void *start, size_t size)
 #define ASSIGN_CONTAINER(OBJECT, POINTER, MEMBER) \
     ((OBJECT) = OBJECT_CONTAINING(POINTER, OBJECT, MEMBER), (void) 0)
 
+/* As explained in the comment above OBJECT_OFFSETOF(), non-GNUC compilers
+ * like MSVC will complain about un-initialized variables if OBJECT
+ * hasn't already been initialized. To prevent such warnings, INIT_CONTAINER()
+ * can be used as a wrapper around ASSIGN_CONTAINER. */
+#define INIT_CONTAINER(OBJECT, POINTER, MEMBER) \
+    ((OBJECT) = NULL, ASSIGN_CONTAINER(OBJECT, POINTER, MEMBER))
+
 /* Given ATTR, and TYPE, cast the ATTR to TYPE by first casting ATTR to
  * (void *). This is to suppress the alignment warning issued by clang. */
 #define ALIGNED_CAST(TYPE, ATTR) ((TYPE) (void *) (ATTR))
@@ -249,22 +254,23 @@ ovs_prefetch_range(const void *start, size_t size)
 #define PRIXSIZE "zX"
 #endif
 
+#ifndef _WIN32
+typedef uint32_t HANDLE;
+#endif
+
 #ifdef  __cplusplus
 extern "C" {
 #endif
 
-void set_program_name__(const char *name, const char *version,
-                        const char *date, const char *time);
 #define set_program_name(name) \
-        set_program_name__(name, VERSION, __DATE__, __TIME__)
+        ovs_set_program_name(name, OVS_PACKAGE_VERSION)
 
 const char *get_subprogram_name(void);
-void set_subprogram_name(const char *format, ...) PRINTF_FORMAT(1, 2);
+    void set_subprogram_name(const char *);
 
-const char *get_program_version(void);
 void ovs_print_version(uint8_t min_ofp, uint8_t max_ofp);
 
-void out_of_memory(void) NO_RETURN;
+OVS_NO_RETURN void out_of_memory(void);
 void *xmalloc(size_t) MALLOC_LIKE;
 void *xcalloc(size_t, size_t) MALLOC_LIKE;
 void *xzalloc(size_t) MALLOC_LIKE;
@@ -272,8 +278,8 @@ void *xrealloc(void *, size_t);
 void *xmemdup(const void *, size_t) MALLOC_LIKE;
 char *xmemdup0(const char *, size_t) MALLOC_LIKE;
 char *xstrdup(const char *) MALLOC_LIKE;
-char *xasprintf(const char *format, ...) PRINTF_FORMAT(1, 2) MALLOC_LIKE;
-char *xvasprintf(const char *format, va_list) PRINTF_FORMAT(1, 0) MALLOC_LIKE;
+char *xasprintf(const char *format, ...) OVS_PRINTF_FORMAT(1, 2) MALLOC_LIKE;
+char *xvasprintf(const char *format, va_list) OVS_PRINTF_FORMAT(1, 0) MALLOC_LIKE;
 void *x2nrealloc(void *p, size_t *n, size_t s);
 
 void *xmalloc_cacheline(size_t) MALLOC_LIKE;
@@ -283,17 +289,17 @@ void free_cacheline(void *);
 void ovs_strlcpy(char *dst, const char *src, size_t size);
 void ovs_strzcpy(char *dst, const char *src, size_t size);
 
-void ovs_abort(int err_no, const char *format, ...)
-    PRINTF_FORMAT(2, 3) NO_RETURN;
-void ovs_abort_valist(int err_no, const char *format, va_list)
-    PRINTF_FORMAT(2, 0) NO_RETURN;
-void ovs_fatal(int err_no, const char *format, ...)
-    PRINTF_FORMAT(2, 3) NO_RETURN;
-void ovs_fatal_valist(int err_no, const char *format, va_list)
-    PRINTF_FORMAT(2, 0) NO_RETURN;
-void ovs_error(int err_no, const char *format, ...) PRINTF_FORMAT(2, 3);
+OVS_NO_RETURN void ovs_abort(int err_no, const char *format, ...)
+    OVS_PRINTF_FORMAT(2, 3);
+OVS_NO_RETURN void ovs_abort_valist(int err_no, const char *format, va_list)
+    OVS_PRINTF_FORMAT(2, 0);
+OVS_NO_RETURN void ovs_fatal(int err_no, const char *format, ...)
+    OVS_PRINTF_FORMAT(2, 3);
+OVS_NO_RETURN void ovs_fatal_valist(int err_no, const char *format, va_list)
+    OVS_PRINTF_FORMAT(2, 0);
+void ovs_error(int err_no, const char *format, ...) OVS_PRINTF_FORMAT(2, 3);
 void ovs_error_valist(int err_no, const char *format, va_list)
-    PRINTF_FORMAT(2, 0);
+    OVS_PRINTF_FORMAT(2, 0);
 const char *ovs_retval_to_string(int);
 const char *ovs_strerror(int);
 void ovs_hex_dump(FILE *, const void *, size_t, uintptr_t offset, bool ascii);
@@ -303,18 +309,24 @@ bool str_to_long(const char *, int base, long *);
 bool str_to_llong(const char *, int base, long long *);
 bool str_to_uint(const char *, int base, unsigned int *);
 
-bool ovs_scan(const char *s, const char *format, ...) SCANF_FORMAT(2, 3);
+bool ovs_scan(const char *s, const char *format, ...) OVS_SCANF_FORMAT(2, 3);
+bool ovs_scan_len(const char *s, int *n, const char *format, ...);
 
 bool str_to_double(const char *, double *);
 
 int hexit_value(int c);
-unsigned int hexits_value(const char *s, size_t n, bool *ok);
+uintmax_t hexits_value(const char *s, size_t n, bool *ok);
+
+int parse_int_string(const char *s, uint8_t *valuep, int field_width,
+                     char **tail);
 
 const char *english_list_delimiter(size_t index, size_t total);
 
 char *get_cwd(void);
+#ifndef _WIN32
 char *dir_name(const char *file_name);
 char *base_name(const char *file_name);
+#endif
 char *abs_file_name(const char *dir, const char *file_name);
 
 char *follow_symlinks(const char *filename);
@@ -340,6 +352,42 @@ static inline int
 raw_clz64(uint64_t n)
 {
     return __builtin_clzll(n);
+}
+#elif _MSC_VER
+static inline int
+raw_ctz(uint64_t n)
+{
+#ifdef _WIN64
+    unsigned long r = 0;
+    _BitScanForward64(&r, n);
+    return r;
+#else
+    unsigned long low = n, high, r = 0;
+    if (_BitScanForward(&r, low)) {
+        return r;
+    }
+    high = n >> 32;
+    _BitScanForward(&r, high);
+    return r + 32;
+#endif
+}
+
+static inline int
+raw_clz64(uint64_t n)
+{
+#ifdef _WIN64
+    unsigned long r = 0;
+    _BitScanReverse64(&r, n);
+    return 63 - r;
+#else
+    unsigned long low, high = n >> 32, r = 0;
+    if (_BitScanReverse(&r, high)) {
+        return 31 - r;
+    }
+    low = n;
+    _BitScanReverse(&r, low);
+    return 63 - r;
+#endif
 }
 #else
 /* Defined in util.c. */
@@ -458,29 +506,32 @@ zero_rightmost_1bit(uintmax_t x)
     return x & (x - 1);
 }
 
-/* Returns the index of the rightmost 1-bit in 'x' (e.g. 01011000 => 3), or 32
- * if 'x' is 0.
- *
- * Unlike the other functions for rightmost 1-bits, this function only works
- * with 32-bit integers. */
-static inline uint32_t
-rightmost_1bit_idx(uint32_t x)
+/* Returns the index of the rightmost 1-bit in 'x' (e.g. 01011000 => 3), or an
+ * undefined value if 'x' is 0. */
+static inline int
+rightmost_1bit_idx(uint64_t x)
 {
-    return ctz32(x);
+    return ctz64(x);
 }
 
-/* Returns the index of the leftmost 1-bit in 'x' (e.g. 01011000 => 6), or 32
- * if 'x' is 0.
- *
- * This function only works with 32-bit integers. */
+/* Returns the index of the leftmost 1-bit in 'x' (e.g. 01011000 => 6), or an
+ * undefined value if 'x' is 0. */
 static inline uint32_t
-leftmost_1bit_idx(uint32_t x)
+leftmost_1bit_idx(uint64_t x)
 {
-    return x ? log_2_floor(x) : 32;
+    return log_2_floor(x);
+}
+
+/* Return a ovs_be32 prefix in network byte order with 'plen' highest bits set.
+ * Shift with 32 is undefined behavior, but we rather use 64-bit shift than
+ * compare. */
+static inline ovs_be32 be32_prefix_mask(int plen)
+{
+    return htonl((uint64_t)UINT32_MAX << (32 - plen));
 }
 
-bool is_all_zeros(const uint8_t *, size_t);
-bool is_all_ones(const uint8_t *, size_t);
+bool is_all_zeros(const void *, size_t);
+bool is_all_ones(const void *, size_t);
 void bitwise_copy(const void *src, unsigned int src_len, unsigned int src_ofs,
                   void *dst, unsigned int dst_len, unsigned int dst_ofs,
                   unsigned int n_bits);
@@ -490,11 +541,55 @@ void bitwise_one(void *dst_, unsigned int dst_len, unsigned dst_ofs,
                  unsigned int n_bits);
 bool bitwise_is_all_zeros(const void *, unsigned int len, unsigned int ofs,
                           unsigned int n_bits);
+unsigned int bitwise_scan(const void *, unsigned int len,
+                          bool target, unsigned int start, unsigned int end);
+int bitwise_rscan(const void *, unsigned int len, bool target,
+                  int start, int end);
 void bitwise_put(uint64_t value,
                  void *dst, unsigned int dst_len, unsigned int dst_ofs,
                  unsigned int n_bits);
 uint64_t bitwise_get(const void *src, unsigned int src_len,
                      unsigned int src_ofs, unsigned int n_bits);
+bool bitwise_get_bit(const void *src, unsigned int len, unsigned int ofs);
+void bitwise_put0(void *dst, unsigned int len, unsigned int ofs);
+void bitwise_put1(void *dst, unsigned int len, unsigned int ofs);
+void bitwise_put_bit(void *dst, unsigned int len, unsigned int ofs, bool);
+void bitwise_toggle_bit(void *dst, unsigned int len, unsigned int ofs);
+
+/* Returns non-zero if the parameters have equal value. */
+static inline int
+ovs_u128_equals(const ovs_u128 *a, const ovs_u128 *b)
+{
+    return (a->u64.hi == b->u64.hi) && (a->u64.lo == b->u64.lo);
+}
+
+/* Returns true if 'val' is 0. */
+static inline bool
+ovs_u128_is_zero(const ovs_u128 *val)
+{
+    return !(val->u64.hi || val->u64.lo);
+}
+
+/* Returns true if 'val' is all ones. */
+static inline bool
+ovs_u128_is_ones(const ovs_u128 *val)
+{
+    return ovs_u128_equals(val, &OVS_U128_MAX);
+}
+
+/* Returns non-zero if the parameters have equal value. */
+static inline int
+ovs_be128_equals(const ovs_be128 *a, const ovs_be128 *b)
+{
+    return (a->be64.hi == b->be64.hi) && (a->be64.lo == b->be64.lo);
+}
+
+/* Returns true if 'val' is 0. */
+static inline bool
+ovs_be128_is_zero(const ovs_be128 *val)
+{
+    return !(val->be64.hi || val->be64.lo);
+}
 
 void xsleep(unsigned int seconds);
 

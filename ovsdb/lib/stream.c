@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@
 #include "random.h"
 #include "socket-util.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(stream);
 
@@ -74,27 +74,6 @@ static const struct pstream_class *pstream_classes[] = {
     &pssl_pstream_class,
 #endif
 };
-
-#ifdef _WIN32
-static void
-do_winsock_start(void)
-{
-    WSADATA wsaData;
-    int error;
-
-    error = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (error != 0) {
-        VLOG_FATAL("WSAStartup failed: %s", sock_strerror(sock_errno()));
-    }
-}
-
-static void
-winsock_start(void)
-{
-    static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, do_winsock_start);
-}
-#endif
 
 /* Check the validity of the stream class structures. */
 static void
@@ -233,10 +212,6 @@ stream_open(const char *name, struct stream **streamp, uint8_t dscp)
     int error;
 
     COVERAGE_INC(stream_open);
-
-#ifdef _WIN32
-    winsock_start();
-#endif
 
     /* Look up the class. */
     error = stream_lookup_class(name, &class);
@@ -528,10 +503,6 @@ pstream_open(const char *name, struct pstream **pstreamp, uint8_t dscp)
 
     COVERAGE_INC(pstream_open);
 
-#ifdef _WIN32
-    winsock_start();
-#endif
-
     /* Look up the class. */
     error = pstream_lookup_class(name, &class);
     if (!class) {
@@ -621,15 +592,6 @@ pstream_wait(struct pstream *pstream)
     (pstream->class->wait)(pstream);
 }
 
-int
-pstream_set_dscp(struct pstream *pstream, uint8_t dscp)
-{
-    if (pstream->class->set_dscp) {
-        return pstream->class->set_dscp(pstream, dscp);
-    }
-    return 0;
-}
-
 /* Returns the transport port on which 'pstream' is listening, or 0 if the
  * concept doesn't apply. */
 ovs_be16
@@ -714,13 +676,13 @@ stream_open_with_default_port(const char *name_,
 
     if ((!strncmp(name_, "tcp:", 4) || !strncmp(name_, "ssl:", 4))
         && count_fields(name_) < 3) {
-        if (default_port == OFP_OLD_PORT) {
-            VLOG_WARN_ONCE("The default OpenFlow port number will change "
-                           "from %d to %d in a future release",
+        if (default_port == OFP_PORT) {
+            VLOG_WARN_ONCE("The default OpenFlow port number has changed "
+                           "from %d to %d",
                            OFP_OLD_PORT, OFP_PORT);
-        } else if (default_port == OVSDB_OLD_PORT) {
-            VLOG_WARN_ONCE("The default OVSDB port number will change "
-                           "from %d to %d in a future release",
+        } else if (default_port == OVSDB_PORT) {
+            VLOG_WARN_ONCE("The default OVSDB port number has changed "
+                           "from %d to %d",
                            OVSDB_OLD_PORT, OVSDB_PORT);
         }
         name = xasprintf("%s:%d", name_, default_port);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,8 +20,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "dpif.h"
 #include "openvswitch/types.h"
-#include "ofpbuf.h"
+#include "dp-packet.h"
 #include "packets.h"
 
 #ifdef  __cplusplus
@@ -32,14 +33,17 @@ extern "C" {
  * headers to be aligned on a 4-byte boundary.  */
 enum { DP_NETDEV_HEADROOM = 2 + VLAN_HEADER_LEN };
 
-static inline void dp_packet_pad(struct ofpbuf *b)
+static inline void dp_packet_pad(struct dp_packet *p)
 {
-    if (ofpbuf_size(b) < ETH_TOTAL_MIN) {
-        ofpbuf_put_zeros(b, ETH_TOTAL_MIN - ofpbuf_size(b));
+    if (dp_packet_size(p) < ETH_TOTAL_MIN) {
+        dp_packet_put_zeros(p, ETH_TOTAL_MIN - dp_packet_size(p));
     }
 }
 
+bool dpif_is_netdev(const struct dpif *);
+
 #define NR_QUEUE   1
+#define NR_PMD_THREADS 1
 
 #ifdef  __cplusplus
 }

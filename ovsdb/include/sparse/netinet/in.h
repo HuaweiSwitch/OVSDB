@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2011, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,15 +61,20 @@ struct sockaddr_in6 {
 #define IPPROTO_IPV6  41
 #define IPPROTO_HOPOPTS 0
 #define IPPROTO_ICMP 1
+#define IPPROTO_IGMP 2
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
 #define IPPROTO_ROUTING 43
 #define IPPROTO_FRAGMENT 44
+#define IPPROTO_GRE 47
+#define IPPROTO_ESP 50
 #define IPPROTO_AH 51
 #define IPPROTO_ICMPV6 58
 #define IPPROTO_NONE 59
 #define IPPROTO_DSTOPTS 60
 #define IPPROTO_SCTP 132
+
+#define IPPORT_FTP 21
 
 /* All the IP options documented in Linux ip(7). */
 #define IP_ADD_MEMBERSHIP 0
@@ -96,6 +101,20 @@ struct sockaddr_in6 {
 #define INADDR_BROADCAST        0xffffffff
 #define INADDR_LOOPBACK         0x7f000001
 #define INADDR_NONE             0xffffffff
+
+#define IN6_IS_ADDR_V4MAPPED(X)                 \
+    ((X)->s6_addr[0] == 0 &&                    \
+     (X)->s6_addr[1] == 0 &&                    \
+     (X)->s6_addr[2] == 0 &&                    \
+     (X)->s6_addr[3] == 0 &&                    \
+     (X)->s6_addr[4] == 0 &&                    \
+     (X)->s6_addr[5] == 0 &&                    \
+     (X)->s6_addr[6] == 0 &&                    \
+     (X)->s6_addr[7] == 0 &&                    \
+     (X)->s6_addr[8] == 0 &&                    \
+     (X)->s6_addr[9] == 0 &&                    \
+     (X)->s6_addr[10] == 0xff &&                \
+     (X)->s6_addr[11] == 0xff)
 
 #define INET6_ADDRSTRLEN 46
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,7 +45,8 @@ struct ofpbuf;
 
 #define OFPERR_OFS (1 << 30)
 
-/* OpenFlow error codes.
+/* OpenFlow error codes
+ * --------------------
  *
  * The comments below are parsed by the extract-ofp-errors program at build
  * time and used to determine the mapping between "enum ofperr" constants and
@@ -71,12 +72,45 @@ struct ofpbuf;
  *   - Additional text is a human-readable description of the meaning of each
  *     error, used to explain the error to the user.  Any text enclosed in
  *     square brackets is omitted; this can be used to explain rationale for
- *     choice of error codes in the case where this is desirable. */
+ *     choice of error codes in the case where this is desirable.
+ *
+ *
+ * Expected duplications
+ * ---------------------
+ *
+ * Occasionally, in one version of OpenFlow a single named error can indicate
+ * two or more distinct errors, then a later version of OpenFlow splits those
+ * meanings into different error codes.  When that happens, both errors are
+ * assigned the same value in the earlier version.  That is ordinarily a
+ * mistake, so the build system reports an error.  When that happens, add the
+ * error message to the list of "Expected duplications" below to suppress the
+ * error.  In such a case, the named error defined earlier is how OVS
+ * interprets the earlier, merged form of the error.
+ *
+ * For example, OpenFlow 1.1 defined (3,5) as OFPBIC_UNSUP_EXP_INST, then
+ * OpenFlow 1.2 broke this error into OFPBIC_BAD_EXPERIMENTER as (3,5) and
+ * OFPBIC_BAD_EXT_TYPE as (3,6).  To allow the OVS code to report just a single
+ * error code, instead of protocol version dependent errors, this list of
+ * errors only lists the latter two errors, giving both of them the same code
+ * (3,5) for OpenFlow 1.1.  Then, when OVS serializes either error into
+ * OpenFlow 1.1, it uses the same code (3,5).  In the other direction, when OVS
+ * deserializes (3,5) from OpenFlow 1.1, it translates it into
+ * OFPBIC_BAD_EXPERIMENTER (because its definition precedes that of
+ * OFPBIC_BAD_EXT_TYPE below).  See the "encoding OFPBIC_* experimenter errors"
+ * and "decoding OFPBIC_* experimenter errors" tests in tests/ofp-errors.at for
+ * full details.
+ */
 enum ofperr {
 /* Expected duplications. */
 
     /* Expected: 0x0,3,5 in OF1.1 means both OFPBIC_BAD_EXPERIMENTER and
      * OFPBIC_BAD_EXP_TYPE. */
+
+    /* Expected: 0x0,1,5 in OF1.0 means both OFPBRC_EPERM and
+     * OFPBRC_IS_SLAVE. */
+
+    /* Expected: 0x0,1,5 in OF1.1 means both OFPBRC_EPERM and
+     * OFPBRC_IS_SLAVE. */
 
 /* ## ------------------ ## */
 /* ## OFPET_HELLO_FAILED ## */
@@ -126,7 +160,7 @@ enum ofperr {
      *   code defined the specification. ] */
     OFPERR_OFPBRC_BAD_TABLE_ID,
 
-    /* OF1.2+(1,10).  Denied because controller is slave. */
+    /* OF1.0-1.1(1,5), OF1.2+(1,10).  Denied because controller is slave. */
     OFPERR_OFPBRC_IS_SLAVE,
 
     /* NX1.0-1.1(1,514), OF1.2+(1,11).  Invalid port.  [ A non-standard error
@@ -155,21 +189,6 @@ enum ofperr {
     /* NX1.0-1.1(1,516), NX1.2+(5).  The reason in an ofp_port_status message
      * is not valid. */
     OFPERR_NXBRC_BAD_REASON,
-
-    /* NX1.0-1.1(1,517), NX1.2+(6).  The 'id' in an NXST_FLOW_MONITOR request
-     * is the same as an existing monitor id (or two monitors in the same
-     * NXST_FLOW_MONITOR request have the same 'id').  */
-    OFPERR_NXBRC_FM_DUPLICATE_ID,
-
-    /* NX1.0-1.1(1,518), NX1.2+(7).  The 'flags' in an NXST_FLOW_MONITOR
-     * request either does not specify at least one of the NXFMF_ADD,
-     * NXFMF_DELETE, or NXFMF_MODIFY flags, or specifies a flag bit that is not
-     * defined. */
-    OFPERR_NXBRC_FM_BAD_FLAGS,
-
-    /* NX1.0-1.1(1,519), NX1.2+(8).  The 'id' in an NXT_FLOW_MONITOR_CANCEL
-     * request is not the id of any existing monitor. */
-    OFPERR_NXBRC_FM_BAD_ID,
 
     /* NX1.0-1.1(1,520), NX1.2+(9).  The 'event' in an NXST_FLOW_MONITOR reply
      * does not specify one of the NXFME_ABBREV, NXFME_ADD, NXFME_DELETE, or
@@ -237,9 +256,18 @@ enum ofperr {
      * unsupported value, or modifies a read-only field. */
     OFPERR_OFPBAC_BAD_SET_ARGUMENT,
 
+    /* ONF1.3-1.4(4250), OF1.5+(2,16).  Field in Set-Field action has Has-Mask
+     * bit set to 1. */
+    OFPERR_OFPBAC_BAD_SET_MASK,
+
     /* NX1.0-1.1(2,256), NX1.2+(11).  Must-be-zero action argument had nonzero
      * value. */
     OFPERR_NXBAC_MUST_BE_ZERO,
+
+    /* NX1.0-1.1(2,526), NX1.2+(15).  Conjunction action must be only action
+     * present.  conjunction(id, k/n) must satisfy 1 <= k <= n and 2 <= n <=
+     * 64. */
+    OFPERR_NXBAC_BAD_CONJUNCTION,
 
 /* ## --------------------- ## */
 /* ## OFPET_BAD_INSTRUCTION ## */
@@ -248,7 +276,8 @@ enum ofperr {
     /* OF1.1+(3,0).  Unknown instruction. */
     OFPERR_OFPBIC_UNKNOWN_INST,
 
-    /* OF1.1+(3,1).  Switch or table does not support the instruction. */
+    /* NX1.0(2,257), OF1.1+(3,1).  Switch or table does not support the
+     * instruction. */
     OFPERR_OFPBIC_UNSUP_INST,
 
     /* OF1.1+(3,2).  Invalid Table-ID specified. */
@@ -272,8 +301,8 @@ enum ofperr {
     /* OF1.2+(3,8).  Permissions error. */
     OFPERR_OFPBIC_EPERM,
 
-    /* ONF1.1+(2600).  Duplicate instruction. */
-    OFPERR_ONFBIC_DUP_INSTRUCTION,
+    /* NX1.1(3,256), ONF1.2-1.3(2600), OF1.4+(3,9).  Duplicate instruction. */
+    OFPERR_OFPBIC_DUP_INST,
 
 /* ## --------------- ## */
 /* ## OFPET_BAD_MATCH ## */
@@ -296,10 +325,11 @@ enum ofperr {
      * arbitrary network address mask. */
     OFPERR_OFPBMC_BAD_NW_ADDR_MASK,
 
-    /* OF1.1+(4,5).  Unsupported wildcard specified in the match. */
+    /* NX1.0(1,262), OF1.1+(4,5).  Unsupported wildcard specified in the
+     * match. */
     OFPERR_OFPBMC_BAD_WILDCARDS,
 
-    /* OF1.1+(4,6).  Unsupported field in the match. */
+    /* NX1.0(0,263), OF1.1+(4,6).  Unsupported field in the match. */
     OFPERR_OFPBMC_BAD_FIELD,
 
     /* NX1.0(1,258), OF1.1+(4,7).  Unsupported value in a match
@@ -419,6 +449,14 @@ enum ofperr {
 
     /* OF1.2+(6,14).  Permissions error. */
     OFPERR_OFPGMFC_EPERM,
+
+    /* OF1.5+(6,15).  Invalid bucket identifier used in
+     * INSERT BUCKET or REMOVE BUCKET command. */
+    OFPERR_OFPGMFC_UNKNOWN_BUCKET,
+
+    /* OF1.5+(6,16).  Can't insert bucket because a bucket
+     * already exist with that bucket-id. */
+    OFPERR_OFPGMFC_BUCKET_EXISTS,
 
 /* ## --------------------- ## */
 /* ## OFPET_PORT_MOD_FAILED ## */
@@ -567,23 +605,36 @@ enum ofperr {
      * [Known as OFPTFFC_BAD_ARGUMENT in OF1.3.] */
     OFPERR_OFPBPC_BAD_VALUE,
 
-    /* OF1.4+(14,3).  Can't handle this many properties. */
+    /* ONF1.3(4443), OF1.4+(14,3).  Can't handle this many properties. */
     OFPERR_OFPBPC_TOO_MANY,
 
-    /* OF1.4+(14,4).  A property type was duplicated. */
+    /* ONF1.3(4444), OF1.4+(14,4).  A property type was duplicated. */
     OFPERR_OFPBPC_DUP_TYPE,
 
-    /* OF1.4+(14,5).  Unknown experimenter id specified. */
+    /* ONF1.3(4445), OF1.4+(14,5).  Unknown experimenter id specified. */
     OFPERR_OFPBPC_BAD_EXPERIMENTER,
 
-    /* OF1.4+(14,6).  Unknown exp_type for experimenter id. */
+    /* ONF1.3(4446), OF1.4+(14,6).  Unknown exp_type for experimenter id. */
     OFPERR_OFPBPC_BAD_EXP_TYPE,
 
-    /* OF1.4+(14,7).  Unknown value for experimenter id. */
+    /* ONF1.3(4447), OF1.4+(14,7).  Unknown value for experimenter id. */
     OFPERR_OFPBPC_BAD_EXP_VALUE,
 
-    /* OF1.4+(14,8).  Permissions error. */
+    /* ONF1.3(4448), OF1.4+(14,8).  Permissions error. */
     OFPERR_OFPBPC_EPERM,
+
+/* ## -------------------------- ## */
+/* ## OFPET_ASYNC_CONFIG_FAILED  ## */
+/* ## -------------------------- ## */
+
+    /* OF1.4+(15,0).  One mask is invalid. */
+    OFPERR_OFPACFC_INVALID,
+
+    /* OF1.4+(15,1).  Requested configuration not supported. */
+    OFPERR_OFPACFC_UNSUPPORTED,
+
+    /* OF1.4+(15,2).  Permissions error. */
+    OFPERR_OFPACFC_EPERM,
 
 /* ## -------------------- ## */
 /* ## OFPET_BUNDLE_FAILED  ## */
@@ -636,6 +687,70 @@ enum ofperr {
 
     /* OF1.4+(17,15).  Bundle is locking the resource. */
     OFPERR_OFPBFC_BUNDLE_IN_PROGRESS,
+
+    /* NX1.4+(22).  In an OFPT_BUNDLE_ADD_MESSAGE, the OpenFlow version in the
+     * inner and outer messages differ. */
+    OFPERR_NXBFC_BAD_VERSION,
+
+/* ## ------------------------- ## */
+/* ## OFPET_FLOW_MONITOR_FAILED ## */
+/* ## ------------------------- ## */
+
+    /* OF1.4+(16,0).  Unspecified error. */
+    OFPERR_OFPMOFC_UNKNOWN,
+
+    /* NX1.0-1.1(1,517), NX1.2-1.3(6), OF1.4+(16,1).  Monitor not added
+     * because a Monitor ADD attempted to replace an existing Monitor. */
+    OFPERR_OFPMOFC_MONITOR_EXISTS,
+
+    /* OF1.4+(16,2).  Monitor not added because
+     * Monitor specified is invalid. */
+    OFPERR_OFPMOFC_INVALID_MONITOR,
+
+    /* NX1.0-1.1(1,519), NX1.2-1.3(8), OF1.4+(16,3).  Monitor not modified
+     * because a Monitor MODIFY attempted to modify a non-existent Monitor. */
+    OFPERR_OFPMOFC_UNKNOWN_MONITOR,
+
+    /* OF1.4+(16,4).  Unsupported or unknown command. */
+    OFPERR_OFPMOFC_BAD_COMMAND,
+
+    /* NX1.0-1.1(1,518), NX1.2-1.3(7), OF1.4+(16,5).  Flag configuration
+     * unsupported. */
+    OFPERR_OFPMOFC_BAD_FLAGS,
+
+    /* OF1.4+(16,6).  Specified table does not exist. */
+    OFPERR_OFPMOFC_BAD_TABLE_ID,
+
+    /* OF1.4+(16,7).  Error in output port/group. */
+    OFPERR_OFPMOFC_BAD_OUT,
+
+/* ## ----------------------------- ## */
+/* ## OFPET_TLV_TABLE_MOD_FAILED ## */
+/* ## ----------------------------- ## */
+
+    /* NX1.0-1.1(1,527), NX1.2+(16).  The TLV table mod command is not
+     * recognized as a valid operation. */
+    OFPERR_NXTTMFC_BAD_COMMAND,
+
+    /* NX1.0-1.1(1,528), NX1.2+(17).  The option length is not a valid
+     * option size for TLVs. */
+    OFPERR_NXTTMFC_BAD_OPT_LEN,
+
+    /* NX1.0-1.1(1,529), NX1.2+(18).  The field index is out of range for
+     * the supported NX_TUN_METADATA<n> match. */
+    OFPERR_NXTTMFC_BAD_FIELD_IDX,
+
+    /* NX1.0-1.1(1,530), NX1.2+(19).  The total set of configured options
+     * exceeds the maximum supported by the switch. */
+    OFPERR_NXTTMFC_TABLE_FULL,
+
+    /* NX1.0-1.1(1,531), NX1.2+(20).  The controller issued an NXTTMC_ADD
+     * command for a field index that is already mapped. */
+    OFPERR_NXTTMFC_ALREADY_MAPPED,
+
+    /* NX1.0-1.1(1,532), NX1.2+(21).  The option TLV that is attempting
+     * to be mapped is the same as one assigned to a different field. */
+    OFPERR_NXTTMFC_DUP_ENTRY,
 
 /* ## ------------------ ## */
 /* ## OFPET_EXPERIMENTER ## */

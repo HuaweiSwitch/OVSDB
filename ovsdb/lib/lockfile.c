@@ -30,7 +30,7 @@
 #include "ovs-thread.h"
 #include "timeval.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(lockfile);
 
@@ -82,6 +82,14 @@ lockfile_name(const char *filename_)
      * symlink, not one for each. */
     filename = follow_symlinks(filename_);
     slash = strrchr(filename, '/');
+
+#ifdef _WIN32
+    char *backslash = strrchr(filename, '\\');
+    if (backslash && (!slash || backslash > slash)) {
+        slash = backslash;
+    }
+#endif
+
     lockname = (slash
                 ? xasprintf("%.*s/.%s.~lock~",
                             (int) (slash - filename), filename, slash + 1)
@@ -276,8 +284,9 @@ lockfile_try_lock(const char *name, pid_t *pidp, struct lockfile **lockfilep)
     retval = LockFileEx(lock_handle, LOCKFILE_EXCLUSIVE_LOCK
                         | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overl);
     if (!retval) {
-        VLOG_WARN("Failed to lock file : %s", ovs_lasterror_to_string());
-        return EEXIST;
+        VLOG_DBG("Failed to lock file : %s", ovs_lasterror_to_string());
+        *pidp = getpid();
+        return EDEADLK;
     }
 
     lockfile = xmalloc(sizeof *lockfile);

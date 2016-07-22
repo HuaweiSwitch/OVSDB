@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,22 +19,23 @@
 #ifndef OPENFLOW_OPENFLOW10_H
 #define OPENFLOW_OPENFLOW10_H 1
 
-#include "openflow/openflow-common.h"
+#include <openflow/openflow-common.h>
 
 /* Port number(s)   meaning
  * ---------------  --------------------------------------
  * 0x0000           not assigned a meaning by OpenFlow 1.0
  * 0x0001...0xfeff  "physical" ports
- * 0xff00...0xfff7  "reserved" but not assigned a meaning by OpenFlow 1.0
- * 0xfff8...0xffff  "reserved" OFPP_* ports with assigned meanings
+ * 0xff00...0xfff6  "reserved" but not assigned a meaning by OpenFlow 1.x
+ * 0xfff7...0xffff  "reserved" OFPP_* ports with assigned meanings
  */
 
 /* Ranges. */
 #define OFPP_MAX        OFP_PORT_C(0xff00) /* Max # of switch ports. */
-#define OFPP_FIRST_RESV OFP_PORT_C(0xfff8) /* First assigned reserved port. */
+#define OFPP_FIRST_RESV OFP_PORT_C(0xfff7) /* First assigned reserved port. */
 #define OFPP_LAST_RESV  OFP_PORT_C(0xffff) /* Last assigned reserved port. */
 
 /* Reserved output "ports". */
+#define OFPP_UNSET      OFP_PORT_C(0xfff7) /* For OXM_OF_ACTSET_OUTPUT only. */
 #define OFPP_IN_PORT    OFP_PORT_C(0xfff8) /* Where the packet came in. */
 #define OFPP_TABLE      OFP_PORT_C(0xfff9) /* Perform actions in flow table. */
 #define OFPP_NORMAL     OFP_PORT_C(0xfffa) /* Process with normal L2/L3. */
@@ -95,7 +96,7 @@ enum ofp10_port_features {
 /* Description of a physical port */
 struct ofp10_phy_port {
     ovs_be16 port_no;
-    uint8_t hw_addr[OFP_ETH_ALEN];
+    struct eth_addr hw_addr;
     char name[OFP_MAX_PORT_NAME_LEN]; /* Null-terminated */
 
     ovs_be32 config;        /* Bitmap of OFPPC_* and OFPPC10_* flags. */
@@ -113,11 +114,10 @@ OFP_ASSERT(sizeof(struct ofp10_phy_port) == 48);
 /* Modify behavior of the physical port */
 struct ofp10_port_mod {
     ovs_be16 port_no;
-    uint8_t hw_addr[OFP_ETH_ALEN]; /* The hardware address is not
-                                      configurable.  This is used to
-                                      sanity-check the request, so it must
-                                      be the same as returned in an
-                                      ofp10_phy_port struct. */
+    struct eth_addr hw_addr; /* The hardware address is not configurable.  This
+                                is used to sanity-check the request, so it must
+                                be the same as returned in an ofp10_phy_port
+                                struct. */
 
     ovs_be32 config;        /* Bitmap of OFPPC_* flags. */
     ovs_be32 mask;          /* Bitmap of OFPPC_* flags to be changed. */
@@ -169,46 +169,6 @@ struct ofp10_packet_in {
                                sizeof(struct ofp_packet_in) - 2. */
 };
 OFP_ASSERT(sizeof(struct ofp10_packet_in) == 12);
-
-enum ofp10_action_type {
-    OFPAT10_OUTPUT,             /* Output to switch port. */
-    OFPAT10_SET_VLAN_VID,       /* Set the 802.1q VLAN id. */
-    OFPAT10_SET_VLAN_PCP,       /* Set the 802.1q priority. */
-    OFPAT10_STRIP_VLAN,         /* Strip the 802.1q header. */
-    OFPAT10_SET_DL_SRC,         /* Ethernet source address. */
-    OFPAT10_SET_DL_DST,         /* Ethernet destination address. */
-    OFPAT10_SET_NW_SRC,         /* IP source address. */
-    OFPAT10_SET_NW_DST,         /* IP destination address. */
-    OFPAT10_SET_NW_TOS,         /* IP ToS (DSCP field, 6 bits). */
-    OFPAT10_SET_TP_SRC,         /* TCP/UDP source port. */
-    OFPAT10_SET_TP_DST,         /* TCP/UDP destination port. */
-    OFPAT10_ENQUEUE,            /* Output to queue. */
-    OFPAT10_VENDOR = 0xffff
-};
-
-/* Action structure for OFPAT10_OUTPUT, which sends packets out 'port'.
- * When the 'port' is the OFPP_CONTROLLER, 'max_len' indicates the max
- * number of bytes to send.  A 'max_len' of zero means no bytes of the
- * packet should be sent. */
-struct ofp10_action_output {
-    ovs_be16 type;                  /* OFPAT10_OUTPUT. */
-    ovs_be16 len;                   /* Length is 8. */
-    ovs_be16 port;                  /* Output port. */
-    ovs_be16 max_len;               /* Max length to send to controller. */
-};
-OFP_ASSERT(sizeof(struct ofp10_action_output) == 8);
-
-/* OFPAT10_ENQUEUE action struct: send packets to given queue on port. */
-struct ofp10_action_enqueue {
-    ovs_be16 type;            /* OFPAT10_ENQUEUE. */
-    ovs_be16 len;             /* Len is 16. */
-    ovs_be16 port;            /* Port that queue belongs. Should
-                                 refer to a valid physical port
-                                 (i.e. < OFPP_MAX) or OFPP_IN_PORT. */
-    uint8_t pad[6];           /* Pad for 64-bit alignment. */
-    ovs_be32 queue_id;        /* Where to enqueue the packets. */
-};
-OFP_ASSERT(sizeof(struct ofp10_action_enqueue) == 16);
 
 /* Send packet (controller -> datapath). */
 struct ofp10_packet_out {
@@ -273,8 +233,8 @@ enum ofp10_flow_wildcards {
 struct ofp10_match {
     ovs_be32 wildcards;        /* Wildcard fields. */
     ovs_be16 in_port;          /* Input switch port. */
-    uint8_t dl_src[OFP_ETH_ALEN]; /* Ethernet source address. */
-    uint8_t dl_dst[OFP_ETH_ALEN]; /* Ethernet destination address. */
+    struct eth_addr dl_src;    /* Ethernet source address. */
+    struct eth_addr dl_dst;    /* Ethernet destination address. */
     ovs_be16 dl_vlan;          /* Input VLAN. */
     uint8_t dl_vlan_pcp;       /* Input VLAN priority. */
     uint8_t pad1[1];           /* Align to 64-bits. */
@@ -311,9 +271,9 @@ struct ofp10_flow_mod {
                                      output port.  A value of OFPP_NONE
                                      indicates no restriction. */
     ovs_be16 flags;               /* One of OFPFF_*. */
-    struct ofp_action_header actions[0]; /* The action length is inferred
-                                            from the length field in the
-                                            header. */
+
+    /* Followed by OpenFlow actions whose length is inferred from the length
+     * field in the OpenFlow header. */
 };
 OFP_ASSERT(sizeof(struct ofp10_flow_mod) == 64);
 
@@ -374,7 +334,7 @@ struct ofp10_flow_stats {
     ovs_32aligned_be64 cookie;       /* Opaque controller-issued identifier. */
     ovs_32aligned_be64 packet_count; /* Number of packets in flow. */
     ovs_32aligned_be64 byte_count;   /* Number of bytes in flow. */
-    struct ofp_action_header actions[0]; /* Actions. */
+    /* Followed by OpenFlow actions whose length is inferred from 'length'. */
 };
 OFP_ASSERT(sizeof(struct ofp10_flow_stats) == 88);
 

@@ -52,9 +52,12 @@ struct bond_settings {
     int up_delay;               /* ms before enabling an up slave. */
     int down_delay;             /* ms before disabling a down slave. */
 
-    /* Legacy compatibility. */
-    bool fake_iface;            /* Update fake stats for netdev 'name'? */
     bool lacp_fallback_ab_cfg;  /* Fallback to active-backup on LACP failure. */
+
+    struct eth_addr active_slave_mac;
+                                /* The MAC address of the interface
+                                   that was active during the last
+                                   ovs run. */
 };
 
 /* Program startup. */
@@ -78,9 +81,11 @@ void bond_slave_set_may_enable(struct bond *, void *slave_, bool may_enable);
 
 /* Special MAC learning support for SLB bonding. */
 bool bond_should_send_learning_packets(struct bond *);
-struct ofpbuf *bond_compose_learning_packet(struct bond *,
-                                            const uint8_t eth_src[ETH_ADDR_LEN],
-                                            uint16_t vlan, void **port_aux);
+struct dp_packet *bond_compose_learning_packet(struct bond *,
+                                               const struct eth_addr eth_src,
+                                               uint16_t vlan, void **port_aux);
+bool bond_get_changed_active_slave(const char *name, struct eth_addr *mac,
+                                   bool force);
 
 /* Packet processing. */
 enum bond_verdict {
@@ -89,7 +94,7 @@ enum bond_verdict {
     BV_DROP_IF_MOVED            /* Drop if we've learned a different port. */
 };
 enum bond_verdict bond_check_admissibility(struct bond *, const void *slave_,
-                                           const uint8_t dst[ETH_ADDR_LEN]);
+                                           const struct eth_addr dst);
 void *bond_choose_output_slave(struct bond *, const struct flow *,
                                struct flow_wildcards *, uint16_t vlan);
 

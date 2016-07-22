@@ -15,23 +15,23 @@
  */
 
 #include <config.h>
+#undef NDEBUG
 #include "flow.h"
+#include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include "classifier.h"
-#include "openflow/openflow.h"
-#include "timeval.h"
 #include "ofpbuf.h"
 #include "ofp-print.h"
 #include "ofp-util.h"
-#include "pcap-file.h"
-#include "util.h"
-#include "vlog.h"
+#include "openflow/openflow.h"
 #include "ovstest.h"
-
-#undef NDEBUG
-#include <assert.h>
+#include "dp-packet.h"
+#include "pcap-file.h"
+#include "timeval.h"
+#include "util.h"
+#include "openvswitch/vlog.h"
 
 static void
 test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
@@ -43,10 +43,13 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
     set_program_name(argv[0]);
 
-    flows = stdin;
-    pcap = fdopen(3, "rb");
+    flows = fopen(argv[1], "rb");
+    if (!flows) {
+        ovs_fatal(errno, "failed to open %s", argv[1]);
+    }
+    pcap = fopen(argv[2], "rb");
     if (!pcap) {
-        ovs_fatal(errno, "failed to open fd 3 for reading");
+        ovs_fatal(errno, "failed to open %s", argv[2]);
     }
 
     retval = ovs_pcap_read_header(pcap);
@@ -55,7 +58,7 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     }
 
     while (fread(&expected_match, sizeof expected_match, 1, flows)) {
-        struct ofpbuf *packet;
+        struct dp_packet *packet;
         struct ofp10_match extracted_match;
         struct match match;
         struct flow flow;
@@ -68,7 +71,7 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             ovs_fatal(retval, "error reading pcap file");
         }
 
-        flow_extract(packet, NULL, &flow);
+        flow_extract(packet, &flow);
         flow.in_port.ofp_port = u16_to_ofp(1);
 
         match_wc_init(&match, &flow);
@@ -80,8 +83,8 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             errors++;
             printf("mismatch on packet #%d (1-based).\n", n);
             printf("Packet:\n");
-            ofp_print_packet(stdout, ofpbuf_data(packet), ofpbuf_size(packet));
-            ovs_hex_dump(stdout, ofpbuf_data(packet), ofpbuf_size(packet), 0, true);
+            ofp_print_packet(stdout, dp_packet_data(packet), dp_packet_size(packet));
+            ovs_hex_dump(stdout, dp_packet_data(packet), dp_packet_size(packet), 0, true);
             match_print(&match);
             printf("Expected flow:\n%s\n", exp_s);
             printf("Actually extracted flow:\n%s\n", got_s);
@@ -92,7 +95,7 @@ test_flows_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             free(got_s);
         }
 
-        ofpbuf_delete(packet);
+        dp_packet_delete(packet);
     }
     printf("checked %d packets, %d errors\n", n, errors);
     exit(errors != 0);

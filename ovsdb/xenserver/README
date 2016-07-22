@@ -83,6 +83,7 @@ debugging.  The sources for the extensions are in
 
             * ovs-bugtool-bfd-show
             * ovs-bugtool-cfm-show
+            * ovs-bugtool-fdb-show
             * ovs-bugtool-lacp-show
             * ovs-bugtool-list-dbs
             * ovs-bugtool-ovsdb-dump
@@ -94,6 +95,7 @@ debugging.  The sources for the extensions are in
             * ovs-bugtool-coverage-show
             * ovs-bugtool-memory-show
             * ovs-bugtool-vsctl-show
+            * ovs-bugtool-conntrack-dump
 
     system-configuration/openvswitch.xml
 
@@ -120,6 +122,10 @@ scripts are located in ../utilities/bugtool:
     ovs-bugtool-cfm-show
 
         Script to dump detailed CFM information for all enabled interfaces.
+
+    ovs-bugtool-fdb-show
+
+        Script to collect a summary of learned MACs for each bridge.
 
     ovs-bugtool-lacp-show
 
@@ -162,6 +168,10 @@ scripts are located in ../utilities/bugtool:
     ovs-bugtool-vsctl-show
 
         Script to show a brief overview of the database contents.
+
+    ovs-bugtool-conntrack-dump
+
+        Script to show all the connection entries in the tracker.
 
     ovs-bugtool-daemons-ver
 

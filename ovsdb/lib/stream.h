@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2013 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2013, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,11 +22,12 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include "openvswitch/types.h"
-#include "vlog.h"
 #include "socket-util.h"
+#include "util.h"
 
 struct pstream;
 struct stream;
+struct vlog_module;
 
 void stream_usage(const char *name, bool active, bool passive, bool bootstrap);
 
@@ -65,7 +66,6 @@ void pstream_close(struct pstream *);
 int pstream_accept(struct pstream *, struct stream **);
 int pstream_accept_block(struct pstream *, struct stream **);
 void pstream_wait(struct pstream *);
-int pstream_set_dscp(struct pstream *, uint8_t dscp);
 
 ovs_be16 pstream_get_bound_port(const struct pstream *);
 

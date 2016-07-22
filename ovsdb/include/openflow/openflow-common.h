@@ -50,7 +50,7 @@
 #ifndef OPENFLOW_COMMON_H
 #define OPENFLOW_COMMON_H 1
 
-#include "openvswitch/types.h"
+#include <openvswitch/types.h>
 
 #ifdef SWIG
 #define OFP_ASSERT(EXPR)        /* SWIG can't handle OFP_ASSERT. */
@@ -98,8 +98,13 @@ enum ofp_version {
  *
  *    - ONF_VENDOR_ID is being used within the ONF "extensibility" working
  *      group to identify extensions being proposed for standardization.
+ *
+ * The list is sorted numerically.
  */
 #define OF_VENDOR_ID    0
+#define HPL_VENDOR_ID   0x000004EA /* HP Labs. */
+#define NTR_VENDOR_ID   0x0000154d /* Netronome. */
+#define NTR_COMPAT_VENDOR_ID   0x00001540 /* Incorrect value used in v2.4. */
 #define NX_VENDOR_ID    0x00002320 /* Nicira. */
 #define ONF_VENDOR_ID   0x4f4e4600 /* Open Networking Foundation. */
 
@@ -108,8 +113,6 @@ enum ofp_version {
 
 #define OFP_OLD_PORT  6633
 #define OFP_PORT  6653
-
-#define OFP_ETH_ALEN 6          /* Bytes in an Ethernet address. */
 
 #define OFP_DEFAULT_MISS_SEND_LEN   128
 
@@ -268,7 +271,10 @@ enum ofp_capabilities {
 enum ofp_packet_in_reason {
     OFPR_NO_MATCH,          /* No matching flow. */
     OFPR_ACTION,            /* Action explicitly output to controller. */
-    OFPR_INVALID_TTL        /* Packet has invalid TTL. */,
+    OFPR_INVALID_TTL,       /* Packet has invalid TTL. */
+    OFPR_ACTION_SET,        /* Output to controller in action set */
+    OFPR_GROUP,             /* Output to controller in group bucket */
+    OFPR_PACKET_OUT,        /* Output to controller in packet-out */
     OFPR_N_REASONS
 };
 
@@ -286,82 +292,6 @@ enum ofp_flow_mod_flags {
     OFPFF_CHECK_OVERLAP = 1 << 1,  /* Check for overlapping entries first. */
 };
 
-/* Action header for OFPAT10_VENDOR and OFPAT11_EXPERIMEMNTER.
- * The rest of the body is vendor-defined. */
-struct ofp_action_vendor_header {
-    ovs_be16 type;                  /* OFPAT10_VENDOR. */
-    ovs_be16 len;                   /* Length is a multiple of 8. */
-    ovs_be32 vendor;                /* Vendor ID, which takes the same form
-                                       as in "struct ofp_vendor_header". */
-};
-OFP_ASSERT(sizeof(struct ofp_action_vendor_header) == 8);
-
-/* Action header that is common to all actions.  The length includes the
- * header and any padding used to make the action 64-bit aligned.
- * NB: The length of an action *must* always be a multiple of eight. */
-struct ofp_action_header {
-    ovs_be16 type;                  /* One of OFPAT*. */
-    ovs_be16 len;                   /* Length of action, including this
-                                       header.  This is the length of action,
-                                       including any padding to make it
-                                       64-bit aligned. */
-    uint8_t pad[4];
-};
-OFP_ASSERT(sizeof(struct ofp_action_header) == 8);
-
-/* Action structure for OFPAT10_SET_VLAN_VID and OFPAT11_SET_VLAN_VID. */
-struct ofp_action_vlan_vid {
-    ovs_be16 type;                  /* Type. */
-    ovs_be16 len;                   /* Length is 8. */
-    ovs_be16 vlan_vid;              /* VLAN id. */
-    uint8_t pad[2];
-};
-OFP_ASSERT(sizeof(struct ofp_action_vlan_vid) == 8);
-
-/* Action structure for OFPAT10_SET_VLAN_PCP and OFPAT11_SET_VLAN_PCP. */
-struct ofp_action_vlan_pcp {
-    ovs_be16 type;                  /* Type. */
-    ovs_be16 len;                   /* Length is 8. */
-    uint8_t vlan_pcp;               /* VLAN priority. */
-    uint8_t pad[3];
-};
-OFP_ASSERT(sizeof(struct ofp_action_vlan_pcp) == 8);
-
-/* Action structure for OFPAT10_SET_DL_SRC/DST and OFPAT11_SET_DL_SRC/DST. */
-struct ofp_action_dl_addr {
-    ovs_be16 type;                  /* Type. */
-    ovs_be16 len;                   /* Length is 16. */
-    uint8_t dl_addr[OFP_ETH_ALEN];  /* Ethernet address. */
-    uint8_t pad[6];
-};
-OFP_ASSERT(sizeof(struct ofp_action_dl_addr) == 16);
-
-/* Action structure for OFPAT10_SET_NW_SRC/DST and OFPAT11_SET_NW_SRC/DST. */
-struct ofp_action_nw_addr {
-    ovs_be16 type;                  /* Type. */
-    ovs_be16 len;                   /* Length is 8. */
-    ovs_be32 nw_addr;               /* IP address. */
-};
-OFP_ASSERT(sizeof(struct ofp_action_nw_addr) == 8);
-
-/* Action structure for OFPAT10_SET_NW_TOS and OFPAT11_SET_NW_TOS. */
-struct ofp_action_nw_tos {
-    ovs_be16 type;                  /* Type.. */
-    ovs_be16 len;                   /* Length is 8. */
-    uint8_t nw_tos;                 /* DSCP in high 6 bits, rest ignored. */
-    uint8_t pad[3];
-};
-OFP_ASSERT(sizeof(struct ofp_action_nw_tos) == 8);
-
-/* Action structure for OFPAT10_SET_TP_SRC/DST and OFPAT11_SET_TP_SRC/DST. */
-struct ofp_action_tp_port {
-    ovs_be16 type;                  /* Type. */
-    ovs_be16 len;                   /* Length is 8. */
-    ovs_be16 tp_port;               /* TCP/UDP port. */
-    uint8_t pad[2];
-};
-OFP_ASSERT(sizeof(struct ofp_action_tp_port) == 8);
-
 /* Why was this flow removed? */
 enum ofp_flow_removed_reason {
     OFPRR_IDLE_TIMEOUT,         /* Flow idle time exceeded idle_timeout. */
@@ -370,13 +300,16 @@ enum ofp_flow_removed_reason {
     OFPRR_GROUP_DELETE,         /* Group was removed. */
     OFPRR_METER_DELETE,         /* Meter was removed. */
     OFPRR_EVICTION,             /* Switch eviction to free resources. */
+
+    OVS_OFPRR_NONE              /* OVS internal_use only, keep last!. */
 };
 
 /* What changed about the physical port */
 enum ofp_port_reason {
     OFPPR_ADD,              /* The port was added. */
     OFPPR_DELETE,           /* The port was removed. */
-    OFPPR_MODIFY            /* Some attribute of the port has changed. */
+    OFPPR_MODIFY,           /* Some attribute of the port has changed. */
+    OFPPR_N_REASONS         /* Denotes number of reasons. */
 };
 
 /* A physical port has changed in the datapath */

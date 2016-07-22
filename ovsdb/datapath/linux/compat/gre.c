@@ -17,11 +17,7 @@
  */
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)
-
 #include <linux/kconfig.h>
-#if IS_ENABLED(CONFIG_NET_IPGRE_DEMUX)
-
 #include <linux/module.h>
 #include <linux/if.h>
 #include <linux/if_tunnel.h>
@@ -41,6 +37,11 @@
 #include <net/xfrm.h>
 
 #include "gso.h"
+
+#ifndef HAVE_METADATA_DST
+#if IS_ENABLED(CONFIG_NET_IPGRE_DEMUX)
+
+#ifndef HAVE_GRE_HANDLE_OFFLOADS
 
 #ifndef HAVE_GRE_CISCO_REGISTER
 
@@ -147,6 +148,43 @@ static __sum16 check_checksum(struct sk_buff *skb)
 	return csum;
 }
 
+#define ip_gre_calc_hlen rpl_ip_gre_calc_hlen
+static int ip_gre_calc_hlen(__be16 o_flags)
+{
+	int addend = 4;
+
+	if (o_flags & TUNNEL_CSUM)
+		addend += 4;
+	if (o_flags & TUNNEL_KEY)
+		addend += 4;
+	if (o_flags & TUNNEL_SEQ)
+		addend += 4;
+	return addend;
+}
+
+#define gre_flags_to_tnl_flags rpl_gre_flags_to_tnl_flags
+static __be16 gre_flags_to_tnl_flags(__be16 flags)
+{
+	__be16 tflags = 0;
+
+	if (flags & GRE_CSUM)
+		tflags |= TUNNEL_CSUM;
+	if (flags & GRE_ROUTING)
+		tflags |= TUNNEL_ROUTING;
+	if (flags & GRE_KEY)
+		tflags |= TUNNEL_KEY;
+	if (flags & GRE_SEQ)
+		tflags |= TUNNEL_SEQ;
+	if (flags & GRE_STRICT)
+		tflags |= TUNNEL_STRICT;
+	if (flags & GRE_REC)
+		tflags |= TUNNEL_REC;
+	if (flags & GRE_VERSION)
+		tflags |= TUNNEL_VERSION;
+
+	return tflags;
+}
+
 static int parse_gre_header(struct sk_buff *skb, struct tnl_ptk_info *tpi,
 			    bool *csum_err)
 {
@@ -236,7 +274,7 @@ static const struct gre_protocol ipgre_protocol = {
 	.handler	=	gre_cisco_rcv,
 };
 
-int gre_cisco_register(struct gre_cisco_protocol *newp)
+int rpl_gre_cisco_register(struct gre_cisco_protocol *newp)
 {
 	int err;
 
@@ -250,8 +288,9 @@ int gre_cisco_register(struct gre_cisco_protocol *newp)
 	return (cmpxchg((struct gre_cisco_protocol **)&gre_cisco_proto, NULL, newp) == NULL) ?
 		0 : -EBUSY;
 }
+EXPORT_SYMBOL_GPL(rpl_gre_cisco_register);
 
-int gre_cisco_unregister(struct gre_cisco_protocol *proto)
+int rpl_gre_cisco_unregister(struct gre_cisco_protocol *proto)
 {
 	int ret;
 
@@ -265,83 +304,10 @@ int gre_cisco_unregister(struct gre_cisco_protocol *proto)
 	ret = gre_del_protocol(&ipgre_protocol, GREPROTO_CISCO);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(rpl_gre_cisco_unregister);
 
 #endif /* !HAVE_GRE_CISCO_REGISTER */
-
-/* GRE TX side. */
-static void gre_csum_fix(struct sk_buff *skb)
-{
-	struct gre_base_hdr *greh;
-	__be32 *options;
-	int gre_offset = skb_transport_offset(skb);
-
-	greh = (struct gre_base_hdr *)skb_transport_header(skb);
-	options = ((__be32 *)greh + 1);
-
-	*options = 0;
-	*(__sum16 *)options = csum_fold(skb_checksum(skb, gre_offset,
-						     skb->len - gre_offset, 0));
-}
-
-struct sk_buff *gre_handle_offloads(struct sk_buff *skb, bool gre_csum)
-{
-	int err;
-
-	skb_reset_inner_headers(skb);
-
-	if (skb_is_gso(skb)) {
-		if (gre_csum)
-			OVS_GSO_CB(skb)->fix_segment = gre_csum_fix;
-	} else {
-		if (skb->ip_summed == CHECKSUM_PARTIAL && gre_csum) {
-			err = skb_checksum_help(skb);
-			if (err)
-				goto error;
-
-		} else if (skb->ip_summed != CHECKSUM_PARTIAL)
-			skb->ip_summed = CHECKSUM_NONE;
-	}
-	return skb;
-error:
-	kfree_skb(skb);
-	return ERR_PTR(err);
-}
-
-static bool is_gre_gso(struct sk_buff *skb)
-{
-	return skb_is_gso(skb);
-}
-
-void gre_build_header(struct sk_buff *skb, const struct tnl_ptk_info *tpi,
-		      int hdr_len)
-{
-	struct gre_base_hdr *greh;
-
-	__skb_push(skb, hdr_len);
-
-	greh = (struct gre_base_hdr *)skb->data;
-	greh->flags = tnl_flags_to_gre_flags(tpi->flags);
-	greh->protocol = tpi->proto;
-
-	if (tpi->flags & (TUNNEL_KEY | TUNNEL_CSUM | TUNNEL_SEQ)) {
-		__be32 *ptr = (__be32 *)(((u8 *)greh) + hdr_len - 4);
-
-		if (tpi->flags & TUNNEL_SEQ) {
-			*ptr = tpi->seq;
-			ptr--;
-		}
-		if (tpi->flags & TUNNEL_KEY) {
-			*ptr = tpi->key;
-			ptr--;
-		}
-		if (tpi->flags & TUNNEL_CSUM && !is_gre_gso(skb)) {
-			*ptr = 0;
-			*(__sum16 *)ptr = csum_fold(skb_checksum(skb, 0,
-						skb->len, 0));
-		}
-	}
-}
+#endif
 
 #endif /* CONFIG_NET_IPGRE_DEMUX */
-
-#endif /* 3.12 */
+#endif /* HAVE_METADATA_DST */

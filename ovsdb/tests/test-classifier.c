@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,26 +26,30 @@
  */
 
 #include <config.h>
+#undef NDEBUG
+#include "classifier.h"
+#include <assert.h>
 #include <errno.h>
 #include <limits.h>
 #include "byte-order.h"
+#include "classifier-private.h"
 #include "command-line.h"
+#include "fatal-signal.h"
 #include "flow.h"
 #include "ofp-util.h"
+#include "ovstest.h"
+#include "ovs-atomic.h"
+#include "ovs-thread.h"
 #include "packets.h"
 #include "random.h"
+#include "timeval.h"
 #include "unaligned.h"
-#include "ovstest.h"
-#undef NDEBUG
-#include <assert.h>
+#include "util.h"
 
-/* We need access to classifier internal definitions to be able to fully
- * test them.  The alternative would be to expose them all in the classifier
- * API. */
-#include "classifier.c"
+static bool versioned = false;
 
 /* Fields in a rule. */
-#define CLS_FIELDS                                                  \
+#define CLS_FIELDS                        \
     /*        struct flow    all-caps */  \
     /*        member name    name     */  \
     /*        -----------    -------- */  \
@@ -90,6 +94,7 @@ static const struct cls_field cls_fields[CLS_N_FIELDS] = {
 };
 
 struct test_rule {
+    struct ovs_list list_node;
     int aux;                    /* Auxiliary data. */
     struct cls_rule cls_rule;   /* Classifier rule data. */
 };
@@ -109,8 +114,7 @@ test_rule_destroy(struct test_rule *rule)
     }
 }
 
-static struct test_rule *make_rule(int wc_fields, unsigned int priority,
-                                   int value_pat);
+static struct test_rule *make_rule(int wc_fields, int priority, int value_pat);
 static void free_rule(struct test_rule *);
 static struct test_rule *clone_rule(const struct test_rule *);
 
@@ -157,7 +161,7 @@ tcls_insert(struct tcls *tcls, const struct test_rule *rule)
         const struct cls_rule *pos = &tcls->rules[i]->cls_rule;
         if (cls_rule_equal(pos, &rule->cls_rule)) {
             /* Exact match. */
-            free_rule(tcls->rules[i]);
+            ovsrcu_postpone(free_rule, tcls->rules[i]);
             tcls->rules[i] = clone_rule(rule);
             return tcls->rules[i];
         } else if (pos->priority < rule->cls_rule.priority) {
@@ -280,11 +284,11 @@ tcls_delete_matches(struct tcls *cls, const struct cls_rule *target)
 
     for (i = 0; i < cls->n_rules; ) {
         struct test_rule *pos = cls->rules[i];
-        if (!minimask_has_extra(&pos->cls_rule.match.mask,
-                                &target->match.mask)) {
+        if (!minimask_has_extra(pos->cls_rule.match.mask,
+                                target->match.mask)) {
             struct flow flow;
 
-            miniflow_expand(&pos->cls_rule.match.flow, &flow);
+            miniflow_expand(pos->cls_rule.match.flow, &flow);
             if (match(target, &flow)) {
                 tcls_remove(cls, pos);
                 continue;
@@ -311,10 +315,12 @@ static ovs_be16 dl_type_values[]
 static ovs_be16 tp_src_values[] = { CONSTANT_HTONS(49362),
                                     CONSTANT_HTONS(80) };
 static ovs_be16 tp_dst_values[] = { CONSTANT_HTONS(6667), CONSTANT_HTONS(22) };
-static uint8_t dl_src_values[][6] = { { 0x00, 0x02, 0xe3, 0x0f, 0x80, 0xa4 },
-                                      { 0x5e, 0x33, 0x7f, 0x5f, 0x1e, 0x99 } };
-static uint8_t dl_dst_values[][6] = { { 0x4a, 0x27, 0x71, 0xae, 0x64, 0xc1 },
-                                      { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } };
+static struct eth_addr dl_src_values[] = {
+    { { { 0x00, 0x02, 0xe3, 0x0f, 0x80, 0xa4 } } },
+    { { { 0x5e, 0x33, 0x7f, 0x5f, 0x1e, 0x99 } } } };
+static struct eth_addr dl_dst_values[] = {
+    { { { 0x4a, 0x27, 0x71, 0xae, 0x64, 0xc1 } } },
+    { { { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } } } };
 static uint8_t nw_proto_values[] = { IPPROTO_TCP, IPPROTO_ICMP };
 static uint8_t nw_dscp_values[] = { 48, 0 };
 
@@ -335,11 +341,11 @@ init_values(void)
     values[CLS_F_IDX_VLAN_TCI][0] = &vlan_tci_values[0];
     values[CLS_F_IDX_VLAN_TCI][1] = &vlan_tci_values[1];
 
-    values[CLS_F_IDX_DL_SRC][0] = dl_src_values[0];
-    values[CLS_F_IDX_DL_SRC][1] = dl_src_values[1];
+    values[CLS_F_IDX_DL_SRC][0] = &dl_src_values[0];
+    values[CLS_F_IDX_DL_SRC][1] = &dl_src_values[1];
 
-    values[CLS_F_IDX_DL_DST][0] = dl_dst_values[0];
-    values[CLS_F_IDX_DL_DST][1] = dl_dst_values[1];
+    values[CLS_F_IDX_DL_DST][0] = &dl_dst_values[0];
+    values[CLS_F_IDX_DL_DST][1] = &dl_dst_values[1];
 
     values[CLS_F_IDX_DL_TYPE][0] = &dl_type_values[0];
     values[CLS_F_IDX_DL_TYPE][1] = &dl_type_values[1];
@@ -399,15 +405,15 @@ get_value(unsigned int *x, unsigned n_values)
 }
 
 static void
-compare_classifiers(struct classifier *cls, struct tcls *tcls)
-    OVS_REQ_RDLOCK(cls->rwlock)
+compare_classifiers(struct classifier *cls, size_t n_invisible_rules,
+                    cls_version_t version, struct tcls *tcls)
 {
     static const int confidence = 500;
     unsigned int i;
 
-    assert(classifier_count(cls) == tcls->n_rules);
+    assert(classifier_count(cls) == tcls->n_rules + n_invisible_rules);
     for (i = 0; i < confidence; i++) {
-        struct cls_rule *cr0, *cr1, *cr2;
+        const struct cls_rule *cr0, *cr1, *cr2;
         struct flow flow;
         struct flow_wildcards wc;
         unsigned int x;
@@ -425,14 +431,15 @@ compare_classifiers(struct classifier *cls, struct tcls *tcls)
         flow.dl_type = dl_type_values[get_value(&x, N_DL_TYPE_VALUES)];
         flow.tp_src = tp_src_values[get_value(&x, N_TP_SRC_VALUES)];
         flow.tp_dst = tp_dst_values[get_value(&x, N_TP_DST_VALUES)];
-        memcpy(flow.dl_src, dl_src_values[get_value(&x, N_DL_SRC_VALUES)],
-               ETH_ADDR_LEN);
-        memcpy(flow.dl_dst, dl_dst_values[get_value(&x, N_DL_DST_VALUES)],
-               ETH_ADDR_LEN);
+        flow.dl_src = dl_src_values[get_value(&x, N_DL_SRC_VALUES)];
+        flow.dl_dst = dl_dst_values[get_value(&x, N_DL_DST_VALUES)];
         flow.nw_proto = nw_proto_values[get_value(&x, N_NW_PROTO_VALUES)];
         flow.nw_tos = nw_dscp_values[get_value(&x, N_NW_DSCP_VALUES)];
 
-        cr0 = classifier_lookup(cls, &flow, &wc);
+        /* This assertion is here to suppress a GCC 4.9 array-bounds warning */
+        ovs_assert(cls->n_tries <= CLS_MAX_TRIES);
+
+        cr0 = classifier_lookup(cls, version, &flow, &wc);
         cr1 = tcls_lookup(tcls, &flow);
         assert((cr0 == NULL) == (cr1 == NULL));
         if (cr0 != NULL) {
@@ -441,8 +448,12 @@ compare_classifiers(struct classifier *cls, struct tcls *tcls)
 
             assert(cls_rule_equal(cr0, cr1));
             assert(tr0->aux == tr1->aux);
+
+            /* Make sure the rule should have been visible. */
+            assert(cr0->cls_match);
+            assert(cls_match_visible_in_version(cr0->cls_match, version));
         }
-        cr2 = classifier_lookup(cls, &flow, NULL);
+        cr2 = classifier_lookup(cls, version, &flow, NULL);
         assert(cr2 == cr0);
     }
 }
@@ -450,80 +461,207 @@ compare_classifiers(struct classifier *cls, struct tcls *tcls)
 static void
 destroy_classifier(struct classifier *cls)
 {
-    struct test_rule *rule, *next_rule;
-    struct cls_cursor cursor;
+    struct test_rule *rule;
 
-    fat_rwlock_wrlock(&cls->rwlock);
-    cls_cursor_init(&cursor, cls, NULL);
-    CLS_CURSOR_FOR_EACH_SAFE (rule, next_rule, cls_rule, &cursor) {
-        classifier_remove(cls, &rule->cls_rule);
-        free_rule(rule);
+    classifier_defer(cls);
+    CLS_FOR_EACH (rule, cls_rule, cls) {
+        if (classifier_remove(cls, &rule->cls_rule)) {
+            ovsrcu_postpone(free_rule, rule);
+        }
     }
-    fat_rwlock_unlock(&cls->rwlock);
     classifier_destroy(cls);
 }
 
 static void
+pvector_verify(const struct pvector *pvec)
+{
+    void *ptr OVS_UNUSED;
+    int prev_priority = INT_MAX;
+
+    PVECTOR_FOR_EACH (ptr, pvec) {
+        int priority = cursor__.vector[cursor__.entry_idx].priority;
+        if (priority > prev_priority) {
+            ovs_abort(0, "Priority vector is out of order (%u > %u)",
+                      priority, prev_priority);
+        }
+        prev_priority = priority;
+    }
+}
+
+static unsigned int
+trie_verify(const rcu_trie_ptr *trie, unsigned int ofs, unsigned int n_bits)
+{
+    const struct trie_node *node = ovsrcu_get(struct trie_node *, trie);
+
+    if (node) {
+        assert(node->n_rules == 0 || node->n_bits > 0);
+        ofs += node->n_bits;
+        assert((ofs > 0 || (ofs == 0 && node->n_bits == 0)) && ofs <= n_bits);
+
+        return node->n_rules
+            + trie_verify(&node->edges[0], ofs, n_bits)
+            + trie_verify(&node->edges[1], ofs, n_bits);
+    }
+    return 0;
+}
+
+static void
+verify_tries(struct classifier *cls)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
+{
+    unsigned int n_rules = 0;
+    int i;
+
+    for (i = 0; i < cls->n_tries; i++) {
+        n_rules += trie_verify(&cls->tries[i].root, 0,
+                               cls->tries[i].field->n_bits);
+    }
+    assert(n_rules <= cls->n_rules);
+}
+
+static void
 check_tables(const struct classifier *cls, int n_tables, int n_rules,
-             int n_dups) OVS_REQ_RDLOCK(cls->rwlock)
+             int n_dups, int n_invisible, cls_version_t version)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     const struct cls_subtable *table;
     struct test_rule *test_rule;
-    struct cls_cursor cursor;
     int found_tables = 0;
+    int found_tables_with_visible_rules = 0;
     int found_rules = 0;
     int found_dups = 0;
+    int found_invisible = 0;
+    int found_visible_but_removable = 0;
     int found_rules2 = 0;
 
-    HMAP_FOR_EACH (table, hmap_node, &cls->cls->subtables) {
+    pvector_verify(&cls->subtables);
+    CMAP_FOR_EACH (table, cmap_node, &cls->subtables_map) {
         const struct cls_match *head;
-        unsigned int max_priority = 0;
+        int max_priority = INT_MIN;
         unsigned int max_count = 0;
+        bool found = false;
+        bool found_visible_rules = false;
+        const struct cls_subtable *iter;
 
-        assert(!hmap_is_empty(&table->rules));
+        /* Locate the subtable from 'subtables'. */
+        PVECTOR_FOR_EACH (iter, &cls->subtables) {
+            if (iter == table) {
+                if (found) {
+                    ovs_abort(0, "Subtable %p duplicated in 'subtables'.",
+                              table);
+                }
+                found = true;
+            }
+        }
+        if (!found) {
+            ovs_abort(0, "Subtable %p not found from 'subtables'.", table);
+        }
+
+        assert(!cmap_is_empty(&table->rules));
+        assert(trie_verify(&table->ports_trie, 0, table->ports_mask_len)
+               == (table->ports_mask_len ? cmap_count(&table->rules) : 0));
 
         found_tables++;
-        HMAP_FOR_EACH (head, hmap_node, &table->rules) {
-            unsigned int prev_priority = UINT_MAX;
-            const struct cls_match *rule;
+
+        CMAP_FOR_EACH (head, cmap_node, &table->rules) {
+            int prev_priority = INT_MAX;
+            cls_version_t prev_version = 0;
+            const struct cls_match *rule, *prev;
+            bool found_visible_rules_in_list = false;
+
+            assert(head->priority <= table->max_priority);
 
             if (head->priority > max_priority) {
                 max_priority = head->priority;
-                max_count = 1;
-            } else if (head->priority == max_priority) {
-                ++max_count;
+                max_count = 0;
             }
 
-            found_rules++;
-            LIST_FOR_EACH (rule, list, &head->list) {
-                assert(rule->priority < prev_priority);
-                assert(rule->priority <= table->max_priority);
+            FOR_EACH_RULE_IN_LIST_PROTECTED(rule, prev, head) {
+                cls_version_t rule_version;
+                const struct cls_rule *found_rule;
+
+                /* Priority may not increase. */
+                assert(rule->priority <= prev_priority);
+
+                if (rule->priority == max_priority) {
+                    ++max_count;
+                }
+
+                /* Count invisible rules and visible duplicates. */
+                if (!cls_match_visible_in_version(rule, version)) {
+                    found_invisible++;
+                } else {
+                    if (cls_match_is_eventually_invisible(rule)) {
+                        found_visible_but_removable++;
+                    }
+                    if (found_visible_rules_in_list) {
+                        found_dups++;
+                    }
+                    found_visible_rules_in_list = true;
+                    found_visible_rules = true;
+                }
+
+                /* Rule must be visible in the version it was inserted. */
+                rule_version = rule->add_version;
+                assert(cls_match_visible_in_version(rule, rule_version));
+
+                /* We should always find the latest version of the rule,
+                 * unless all rules have been marked for removal.
+                 * Later versions must always be later in the list. */
+                found_rule = classifier_find_rule_exactly(cls, rule->cls_rule,
+                                                          rule_version);
+                if (found_rule && found_rule != rule->cls_rule) {
+
+                    assert(found_rule->priority == rule->priority);
+
+                    /* Found rule may not have a lower version. */
+                    assert(found_rule->cls_match->add_version >= rule_version);
+
+                    /* This rule must not be visible in the found rule's
+                     * version. */
+                    assert(!cls_match_visible_in_version(
+                               rule, found_rule->cls_match->add_version));
+                }
+
+                if (rule->priority == prev_priority) {
+                    /* Exact duplicate rule may not have a lower version. */
+                    assert(rule_version >= prev_version);
+
+                    /* Previous rule must not be visible in rule's version. */
+                    assert(!cls_match_visible_in_version(prev, rule_version));
+                }
 
                 prev_priority = rule->priority;
+                prev_version = rule_version;
                 found_rules++;
-                found_dups++;
-                assert(classifier_find_rule_exactly(cls, rule->cls_rule)
-                       == rule->cls_rule);
             }
         }
+
+        if (found_visible_rules) {
+            found_tables_with_visible_rules++;
+        }
+
         assert(table->max_priority == max_priority);
         assert(table->max_count == max_count);
     }
 
-    assert(found_tables == hmap_count(&cls->cls->subtables));
-    assert(n_tables == -1 || n_tables == hmap_count(&cls->cls->subtables));
-    assert(n_rules == -1 || found_rules == n_rules);
+    assert(found_tables == cmap_count(&cls->subtables_map));
+    assert(found_tables == pvector_count(&cls->subtables));
+    assert(n_tables == -1 || n_tables == found_tables_with_visible_rules);
+    assert(n_rules == -1 || found_rules == n_rules + found_invisible);
     assert(n_dups == -1 || found_dups == n_dups);
+    assert(found_invisible == n_invisible);
 
-    cls_cursor_init(&cursor, cls, NULL);
-    CLS_CURSOR_FOR_EACH (test_rule, cls_rule, &cursor) {
+    CLS_FOR_EACH (test_rule, cls_rule, cls) {
         found_rules2++;
     }
-    assert(found_rules == found_rules2);
+    /* Iteration does not see removable rules. */
+    assert(found_rules
+           == found_rules2 + found_visible_but_removable + found_invisible);
 }
 
 static struct test_rule *
-make_rule(int wc_fields, unsigned int priority, int value_pat)
+make_rule(int wc_fields, int priority, int value_pat)
 {
     const struct cls_field *f;
     struct test_rule *rule;
@@ -545,9 +683,9 @@ make_rule(int wc_fields, unsigned int priority, int value_pat)
         } else if (f_idx == CLS_F_IDX_TP_DST) {
             match.wc.masks.tp_dst = OVS_BE16_MAX;
         } else if (f_idx == CLS_F_IDX_DL_SRC) {
-            memset(match.wc.masks.dl_src, 0xff, ETH_ADDR_LEN);
+            WC_MASK_FIELD(&match.wc, dl_src);
         } else if (f_idx == CLS_F_IDX_DL_DST) {
-            memset(match.wc.masks.dl_dst, 0xff, ETH_ADDR_LEN);
+            WC_MASK_FIELD(&match.wc, dl_dst);
         } else if (f_idx == CLS_F_IDX_VLAN_TCI) {
             match.wc.masks.vlan_tci = OVS_BE16_MAX;
         } else if (f_idx == CLS_F_IDX_TUN_ID) {
@@ -568,7 +706,10 @@ make_rule(int wc_fields, unsigned int priority, int value_pat)
     }
 
     rule = xzalloc(sizeof *rule);
-    cls_rule_init(&rule->cls_rule, &match, wc_fields ? priority : UINT_MAX);
+    cls_rule_init(&rule->cls_rule, &match, wc_fields
+                  ? (priority == INT_MIN ? priority + 1 :
+                     priority == INT_MAX ? priority - 1 : priority)
+                  : 0);
     return rule;
 }
 
@@ -591,11 +732,11 @@ free_rule(struct test_rule *rule)
 }
 
 static void
-shuffle(unsigned int *p, size_t n)
+shuffle(int *p, size_t n)
 {
     for (; n > 1; n--, p++) {
-        unsigned int *q = &p[random_range(n)];
-        unsigned int tmp = *p;
+        int *q = &p[random_range(n)];
+        int tmp = *p;
         *p = *q;
         *q = tmp;
     }
@@ -618,35 +759,41 @@ static enum mf_field_id trie_fields[2] = {
     MFF_IPV4_DST, MFF_IPV4_SRC
 };
 
+static void
+set_prefix_fields(struct classifier *cls)
+{
+    verify_tries(cls);
+    classifier_set_prefix_fields(cls, trie_fields, ARRAY_SIZE(trie_fields));
+    verify_tries(cls);
+}
+
 /* Tests an empty classifier. */
 static void
-test_empty(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_empty(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct classifier cls;
     struct tcls tcls;
 
-    classifier_init(&cls, flow_segment_u32s);
-    fat_rwlock_wrlock(&cls.rwlock);
-    classifier_set_prefix_fields(&cls, trie_fields, ARRAY_SIZE(trie_fields));
+    classifier_init(&cls, flow_segment_u64s);
+    set_prefix_fields(&cls);
     tcls_init(&tcls);
     assert(classifier_is_empty(&cls));
     assert(tcls_is_empty(&tcls));
-    compare_classifiers(&cls, &tcls);
-    fat_rwlock_unlock(&cls.rwlock);
+    compare_classifiers(&cls, 0, CLS_MIN_VERSION, &tcls);
     classifier_destroy(&cls);
     tcls_destroy(&tcls);
 }
 
 /* Destroys a null classifier. */
 static void
-test_destroy_null(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_destroy_null(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     classifier_destroy(NULL);
 }
 
 /* Tests classification with one rule at a time. */
 static void
-test_single_rule(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_single_rule(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     unsigned int wc_fields;     /* Hilarious. */
 
@@ -657,26 +804,22 @@ test_single_rule(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
         rule = make_rule(wc_fields,
                          hash_bytes(&wc_fields, sizeof wc_fields, 0), 0);
-
-        classifier_init(&cls, flow_segment_u32s);
-        fat_rwlock_wrlock(&cls.rwlock);
-        classifier_set_prefix_fields(&cls, trie_fields,
-                                     ARRAY_SIZE(trie_fields));
+        classifier_init(&cls, flow_segment_u64s);
+        set_prefix_fields(&cls);
         tcls_init(&tcls);
-
         tcls_rule = tcls_insert(&tcls, rule);
-        classifier_insert(&cls, &rule->cls_rule);
-        check_tables(&cls, 1, 1, 0);
-        compare_classifiers(&cls, &tcls);
+
+        classifier_insert(&cls, &rule->cls_rule, CLS_MIN_VERSION, NULL, 0);
+        compare_classifiers(&cls, 0, CLS_MIN_VERSION, &tcls);
+        check_tables(&cls, 1, 1, 0, 0, CLS_MIN_VERSION);
 
         classifier_remove(&cls, &rule->cls_rule);
         tcls_remove(&tcls, tcls_rule);
         assert(classifier_is_empty(&cls));
         assert(tcls_is_empty(&tcls));
-        compare_classifiers(&cls, &tcls);
+        compare_classifiers(&cls, 0, CLS_MIN_VERSION, &tcls);
 
-        free_rule(rule);
-        fat_rwlock_unlock(&cls.rwlock);
+        ovsrcu_postpone(free_rule, rule);
         classifier_destroy(&cls);
         tcls_destroy(&tcls);
     }
@@ -684,7 +827,7 @@ test_single_rule(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
 /* Tests replacing one rule by another. */
 static void
-test_rule_replacement(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_rule_replacement(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     unsigned int wc_fields;
 
@@ -699,26 +842,28 @@ test_rule_replacement(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
         rule2->aux += 5;
         rule2->aux += 5;
 
-        classifier_init(&cls, flow_segment_u32s);
-        fat_rwlock_wrlock(&cls.rwlock);
-        classifier_set_prefix_fields(&cls, trie_fields,
-                                     ARRAY_SIZE(trie_fields));
+        classifier_init(&cls, flow_segment_u64s);
+        set_prefix_fields(&cls);
         tcls_init(&tcls);
         tcls_insert(&tcls, rule1);
-        classifier_insert(&cls, &rule1->cls_rule);
-        check_tables(&cls, 1, 1, 0);
-        compare_classifiers(&cls, &tcls);
+        classifier_insert(&cls, &rule1->cls_rule, CLS_MIN_VERSION, NULL, 0);
+        compare_classifiers(&cls, 0, CLS_MIN_VERSION, &tcls);
+        check_tables(&cls, 1, 1, 0, 0, CLS_MIN_VERSION);
         tcls_destroy(&tcls);
 
         tcls_init(&tcls);
         tcls_insert(&tcls, rule2);
+
         assert(test_rule_from_cls_rule(
-                   classifier_replace(&cls, &rule2->cls_rule)) == rule1);
-        free_rule(rule1);
-        check_tables(&cls, 1, 1, 0);
-        compare_classifiers(&cls, &tcls);
+                   classifier_replace(&cls, &rule2->cls_rule, CLS_MIN_VERSION,
+                                      NULL, 0)) == rule1);
+        ovsrcu_postpone(free_rule, rule1);
+        compare_classifiers(&cls, 0, CLS_MIN_VERSION, &tcls);
+        check_tables(&cls, 1, 1, 0, 0, CLS_MIN_VERSION);
+        classifier_defer(&cls);
+        classifier_remove(&cls, &rule2->cls_rule);
+
         tcls_destroy(&tcls);
-        fat_rwlock_unlock(&cls.rwlock);
         destroy_classifier(&cls);
     }
 }
@@ -777,7 +922,7 @@ next_permutation(int *a, int n)
 
 /* Tests classification with rules that have the same matching criteria. */
 static void
-test_many_rules_in_one_list (int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_many_rules_in_one_list (struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     enum { N_RULES = 3 };
     int n_pris;
@@ -804,6 +949,8 @@ test_many_rules_in_one_list (int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             int pri_rules[N_RULES];
             struct classifier cls;
             struct tcls tcls;
+            cls_version_t version = CLS_MIN_VERSION;
+            size_t n_invisible_rules = 0;
 
             n_permutations++;
 
@@ -813,22 +960,41 @@ test_many_rules_in_one_list (int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
                 pri_rules[i] = -1;
             }
 
-            classifier_init(&cls, flow_segment_u32s);
-            fat_rwlock_wrlock(&cls.rwlock);
-            classifier_set_prefix_fields(&cls, trie_fields,
-                                         ARRAY_SIZE(trie_fields));
+            classifier_init(&cls, flow_segment_u64s);
+            set_prefix_fields(&cls);
             tcls_init(&tcls);
 
             for (i = 0; i < ARRAY_SIZE(ops); i++) {
+                struct test_rule *displaced_rule = NULL;
+                struct cls_rule *removable_rule = NULL;
                 int j = ops[i];
                 int m, n;
 
                 if (!tcls_rules[j]) {
-                    struct test_rule *displaced_rule;
-
                     tcls_rules[j] = tcls_insert(&tcls, rules[j]);
-                    displaced_rule = test_rule_from_cls_rule(
-                        classifier_replace(&cls, &rules[j]->cls_rule));
+                    if (versioned) {
+                        /* Insert the new rule in the next version. */
+                        ++version;
+
+                        displaced_rule = test_rule_from_cls_rule(
+                            classifier_find_rule_exactly(&cls,
+                                                         &rules[j]->cls_rule,
+                                                         version));
+                        if (displaced_rule) {
+                            /* Mark the old rule for removal after the current
+                             * version. */
+                            cls_rule_make_invisible_in_version(
+                                &displaced_rule->cls_rule, version);
+                            n_invisible_rules++;
+                            removable_rule = &displaced_rule->cls_rule;
+                        }
+                        classifier_insert(&cls, &rules[j]->cls_rule, version,
+                                          NULL, 0);
+                    } else {
+                        displaced_rule = test_rule_from_cls_rule(
+                            classifier_replace(&cls, &rules[j]->cls_rule,
+                                               version, NULL, 0));
+                    }
                     if (pri_rules[pris[j]] >= 0) {
                         int k = pri_rules[pris[j]];
                         assert(displaced_rule != NULL);
@@ -840,29 +1006,45 @@ test_many_rules_in_one_list (int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
                     }
                     pri_rules[pris[j]] = j;
                 } else {
-                    classifier_remove(&cls, &rules[j]->cls_rule);
+                    if (versioned) {
+                        /* Mark the rule for removal after the current
+                         * version. */
+                        ++version;
+                        cls_rule_make_invisible_in_version(
+                            &rules[j]->cls_rule, version);
+                        n_invisible_rules++;
+                        removable_rule = &rules[j]->cls_rule;
+                    } else {
+                        classifier_remove(&cls, &rules[j]->cls_rule);
+                    }
                     tcls_remove(&tcls, tcls_rules[j]);
                     tcls_rules[j] = NULL;
                     pri_rules[pris[j]] = -1;
                 }
-
+                compare_classifiers(&cls, n_invisible_rules, version, &tcls);
                 n = 0;
                 for (m = 0; m < N_RULES; m++) {
                     n += tcls_rules[m] != NULL;
                 }
-                check_tables(&cls, n > 0, n, n - 1);
+                check_tables(&cls, n > 0, n, n - 1, n_invisible_rules,
+                             version);
 
-                compare_classifiers(&cls, &tcls);
-            }
-
-            for (i = 0; i < N_RULES; i++) {
-                if (rules[i]->cls_rule.cls_match) {
-                    classifier_remove(&cls, &rules[i]->cls_rule);
+                if (versioned && removable_rule) {
+                    /* Removable rule is no longer visible. */
+                    assert(removable_rule->cls_match);
+                    assert(!cls_match_visible_in_version(
+                               removable_rule->cls_match, version));
+                    classifier_remove(&cls, removable_rule);
+                    n_invisible_rules--;
                 }
-                free_rule(rules[i]);
             }
 
-            fat_rwlock_unlock(&cls.rwlock);
+            classifier_defer(&cls);
+            for (i = 0; i < N_RULES; i++) {
+                if (classifier_remove(&cls, &rules[i]->cls_rule)) {
+                    ovsrcu_postpone(free_rule, rules[i]);
+                }
+            }
             classifier_destroy(&cls);
             tcls_destroy(&tcls);
         } while (next_permutation(ops, ARRAY_SIZE(ops)));
@@ -900,7 +1082,7 @@ array_contains(int *array, int n, int value)
 /* Tests classification with two rules at a time that fall into the same
  * table but different lists. */
 static void
-test_many_rules_in_one_table(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_many_rules_in_one_table(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int iteration;
 
@@ -910,6 +1092,8 @@ test_many_rules_in_one_table(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
         struct test_rule *tcls_rules[N_RULES];
         struct classifier cls;
         struct tcls tcls;
+        cls_version_t version = CLS_MIN_VERSION;
+        size_t n_invisible_rules = 0;
         int value_pats[N_RULES];
         int value_mask;
         int wcf;
@@ -920,37 +1104,57 @@ test_many_rules_in_one_table(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
             value_mask = ~wcf & ((1u << CLS_N_FIELDS) - 1);
         } while ((1 << count_ones(value_mask)) < N_RULES);
 
-        classifier_init(&cls, flow_segment_u32s);
-        fat_rwlock_wrlock(&cls.rwlock);
-        classifier_set_prefix_fields(&cls, trie_fields,
-                                     ARRAY_SIZE(trie_fields));
+        classifier_init(&cls, flow_segment_u64s);
+        set_prefix_fields(&cls);
         tcls_init(&tcls);
 
         for (i = 0; i < N_RULES; i++) {
-            unsigned int priority = random_uint32();
+            int priority = random_range(INT_MAX);
 
             do {
                 value_pats[i] = random_uint32() & value_mask;
             } while (array_contains(value_pats, i, value_pats[i]));
 
+            ++version;
             rules[i] = make_rule(wcf, priority, value_pats[i]);
             tcls_rules[i] = tcls_insert(&tcls, rules[i]);
-            classifier_insert(&cls, &rules[i]->cls_rule);
 
-            check_tables(&cls, 1, i + 1, 0);
-            compare_classifiers(&cls, &tcls);
+            classifier_insert(&cls, &rules[i]->cls_rule, version, NULL, 0);
+            compare_classifiers(&cls, n_invisible_rules, version, &tcls);
+
+            check_tables(&cls, 1, i + 1, 0, n_invisible_rules, version);
         }
 
         for (i = 0; i < N_RULES; i++) {
             tcls_remove(&tcls, tcls_rules[i]);
-            classifier_remove(&cls, &rules[i]->cls_rule);
-            free_rule(rules[i]);
-
-            check_tables(&cls, i < N_RULES - 1, N_RULES - (i + 1), 0);
-            compare_classifiers(&cls, &tcls);
+            if (versioned) {
+                /* Mark the rule for removal after the current version. */
+                ++version;
+                cls_rule_make_invisible_in_version(&rules[i]->cls_rule,
+                                                   version);
+                n_invisible_rules++;
+            } else {
+                classifier_remove(&cls, &rules[i]->cls_rule);
+            }
+            compare_classifiers(&cls, n_invisible_rules, version, &tcls);
+            check_tables(&cls, i < N_RULES - 1, N_RULES - (i + 1), 0,
+                         n_invisible_rules, version);
+            if (!versioned) {
+                ovsrcu_postpone(free_rule, rules[i]);
+            }
         }
 
-        fat_rwlock_unlock(&cls.rwlock);
+        if (versioned) {
+            for (i = 0; i < N_RULES; i++) {
+                classifier_remove(&cls, &rules[i]->cls_rule);
+                n_invisible_rules--;
+
+                compare_classifiers(&cls, n_invisible_rules, version, &tcls);
+                check_tables(&cls, 0, 0, 0, n_invisible_rules, version);
+                ovsrcu_postpone(free_rule, rules[i]);
+            }
+        }
+
         classifier_destroy(&cls);
         tcls_destroy(&tcls);
     }
@@ -974,68 +1178,313 @@ test_many_rules_in_n_tables(int n_tables)
     }
 
     for (iteration = 0; iteration < 30; iteration++) {
-        unsigned int priorities[MAX_RULES];
+        int priorities[MAX_RULES];
         struct classifier cls;
         struct tcls tcls;
+        cls_version_t version = CLS_MIN_VERSION;
+        size_t n_invisible_rules = 0;
+        struct ovs_list list = OVS_LIST_INITIALIZER(&list);
 
         random_set_seed(iteration + 1);
         for (i = 0; i < MAX_RULES; i++) {
-            priorities[i] = i * 129;
+            priorities[i] = (i * 129) & INT_MAX;
         }
         shuffle(priorities, ARRAY_SIZE(priorities));
 
-        classifier_init(&cls, flow_segment_u32s);
-        fat_rwlock_wrlock(&cls.rwlock);
-        classifier_set_prefix_fields(&cls, trie_fields,
-                                     ARRAY_SIZE(trie_fields));
+        classifier_init(&cls, flow_segment_u64s);
+        set_prefix_fields(&cls);
         tcls_init(&tcls);
 
         for (i = 0; i < MAX_RULES; i++) {
             struct test_rule *rule;
-            unsigned int priority = priorities[i];
+            int priority = priorities[i];
             int wcf = wcfs[random_range(n_tables)];
             int value_pat = random_uint32() & ((1u << CLS_N_FIELDS) - 1);
             rule = make_rule(wcf, priority, value_pat);
             tcls_insert(&tcls, rule);
-            classifier_insert(&cls, &rule->cls_rule);
-            check_tables(&cls, -1, i + 1, -1);
-            compare_classifiers(&cls, &tcls);
+            classifier_insert(&cls, &rule->cls_rule, version, NULL, 0);
+            compare_classifiers(&cls, n_invisible_rules, version, &tcls);
+            check_tables(&cls, -1, i + 1, -1, n_invisible_rules, version);
         }
 
-        while (!classifier_is_empty(&cls)) {
-            struct test_rule *rule, *next_rule;
+        while (classifier_count(&cls) - n_invisible_rules > 0) {
             struct test_rule *target;
-            struct cls_cursor cursor;
+            struct test_rule *rule;
+            size_t n_removable_rules = 0;
 
             target = clone_rule(tcls.rules[random_range(tcls.n_rules)]);
 
-            cls_cursor_init(&cursor, &cls, &target->cls_rule);
-            CLS_CURSOR_FOR_EACH_SAFE (rule, next_rule, cls_rule, &cursor) {
-                classifier_remove(&cls, &rule->cls_rule);
-                free_rule(rule);
+            CLS_FOR_EACH_TARGET (rule, cls_rule, &cls, &target->cls_rule,
+                                 version) {
+                if (versioned) {
+                    /* Mark the rule for removal after the current version. */
+                    cls_rule_make_invisible_in_version(&rule->cls_rule,
+                                                       version + 1);
+                    n_removable_rules++;
+                    compare_classifiers(&cls, n_invisible_rules, version,
+                                        &tcls);
+                    check_tables(&cls, -1, -1, -1, n_invisible_rules, version);
+
+                    list_push_back(&list, &rule->list_node);
+                } else if (classifier_remove(&cls, &rule->cls_rule)) {
+                    ovsrcu_postpone(free_rule, rule);
+                }
             }
+
+            ++version;
+            n_invisible_rules += n_removable_rules;
+
             tcls_delete_matches(&tcls, &target->cls_rule);
-            compare_classifiers(&cls, &tcls);
-            check_tables(&cls, -1, -1, -1);
             free_rule(target);
+
+            compare_classifiers(&cls, n_invisible_rules, version, &tcls);
+            check_tables(&cls, -1, -1, -1, n_invisible_rules, version);
+        }
+        if (versioned) {
+            struct test_rule *rule;
+
+            /* Remove rules that are no longer visible. */
+            LIST_FOR_EACH_POP (rule, list_node, &list) {
+                classifier_remove(&cls, &rule->cls_rule);
+                n_invisible_rules--;
+
+                compare_classifiers(&cls, n_invisible_rules, version,
+                                    &tcls);
+                check_tables(&cls, -1, -1, -1, n_invisible_rules, version);
+            }
         }
 
-        fat_rwlock_unlock(&cls.rwlock);
         destroy_classifier(&cls);
         tcls_destroy(&tcls);
     }
 }
 
 static void
-test_many_rules_in_two_tables(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_many_rules_in_two_tables(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     test_many_rules_in_n_tables(2);
 }
 
 static void
-test_many_rules_in_five_tables(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_many_rules_in_five_tables(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     test_many_rules_in_n_tables(5);
+}
+
+/* Classifier benchmarks. */
+
+static int n_rules;             /* Number of rules to insert. */
+static int n_priorities;        /* Number of priorities to use. */
+static int n_tables;            /* Number of subtables. */
+static int n_threads;           /* Number of threads to search and mutate. */
+static int n_lookups;           /* Number of lookups each thread performs. */
+
+static void benchmark(bool use_wc);
+
+static int
+elapsed(const struct timeval *start)
+{
+    struct timeval end;
+
+    xgettimeofday(&end);
+    return timeval_to_msec(&end) - timeval_to_msec(start);
+}
+
+static void
+run_benchmarks(struct ovs_cmdl_context *ctx)
+{
+    if (ctx->argc < 5
+        || (ctx->argc > 1 && !strcmp(ctx->argv[1], "--help"))) {
+        printf(
+            "usage: ovstest %s benchmark <n_rules> <n_priorities> <n_subtables> <n_threads> <n_lookups>\n"
+            "\n"
+            "where:\n"
+            "\n"
+            "<n_rules>      - The number of rules to install for lookups.  More rules\n"
+            "                 makes misses less likely.\n"
+            "<n_priorities> - How many different priorities to use.  Using only 1\n"
+            "                 priority will force lookups to continue through all\n"
+            "                 subtables.\n"
+            "<n_subtables>  - Number of subtables to use.  Normally a classifier has\n"
+            "                 rules with different kinds of masks, resulting in\n"
+            "                 multiple subtables (one per mask).  However, in some\n"
+            "                 special cases a table may consist of only one kind of\n"
+            "                 rules, so there will be only one subtable.\n"
+            "<n_threads>    - How many lookup threads to use.  Using one thread should\n"
+            "                 give less variance accross runs, but classifier\n"
+            "                 scaling can be tested with multiple threads.\n"
+            "<n_lookups>    - How many lookups each thread should perform.\n"
+            "\n", program_name);
+        return;
+    }
+
+    n_rules = strtol(ctx->argv[1], NULL, 10);
+    n_priorities = strtol(ctx->argv[2], NULL, 10);
+    n_tables = strtol(ctx->argv[3], NULL, 10);
+    n_threads = strtol(ctx->argv[4], NULL, 10);
+    n_lookups = strtol(ctx->argv[5], NULL, 10);
+
+    printf("\nBenchmarking with:\n"
+           "%d rules with %d priorities in %d tables, "
+           "%d threads doing %d lookups each\n",
+           n_rules, n_priorities, n_tables, n_threads, n_lookups);
+
+    puts("\nWithout wildcards: \n");
+    benchmark(false);
+    puts("\nWith wildcards: \n");
+    benchmark(true);
+}
+
+struct cls_aux {
+    const struct classifier *cls;
+    size_t n_lookup_flows;
+    struct flow *lookup_flows;
+    bool use_wc;
+    atomic_int hits;
+    atomic_int misses;
+};
+
+static void *
+lookup_classifier(void *aux_)
+{
+    struct cls_aux *aux = aux_;
+    cls_version_t version = CLS_MIN_VERSION;
+    int hits = 0, old_hits;
+    int misses = 0, old_misses;
+    size_t i;
+
+    random_set_seed(1);
+
+    for (i = 0; i < n_lookups; i++) {
+        const struct cls_rule *cr;
+        struct flow_wildcards wc;
+        unsigned int x;
+
+        x = random_range(aux->n_lookup_flows);
+
+        if (aux->use_wc) {
+            flow_wildcards_init_catchall(&wc);
+            cr = classifier_lookup(aux->cls, version, &aux->lookup_flows[x],
+                                   &wc);
+        } else {
+            cr = classifier_lookup(aux->cls, version, &aux->lookup_flows[x],
+                                   NULL);
+        }
+        if (cr) {
+            hits++;
+        } else {
+            misses++;
+        }
+    }
+    atomic_add(&aux->hits, hits, &old_hits);
+    atomic_add(&aux->misses, misses, &old_misses);
+    return NULL;
+}
+
+/* Benchmark classification. */
+static void
+benchmark(bool use_wc)
+{
+    struct classifier cls;
+    cls_version_t version = CLS_MIN_VERSION;
+    struct cls_aux aux;
+    int *wcfs = xmalloc(n_tables * sizeof *wcfs);
+    int *priorities = xmalloc(n_priorities * sizeof *priorities);
+    struct timeval start;
+    pthread_t *threads;
+    int i;
+
+    fatal_signal_init();
+
+    random_set_seed(1);
+
+    for (i = 0; i < n_tables; i++) {
+        do {
+            wcfs[i] = random_uint32() & ((1u << CLS_N_FIELDS) - 1);
+        } while (array_contains(wcfs, i, wcfs[i]));
+    }
+
+    for (i = 0; i < n_priorities; i++) {
+        priorities[i] = (i * 129) & INT_MAX;
+    }
+    shuffle(priorities, n_priorities);
+
+    classifier_init(&cls, flow_segment_u64s);
+    set_prefix_fields(&cls);
+
+    /* Create lookup flows. */
+    aux.use_wc = use_wc;
+    aux.cls = &cls;
+    aux.n_lookup_flows = 2 * N_FLOW_VALUES;
+    aux.lookup_flows = xzalloc(aux.n_lookup_flows * sizeof *aux.lookup_flows);
+    for (i = 0; i < aux.n_lookup_flows; i++) {
+        struct flow *flow = &aux.lookup_flows[i];
+        unsigned int x;
+
+        x = random_range(N_FLOW_VALUES);
+        flow->nw_src = nw_src_values[get_value(&x, N_NW_SRC_VALUES)];
+        flow->nw_dst = nw_dst_values[get_value(&x, N_NW_DST_VALUES)];
+        flow->tunnel.tun_id = tun_id_values[get_value(&x, N_TUN_ID_VALUES)];
+        flow->metadata = metadata_values[get_value(&x, N_METADATA_VALUES)];
+        flow->in_port.ofp_port = in_port_values[get_value(&x,
+                                                          N_IN_PORT_VALUES)];
+        flow->vlan_tci = vlan_tci_values[get_value(&x, N_VLAN_TCI_VALUES)];
+        flow->dl_type = dl_type_values[get_value(&x, N_DL_TYPE_VALUES)];
+        flow->tp_src = tp_src_values[get_value(&x, N_TP_SRC_VALUES)];
+        flow->tp_dst = tp_dst_values[get_value(&x, N_TP_DST_VALUES)];
+        flow->dl_src = dl_src_values[get_value(&x, N_DL_SRC_VALUES)];
+        flow->dl_dst = dl_dst_values[get_value(&x, N_DL_DST_VALUES)];
+        flow->nw_proto = nw_proto_values[get_value(&x, N_NW_PROTO_VALUES)];
+        flow->nw_tos = nw_dscp_values[get_value(&x, N_NW_DSCP_VALUES)];
+    }
+    atomic_init(&aux.hits, 0);
+    atomic_init(&aux.misses, 0);
+
+    /* Rule insertion. */
+    for (i = 0; i < n_rules; i++) {
+        struct test_rule *rule;
+        const struct cls_rule *old_cr;
+
+        int priority = priorities[random_range(n_priorities)];
+        int wcf = wcfs[random_range(n_tables)];
+        int value_pat = random_uint32() & ((1u << CLS_N_FIELDS) - 1);
+
+        rule = make_rule(wcf, priority, value_pat);
+        old_cr = classifier_find_rule_exactly(&cls, &rule->cls_rule, version);
+        if (!old_cr) {
+            classifier_insert(&cls, &rule->cls_rule, version, NULL, 0);
+        } else {
+            free_rule(rule);
+        }
+    }
+
+    /* Lookup. */
+    xgettimeofday(&start);
+    threads = xmalloc(n_threads * sizeof *threads);
+    for (i = 0; i < n_threads; i++) {
+        threads[i] = ovs_thread_create("lookups", lookup_classifier, &aux);
+    }
+    for (i = 0; i < n_threads; i++) {
+        xpthread_join(threads[i], NULL);
+    }
+
+    int elapsed_msec = elapsed(&start);
+
+    free(threads);
+
+    int hits, misses;
+    atomic_read(&aux.hits, &hits);
+    atomic_read(&aux.misses, &misses);
+    printf("hits: %d, misses: %d\n", hits, misses);
+
+    printf("classifier lookups:  %5d ms, %"PRId64" lookups/sec\n",
+           elapsed_msec,
+           (((uint64_t)hits + misses) * 1000) / elapsed_msec);
+
+    destroy_classifier(&cls);
+    free(aux.lookup_flows);
+    free(priorities);
+    free(wcfs);
 }
 
 /* Miniflow tests. */
@@ -1060,6 +1509,8 @@ choose(unsigned int n, unsigned int *idxp)
         return false;
     }
 }
+
+#define FLOW_U32S (FLOW_U64S * 2)
 
 static bool
 init_consecutive_values(int n_consecutive, struct flow *flow,
@@ -1190,43 +1641,81 @@ wildcard_extra_bits(struct flow_wildcards *mask)
     }
 }
 
+/* Returns a copy of 'src'.  The caller must eventually free the returned
+ * miniflow with free(). */
+static struct miniflow *
+miniflow_clone__(const struct miniflow *src)
+{
+    struct miniflow *dst;
+    size_t data_size;
+
+    data_size = miniflow_alloc(&dst, 1, src);
+    miniflow_clone(dst, src, data_size / sizeof(uint64_t));
+    return dst;
+}
+
+/* Returns a hash value for 'flow', given 'basis'. */
+static inline uint32_t
+miniflow_hash__(const struct miniflow *flow, uint32_t basis)
+{
+    const uint64_t *p = miniflow_get_values(flow);
+    size_t n_values = miniflow_n_values(flow);
+    struct flowmap hash_map = FLOWMAP_EMPTY_INITIALIZER;
+    uint32_t hash = basis;
+    size_t idx;
+
+    FLOWMAP_FOR_EACH_INDEX(idx, flow->map) {
+        uint64_t value = *p++;
+
+        if (value) {
+            hash = hash_add64(hash, value);
+            flowmap_set(&hash_map, idx, 1);
+        }
+    }
+    map_t map;
+    FLOWMAP_FOR_EACH_MAP (map, hash_map) {
+        hash = hash_add64(hash, map);
+    }
+
+    return hash_finish(hash, n_values);
+}
+
 static void
-test_miniflow(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_miniflow(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct flow flow;
     unsigned int idx;
 
     random_set_seed(0xb3faca38);
     for (idx = 0; next_random_flow(&flow, idx); idx++) {
-        const uint32_t *flow_u32 = (const uint32_t *) &flow;
-        struct miniflow miniflow, miniflow2, miniflow3;
+        const uint64_t *flow_u64 = (const uint64_t *) &flow;
+        struct miniflow *miniflow, *miniflow2, *miniflow3;
         struct flow flow2, flow3;
         struct flow_wildcards mask;
-        struct minimask minimask;
+        struct minimask *minimask;
         int i;
 
         /* Convert flow to miniflow. */
-        miniflow_init(&miniflow, &flow);
+        miniflow = miniflow_create(&flow);
 
         /* Check that the flow equals its miniflow. */
-        assert(miniflow_get_vid(&miniflow) == vlan_tci_to_vid(flow.vlan_tci));
-        for (i = 0; i < FLOW_U32S; i++) {
-            assert(MINIFLOW_GET_TYPE(&miniflow, uint32_t, i * 4)
-                   == flow_u32[i]);
+        assert(miniflow_get_vid(miniflow) == vlan_tci_to_vid(flow.vlan_tci));
+        for (i = 0; i < FLOW_U64S; i++) {
+            assert(miniflow_get(miniflow, i) == flow_u64[i]);
         }
 
         /* Check that the miniflow equals itself. */
-        assert(miniflow_equal(&miniflow, &miniflow));
+        assert(miniflow_equal(miniflow, miniflow));
 
         /* Convert miniflow back to flow and verify that it's the same. */
-        miniflow_expand(&miniflow, &flow2);
+        miniflow_expand(miniflow, &flow2);
         assert(flow_equal(&flow, &flow2));
 
         /* Check that copying a miniflow works properly. */
-        miniflow_clone(&miniflow2, &miniflow);
-        assert(miniflow_equal(&miniflow, &miniflow2));
-        assert(miniflow_hash(&miniflow, 0) == miniflow_hash(&miniflow2, 0));
-        miniflow_expand(&miniflow2, &flow3);
+        miniflow2 = miniflow_clone__(miniflow);
+        assert(miniflow_equal(miniflow, miniflow2));
+        assert(miniflow_hash__(miniflow, 0) == miniflow_hash__(miniflow2, 0));
+        miniflow_expand(miniflow2, &flow3);
         assert(flow_equal(&flow, &flow3));
 
         /* Check that masked matches work as expected for identical flows and
@@ -1234,133 +1723,183 @@ test_miniflow(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
         do {
             next_random_flow(&mask.masks, 1);
         } while (flow_wildcards_is_catchall(&mask));
-        minimask_init(&minimask, &mask);
-        assert(minimask_is_catchall(&minimask)
+        minimask = minimask_create(&mask);
+        assert(minimask_is_catchall(minimask)
                == flow_wildcards_is_catchall(&mask));
-        assert(miniflow_equal_in_minimask(&miniflow, &miniflow2, &minimask));
-        assert(miniflow_equal_flow_in_minimask(&miniflow, &flow2, &minimask));
-        assert(miniflow_hash_in_minimask(&miniflow, &minimask, 0x12345678) ==
-               flow_hash_in_minimask(&flow, &minimask, 0x12345678));
+        assert(miniflow_equal_in_minimask(miniflow, miniflow2, minimask));
+        assert(miniflow_equal_flow_in_minimask(miniflow, &flow2, minimask));
+        assert(miniflow_hash_in_minimask(miniflow, minimask, 0x12345678) ==
+               flow_hash_in_minimask(&flow, minimask, 0x12345678));
+        assert(minimask_hash(minimask, 0) ==
+               miniflow_hash__(&minimask->masks, 0));
 
         /* Check that masked matches work as expected for differing flows and
          * miniflows. */
         toggle_masked_flow_bits(&flow2, &mask);
-        assert(!miniflow_equal_flow_in_minimask(&miniflow, &flow2, &minimask));
-        miniflow_init(&miniflow3, &flow2);
-        assert(!miniflow_equal_in_minimask(&miniflow, &miniflow3, &minimask));
+        assert(!miniflow_equal_flow_in_minimask(miniflow, &flow2, minimask));
+        miniflow3 = miniflow_create(&flow2);
+        assert(!miniflow_equal_in_minimask(miniflow, miniflow3, minimask));
 
         /* Clean up. */
-        miniflow_destroy(&miniflow);
-        miniflow_destroy(&miniflow2);
-        miniflow_destroy(&miniflow3);
-        minimask_destroy(&minimask);
+        free(miniflow);
+        free(miniflow2);
+        free(miniflow3);
+        free(minimask);
     }
 }
 
 static void
-test_minimask_has_extra(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_minimask_has_extra(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct flow_wildcards catchall;
-    struct minimask minicatchall;
+    struct minimask *minicatchall;
     struct flow flow;
     unsigned int idx;
 
     flow_wildcards_init_catchall(&catchall);
-    minimask_init(&minicatchall, &catchall);
-    assert(minimask_is_catchall(&minicatchall));
+    minicatchall = minimask_create(&catchall);
+    assert(minimask_is_catchall(minicatchall));
 
     random_set_seed(0x2ec7905b);
     for (idx = 0; next_random_flow(&flow, idx); idx++) {
         struct flow_wildcards mask;
-        struct minimask minimask;
+        struct minimask *minimask;
 
         mask.masks = flow;
-        minimask_init(&minimask, &mask);
-        assert(!minimask_has_extra(&minimask, &minimask));
-        assert(minimask_has_extra(&minicatchall, &minimask)
-               == !minimask_is_catchall(&minimask));
-        if (!minimask_is_catchall(&minimask)) {
-            struct minimask minimask2;
+        minimask = minimask_create(&mask);
+        assert(!minimask_has_extra(minimask, minimask));
+        assert(minimask_has_extra(minicatchall, minimask)
+               == !minimask_is_catchall(minimask));
+        if (!minimask_is_catchall(minimask)) {
+            struct minimask *minimask2;
 
             wildcard_extra_bits(&mask);
-            minimask_init(&minimask2, &mask);
-            assert(minimask_has_extra(&minimask2, &minimask));
-            assert(!minimask_has_extra(&minimask, &minimask2));
-            minimask_destroy(&minimask2);
+            minimask2 = minimask_create(&mask);
+            assert(minimask_has_extra(minimask2, minimask));
+            assert(!minimask_has_extra(minimask, minimask2));
+            free(minimask2);
         }
 
-        minimask_destroy(&minimask);
+        free(minimask);
     }
 
-    minimask_destroy(&minicatchall);
+    free(minicatchall);
 }
 
 static void
-test_minimask_combine(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_minimask_combine(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct flow_wildcards catchall;
-    struct minimask minicatchall;
+    struct minimask *minicatchall;
     struct flow flow;
     unsigned int idx;
 
     flow_wildcards_init_catchall(&catchall);
-    minimask_init(&minicatchall, &catchall);
-    assert(minimask_is_catchall(&minicatchall));
+    minicatchall = minimask_create(&catchall);
+    assert(minimask_is_catchall(minicatchall));
 
     random_set_seed(0x181bf0cd);
     for (idx = 0; next_random_flow(&flow, idx); idx++) {
-        struct minimask minimask, minimask2, minicombined;
+        struct minimask *minimask, *minimask2;
         struct flow_wildcards mask, mask2, combined, combined2;
-        uint32_t storage[FLOW_U32S];
+        struct {
+            struct minimask minicombined;
+            uint64_t storage[FLOW_U64S];
+        } m;
         struct flow flow2;
 
         mask.masks = flow;
-        minimask_init(&minimask, &mask);
+        minimask = minimask_create(&mask);
 
-        minimask_combine(&minicombined, &minimask, &minicatchall, storage);
-        assert(minimask_is_catchall(&minicombined));
+        minimask_combine(&m.minicombined, minimask, minicatchall, m.storage);
+        assert(minimask_is_catchall(&m.minicombined));
 
         any_random_flow(&flow2);
         mask2.masks = flow2;
-        minimask_init(&minimask2, &mask2);
+        minimask2 = minimask_create(&mask2);
 
-        minimask_combine(&minicombined, &minimask, &minimask2, storage);
+        minimask_combine(&m.minicombined, minimask, minimask2, m.storage);
         flow_wildcards_and(&combined, &mask, &mask2);
-        minimask_expand(&minicombined, &combined2);
+        minimask_expand(&m.minicombined, &combined2);
         assert(flow_wildcards_equal(&combined, &combined2));
 
-        minimask_destroy(&minimask);
-        minimask_destroy(&minimask2);
+        free(minimask);
+        free(minimask2);
     }
 
-    minimask_destroy(&minicatchall);
+    free(minicatchall);
 }
 
-static const struct command commands[] = {
+
+static void help(struct ovs_cmdl_context *ctx);
+
+static const struct ovs_cmdl_command commands[] = {
     /* Classifier tests. */
-    {"empty", 0, 0, test_empty},
-    {"destroy-null", 0, 0, test_destroy_null},
-    {"single-rule", 0, 0, test_single_rule},
-    {"rule-replacement", 0, 0, test_rule_replacement},
-    {"many-rules-in-one-list", 0, 0, test_many_rules_in_one_list},
-    {"many-rules-in-one-table", 0, 0, test_many_rules_in_one_table},
-    {"many-rules-in-two-tables", 0, 0, test_many_rules_in_two_tables},
-    {"many-rules-in-five-tables", 0, 0, test_many_rules_in_five_tables},
+    {"empty", NULL, 0, 0, test_empty},
+    {"destroy-null", NULL, 0, 0, test_destroy_null},
+    {"single-rule", NULL, 0, 0, test_single_rule},
+    {"rule-replacement", NULL, 0, 0, test_rule_replacement},
+    {"many-rules-in-one-list", NULL, 0, 1, test_many_rules_in_one_list},
+    {"many-rules-in-one-table", NULL, 0, 1, test_many_rules_in_one_table},
+    {"many-rules-in-two-tables", NULL, 0, 0, test_many_rules_in_two_tables},
+    {"many-rules-in-five-tables", NULL, 0, 0, test_many_rules_in_five_tables},
+    {"benchmark", NULL, 0, 5, run_benchmarks},
 
     /* Miniflow and minimask tests. */
-    {"miniflow", 0, 0, test_miniflow},
-    {"minimask_has_extra", 0, 0, test_minimask_has_extra},
-    {"minimask_combine", 0, 0, test_minimask_combine},
+    {"miniflow", NULL, 0, 0, test_miniflow},
+    {"minimask_has_extra", NULL, 0, 0, test_minimask_has_extra},
+    {"minimask_combine", NULL, 0, 0, test_minimask_combine},
 
-    {NULL, 0, 0, NULL},
+    {"--help", NULL, 0, 0, help},
+    {NULL, NULL, 0, 0, NULL},
 };
+
+static void
+help(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    const struct ovs_cmdl_command *p;
+    struct ds test_names = DS_EMPTY_INITIALIZER;
+    const int linesize = 80;
+
+    printf("usage: ovstest %s TEST [TESTARGS]\n"
+           "where TEST is one of the following:\n\n",
+           program_name);
+
+    for (p = commands; p->name != NULL; p++) {
+        if (*p->name != '-') { /* Skip internal commands */
+            if (test_names.length > 1
+                && test_names.length + strlen(p->name) + 1 >= linesize) {
+                test_names.length -= 1;
+                printf ("%s\n", ds_cstr(&test_names));
+                ds_clear(&test_names);
+            }
+            ds_put_format(&test_names, "%s, ", p->name);
+        }
+    }
+    if (test_names.length > 2) {
+        test_names.length -= 2;
+        printf("%s\n", ds_cstr(&test_names));
+    }
+    ds_destroy(&test_names);
+}
 
 static void
 test_classifier_main(int argc, char *argv[])
 {
+    struct ovs_cmdl_context ctx = {
+        .argc = argc - 1,
+        .argv = argv + 1,
+    };
     set_program_name(argv[0]);
+
+    if (argc > 1 && !strcmp(argv[1], "--versioned")) {
+        versioned = true;
+        ctx.argc--;
+        ctx.argv++;
+    }
+
     init_values();
-    run_command(argc - 1, argv + 1, commands);
+    ovs_cmdl_run_command(&ctx, commands);
 }
 
 OVSTEST_REGISTER("test-classifier", test_classifier_main);

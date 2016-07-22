@@ -15,7 +15,9 @@
  */
 
 #include <config.h>
-#include "vconn.h"
+#undef NDEBUG
+#include "openvswitch/vconn.h"
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <signal.h>
@@ -27,17 +29,14 @@
 #include "ofp-util.h"
 #include "ofpbuf.h"
 #include "openflow/openflow.h"
+#include "ovstest.h"
 #include "poll-loop.h"
 #include "socket-util.h"
 #include "stream.h"
 #include "stream-ssl.h"
 #include "timeval.h"
 #include "util.h"
-#include "vlog.h"
-#include "ovstest.h"
-
-#undef NDEBUG
-#include <assert.h>
+#include "openvswitch/vlog.h"
 
 struct fake_pvconn {
     const char *type;
@@ -61,7 +60,7 @@ static void
 check_errno(int a, int b, const char *as, const char *file, int line)
 {
     if (a != b) {
-        char *str_b = strdup(ovs_strerror(abs(b)));
+        char *str_b = xstrdup(ovs_strerror(abs(b)));
         ovs_fatal(0, "%s:%d: %s is %d (%s) but should be %d (%s)",
                   file, line, as, a, ovs_strerror(abs(a)), b, str_b);
     }
@@ -142,9 +141,9 @@ fpv_destroy(struct fake_pvconn *fpv)
 /* Connects to a fake_pvconn with vconn_open(), then closes the listener and
  * verifies that vconn_connect() reports 'expected_error'. */
 static void
-test_refuse_connection(int argc OVS_UNUSED, char *argv[])
+test_refuse_connection(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct fake_pvconn fpv;
     struct vconn *vconn;
     int error;
@@ -156,12 +155,20 @@ test_refuse_connection(int argc OVS_UNUSED, char *argv[])
 
     error = vconn_connect_block(vconn);
     if (!strcmp(type, "tcp")) {
-        if (error != ECONNRESET && error != EPIPE) {
+        if (error != ECONNRESET && error != EPIPE
+#ifdef _WIN32
+            && error != WSAECONNRESET
+#endif
+            ) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",
                       error, ovs_strerror(error));
         }
     } else if (!strcmp(type, "unix")) {
+#ifndef _WIN32
         CHECK_ERRNO(error, EPIPE);
+#else
+        CHECK_ERRNO(error, WSAECONNRESET);
+#endif
     } else if (!strcmp(type, "ssl")) {
         if (error != EPROTO && error != ECONNRESET) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",
@@ -179,9 +186,9 @@ test_refuse_connection(int argc OVS_UNUSED, char *argv[])
  * closes it immediately, and verifies that vconn_connect() reports
  * 'expected_error'. */
 static void
-test_accept_then_close(int argc OVS_UNUSED, char *argv[])
+test_accept_then_close(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct fake_pvconn fpv;
     struct vconn *vconn;
     int error;
@@ -194,7 +201,11 @@ test_accept_then_close(int argc OVS_UNUSED, char *argv[])
 
     error = vconn_connect_block(vconn);
     if (!strcmp(type, "tcp") || !strcmp(type, "unix")) {
-        if (error != ECONNRESET && error != EPIPE) {
+        if (error != ECONNRESET && error != EPIPE
+#ifdef _WIN32
+            && error != WSAECONNRESET
+#endif
+            ) {
             ovs_fatal(0, "unexpected vconn_connect() return value %d (%s)",
                       error, ovs_strerror(error));
         }
@@ -210,9 +221,9 @@ test_accept_then_close(int argc OVS_UNUSED, char *argv[])
  * reads the hello message from it, then closes the connection and verifies
  * that vconn_connect() reports 'expected_error'. */
 static void
-test_read_hello(int argc OVS_UNUSED, char *argv[])
+test_read_hello(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct fake_pvconn fpv;
     struct vconn *vconn;
     struct stream *stream;
@@ -350,14 +361,14 @@ test_send_hello(const char *type, const void *out, size_t out_size,
 
 /* Try connecting and sending a normal hello, which should succeed. */
 static void
-test_send_plain_hello(int argc OVS_UNUSED, char *argv[])
+test_send_plain_hello(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct ofpbuf *hello;
 
     hello = ofpraw_alloc_xid(OFPRAW_OFPT_HELLO, OFP13_VERSION,
                              htonl(0x12345678), 0);
-    test_send_hello(type, ofpbuf_data(hello), ofpbuf_size(hello), 0);
+    test_send_hello(type, hello->data, hello->size, 0);
     ofpbuf_delete(hello);
 }
 
@@ -365,9 +376,9 @@ test_send_plain_hello(int argc OVS_UNUSED, char *argv[])
  * the specification says that implementations must accept and ignore extra
  * data). */
 static void
-test_send_long_hello(int argc OVS_UNUSED, char *argv[])
+test_send_long_hello(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct ofpbuf *hello;
     enum { EXTRA_BYTES = 8 };
 
@@ -375,30 +386,30 @@ test_send_long_hello(int argc OVS_UNUSED, char *argv[])
                              htonl(0x12345678), EXTRA_BYTES);
     ofpbuf_put_zeros(hello, EXTRA_BYTES);
     ofpmsg_update_length(hello);
-    test_send_hello(type, ofpbuf_data(hello), ofpbuf_size(hello), 0);
+    test_send_hello(type, hello->data, hello->size, 0);
     ofpbuf_delete(hello);
 }
 
 /* Try connecting and sending an echo request instead of a hello, which should
  * fail with EPROTO. */
 static void
-test_send_echo_hello(int argc OVS_UNUSED, char *argv[])
+test_send_echo_hello(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct ofpbuf *echo;
 
     echo = ofpraw_alloc_xid(OFPRAW_OFPT_ECHO_REQUEST, OFP13_VERSION,
                              htonl(0x12345678), 0);
-    test_send_hello(type, ofpbuf_data(echo), ofpbuf_size(echo), EPROTO);
+    test_send_hello(type, echo->data, echo->size, EPROTO);
     ofpbuf_delete(echo);
 }
 
 /* Try connecting and sending a hello packet that has its length field as 0,
  * which should fail with EPROTO. */
 static void
-test_send_short_hello(int argc OVS_UNUSED, char *argv[])
+test_send_short_hello(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct ofp_header hello;
 
     memset(&hello, 0, sizeof hello);
@@ -408,41 +419,46 @@ test_send_short_hello(int argc OVS_UNUSED, char *argv[])
 /* Try connecting and sending a hello packet that has a bad version, which
  * should fail with EPROTO. */
 static void
-test_send_invalid_version_hello(int argc OVS_UNUSED, char *argv[])
+test_send_invalid_version_hello(struct ovs_cmdl_context *ctx)
 {
-    const char *type = argv[1];
+    const char *type = ctx->argv[1];
     struct ofpbuf *hello;
 
     hello = ofpraw_alloc_xid(OFPRAW_OFPT_HELLO, OFP13_VERSION,
                              htonl(0x12345678), 0);
-    ((struct ofp_header *) ofpbuf_data(hello))->version = 0;
-    test_send_hello(type, ofpbuf_data(hello), ofpbuf_size(hello), EPROTO);
+    ((struct ofp_header *) hello->data)->version = 0;
+    test_send_hello(type, hello->data, hello->size, EPROTO);
     ofpbuf_delete(hello);
 }
 
-static const struct command commands[] = {
-    {"refuse-connection", 1, 1, test_refuse_connection},
-    {"accept-then-close", 1, 1, test_accept_then_close},
-    {"read-hello", 1, 1, test_read_hello},
-    {"send-plain-hello", 1, 1, test_send_plain_hello},
-    {"send-long-hello", 1, 1, test_send_long_hello},
-    {"send-echo-hello", 1, 1, test_send_echo_hello},
-    {"send-short-hello", 1, 1, test_send_short_hello},
-    {"send-invalid-version-hello", 1, 1, test_send_invalid_version_hello},
-    {NULL, 0, 0, NULL},
+static const struct ovs_cmdl_command commands[] = {
+    {"refuse-connection", NULL, 1, 1, test_refuse_connection},
+    {"accept-then-close", NULL, 1, 1, test_accept_then_close},
+    {"read-hello", NULL, 1, 1, test_read_hello},
+    {"send-plain-hello", NULL, 1, 1, test_send_plain_hello},
+    {"send-long-hello", NULL, 1, 1, test_send_long_hello},
+    {"send-echo-hello", NULL, 1, 1, test_send_echo_hello},
+    {"send-short-hello", NULL, 1, 1, test_send_short_hello},
+    {"send-invalid-version-hello", NULL, 1, 1, test_send_invalid_version_hello},
+    {NULL, NULL, 0, 0, NULL},
 };
 
 static void
 test_vconn_main(int argc, char *argv[])
 {
+    struct ovs_cmdl_context ctx = {
+        .argc = argc - 1,
+        .argv = argv + 1,
+    };
+
     set_program_name(argv[0]);
-    vlog_set_levels(NULL, VLF_ANY_FACILITY, VLL_EMER);
+    vlog_set_levels(NULL, VLF_ANY_DESTINATION, VLL_EMER);
     vlog_set_levels(NULL, VLF_CONSOLE, VLL_DBG);
     fatal_ignore_sigpipe();
 
     time_alarm(10);
 
-    run_command(argc - 1, argv + 1, commands);
+    ovs_cmdl_run_command(&ctx, commands);
 }
 
 OVSTEST_REGISTER("test-vconn", test_vconn_main);

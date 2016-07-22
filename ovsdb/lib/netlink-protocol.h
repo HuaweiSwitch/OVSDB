@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2010, 2011 Nicira, Inc.
+ * Copyright (c) 2008, 2010, 2011, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,14 +40,6 @@
 #else
 #define NETLINK_GENERIC         16
 
-struct sockaddr_nl {
-    sa_family_t nl_family;
-    unsigned short int nl_pad;
-    uint32_t nl_pid;
-    uint32_t nl_groups;
-};
-BUILD_ASSERT_DECL(sizeof(struct sockaddr_nl) == 12);
-
 /* nlmsg_flags bits. */
 #define NLM_F_REQUEST           0x001
 #define NLM_F_MULTI             0x002
@@ -56,7 +48,9 @@ BUILD_ASSERT_DECL(sizeof(struct sockaddr_nl) == 12);
 
 #define NLM_F_ROOT              0x100
 #define NLM_F_MATCH             0x200
+#define NLM_F_EXCL              0x200
 #define NLM_F_ATOMIC            0x400
+#define NLM_F_CREATE            0x400
 #define NLM_F_DUMP              (NLM_F_ROOT | NLM_F_MATCH)
 
 /* nlmsg_type values. */
@@ -66,6 +60,8 @@ BUILD_ASSERT_DECL(sizeof(struct sockaddr_nl) == 12);
 #define NLMSG_OVERRUN           4
 
 #define NLMSG_MIN_TYPE          0x10
+
+#define MAX_LINKS               32
 
 struct nlmsghdr {
     uint32_t nlmsg_len;

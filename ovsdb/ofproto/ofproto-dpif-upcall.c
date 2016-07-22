@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+/* Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 
 #include "connmgr.h"
 #include "coverage.h"
+#include "cmap.h"
 #include "dpif.h"
 #include "dynamic-string.h"
 #include "fail-open.h"
@@ -37,15 +38,18 @@
 #include "poll-loop.h"
 #include "seq.h"
 #include "unixctl.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 #define MAX_QUEUE_LENGTH 512
-#define FLOW_MISS_MAX_BATCH 50
+#define UPCALL_MAX_BATCH 64
 #define REVALIDATE_MAX_BATCH 50
 
 VLOG_DEFINE_THIS_MODULE(ofproto_dpif_upcall);
 
-COVERAGE_DEFINE(upcall_duplicate_flow);
+COVERAGE_DEFINE(dumped_duplicate_flow);
+COVERAGE_DEFINE(dumped_new_flow);
+COVERAGE_DEFINE(handler_duplicate_upcall);
+COVERAGE_DEFINE(upcall_ukey_contention);
 COVERAGE_DEFINE(revalidate_missed_dp_flow);
 
 /* A thread that reads upcalls from dpif, forwards each upcall's packet,
@@ -56,14 +60,21 @@ struct handler {
     uint32_t handler_id;               /* Handler id. */
 };
 
+/* In the absence of a multiple-writer multiple-reader datastructure for
+ * storing ukeys, we use a large number of cmaps, each with its own lock for
+ * writing. */
+#define N_UMAPS 512 /* per udpif. */
+struct umap {
+    struct ovs_mutex mutex;            /* Take for writing to the following. */
+    struct cmap cmap;                  /* Datapath flow keys. */
+};
+
 /* A thread that processes datapath flows, updates OpenFlow statistics, and
  * updates or removes them if necessary. */
 struct revalidator {
     struct udpif *udpif;               /* Parent udpif. */
     pthread_t thread;                  /* Thread ID. */
     unsigned int id;                   /* ovsthread_id_self(). */
-    struct hmap *ukeys;                /* Points into udpif->ukeys for this
-                                          revalidator. Used for GC phase. */
 };
 
 /* An upcall handler for ofproto_dpif.
@@ -83,12 +94,10 @@ struct revalidator {
  *      them.
  */
 struct udpif {
-    struct list list_node;             /* In all_udpifs list. */
+    struct ovs_list list_node;         /* In all_udpifs list. */
 
     struct dpif *dpif;                 /* Datapath handle. */
     struct dpif_backer *backer;        /* Opaque dpif_backer pointer. */
-
-    uint32_t secret;                   /* Random seed for upcall hash. */
 
     struct handler *handlers;          /* Upcall handlers. */
     size_t n_handlers;
@@ -100,23 +109,33 @@ struct udpif {
 
     /* Revalidation. */
     struct seq *reval_seq;             /* Incremented to force revalidation. */
-    bool need_revalidate;              /* As indicated by 'reval_seq'. */
     bool reval_exit;                   /* Set by leader on 'exit_latch. */
     struct ovs_barrier reval_barrier;  /* Barrier used by revalidators. */
-    struct dpif_flow_dump dump;        /* DPIF flow dump state. */
+    struct dpif_flow_dump *dump;       /* DPIF flow dump state. */
     long long int dump_duration;       /* Duration of the last flow dump. */
     struct seq *dump_seq;              /* Increments each dump iteration. */
+    atomic_bool enable_ufid;           /* If true, skip dumping flow attrs. */
 
-    /* There are 'n_revalidators' ukey hmaps. Each revalidator retains a
-     * reference to one of these for garbage collection.
+    /* These variables provide a mechanism for the main thread to pause
+     * all revalidation without having to completely shut the threads down.
+     * 'pause_latch' is shared between the main thread and the lead
+     * revalidator thread, so when it is desirable to halt revalidation, the
+     * main thread will set the latch. 'pause' and 'pause_barrier' are shared
+     * by revalidator threads. The lead revalidator will set 'pause' when it
+     * observes the latch has been set, and this will cause all revalidator
+     * threads to wait on 'pause_barrier' at the beginning of the next
+     * revalidation round. */
+    bool pause;                        /* Set by leader on 'pause_latch. */
+    struct latch pause_latch;          /* Set to force revalidators pause. */
+    struct ovs_barrier pause_barrier;  /* Barrier used to pause all */
+                                       /* revalidators by main thread. */
+
+    /* There are 'N_UMAPS' maps containing 'struct udpif_key' elements.
      *
      * During the flow dump phase, revalidators insert into these with a random
      * distribution. During the garbage collection phase, each revalidator
-     * takes care of garbage collecting one of these hmaps. */
-    struct {
-        struct ovs_mutex mutex;        /* Guards the following. */
-        struct hmap hmap OVS_GUARDED;  /* Datapath flow keys. */
-    } *ukeys;
+     * takes care of garbage collecting a slice of these maps. */
+    struct umap *ukeys;
 
     /* Datapath flow statistics. */
     unsigned int max_n_flows;
@@ -126,9 +145,15 @@ struct udpif {
     atomic_uint flow_limit;            /* Datapath flow hard limit. */
 
     /* n_flows_mutex prevents multiple threads updating these concurrently. */
-    atomic_ulong n_flows;           /* Number of flows in the datapath. */
+    atomic_uint n_flows;               /* Number of flows in the datapath. */
     atomic_llong n_flows_timestamp;    /* Last time n_flows was updated. */
     struct ovs_mutex n_flows_mutex;
+
+    /* Following fields are accessed and modified only from the main thread. */
+    struct unixctl_conn **conns;       /* Connections waiting on dump_seq. */
+    uint64_t conn_seq;                 /* Corresponds to 'dump_seq' when
+                                          conns[n_conns-1] was stored. */
+    size_t n_conns;                    /* Number of connections waiting. */
 };
 
 enum upcall_type {
@@ -139,87 +164,131 @@ enum upcall_type {
     IPFIX_UPCALL                /* Per-bridge sampling. */
 };
 
-struct upcall {
-    struct flow_miss *flow_miss;    /* This upcall's flow_miss. */
+enum reval_result {
+    UKEY_KEEP,
+    UKEY_DELETE,
+    UKEY_MODIFY
+};
 
-    /* Raw upcall plus data for keeping track of the memory backing it. */
-    struct dpif_upcall dpif_upcall; /* As returned by dpif_recv() */
-    struct ofpbuf upcall_buf;       /* Owns some data in 'dpif_upcall'. */
-    uint64_t upcall_stub[512 / 8];  /* Buffer to reduce need for malloc(). */
+struct upcall {
+    struct ofproto_dpif *ofproto;  /* Parent ofproto. */
+    const struct recirc_id_node *recirc; /* Recirculation context. */
+    bool have_recirc_ref;                /* Reference held on recirc ctx? */
+
+    /* The flow and packet are only required to be constant when using
+     * dpif-netdev.  If a modification is absolutely necessary, a const cast
+     * may be used with other datapaths. */
+    const struct flow *flow;       /* Parsed representation of the packet. */
+    const ovs_u128 *ufid;          /* Unique identifier for 'flow'. */
+    unsigned pmd_id;               /* Datapath poll mode driver id. */
+    const struct dp_packet *packet;   /* Packet associated with this upcall. */
+    ofp_port_t in_port;            /* OpenFlow in port, or OFPP_NONE. */
+    uint16_t mru;                  /* If !0, Maximum receive unit of
+                                      fragmented IP packet */
+
+    enum dpif_upcall_type type;    /* Datapath type of the upcall. */
+    const struct nlattr *userdata; /* Userdata for DPIF_UC_ACTION Upcalls. */
+    const struct nlattr *actions;  /* Flow actions in DPIF_UC_ACTION Upcalls. */
+
+    bool xout_initialized;         /* True if 'xout' must be uninitialized. */
+    struct xlate_out xout;         /* Result of xlate_actions(). */
+    struct ofpbuf odp_actions;     /* Datapath actions from xlate_actions(). */
+    struct flow_wildcards wc;      /* Dependencies that megaflow must match. */
+    struct ofpbuf put_actions;     /* Actions 'put' in the fastpath. */
+
+    struct dpif_ipfix *ipfix;      /* IPFIX pointer or NULL. */
+    struct dpif_sflow *sflow;      /* SFlow pointer or NULL. */
+
+    bool vsp_adjusted;             /* 'packet' and 'flow' were adjusted for
+                                      VLAN splinters if true. */
+
+    struct udpif_key *ukey;        /* Revalidator flow cache. */
+    bool ukey_persists;            /* Set true to keep 'ukey' beyond the
+                                      lifetime of this upcall. */
+
+    uint64_t dump_seq;             /* udpif->dump_seq at translation time. */
+    uint64_t reval_seq;            /* udpif->reval_seq at translation time. */
+
+    /* Not used by the upcall callback interface. */
+    const struct nlattr *key;      /* Datapath flow key. */
+    size_t key_len;                /* Datapath flow key length. */
+    const struct nlattr *out_tun_key;  /* Datapath output tunnel key. */
+
+    uint64_t odp_actions_stub[1024 / 8]; /* Stub for odp_actions. */
 };
 
 /* 'udpif_key's are responsible for tracking the little bit of state udpif
  * needs to do flow expiration which can't be pulled directly from the
- * datapath.  They may be created or maintained by any revalidator during
- * the dump phase, but are owned by a single revalidator, and are destroyed
- * by that revalidator during the garbage-collection phase.
+ * datapath.  They may be created by any handler or revalidator thread at any
+ * time, and read by any revalidator during the dump phase. They are however
+ * each owned by a single revalidator which takes care of destroying them
+ * during the garbage-collection phase.
  *
- * While some elements of a udpif_key are protected by a mutex, the ukey itself
- * is not.  Therefore it is not safe to destroy a udpif_key except when all
- * revalidators are in garbage collection phase, or they aren't running. */
+ * The mutex within the ukey protects some members of the ukey. The ukey
+ * itself is protected by RCU and is held within a umap in the parent udpif.
+ * Adding or removing a ukey from a umap is only safe when holding the
+ * corresponding umap lock. */
 struct udpif_key {
-    struct hmap_node hmap_node;     /* In parent revalidator 'ukeys' map. */
+    struct cmap_node cmap_node;     /* In parent revalidator 'ukeys' map. */
 
     /* These elements are read only once created, and therefore aren't
      * protected by a mutex. */
     const struct nlattr *key;      /* Datapath flow key. */
     size_t key_len;                /* Length of 'key'. */
+    const struct nlattr *mask;     /* Datapath flow mask. */
+    size_t mask_len;               /* Length of 'mask'. */
+    ovs_u128 ufid;                 /* Unique flow identifier. */
+    bool ufid_present;             /* True if 'ufid' is in datapath. */
+    uint32_t hash;                 /* Pre-computed hash for 'key'. */
+    unsigned pmd_id;               /* Datapath poll mode driver id. */
 
     struct ovs_mutex mutex;                   /* Guards the following. */
     struct dpif_flow_stats stats OVS_GUARDED; /* Last known stats.*/
     long long int created OVS_GUARDED;        /* Estimate of creation time. */
-    bool mark OVS_GUARDED;                    /* For mark and sweep garbage
-                                                 collection. */
+    uint64_t dump_seq OVS_GUARDED;            /* Tracks udpif->dump_seq. */
+    uint64_t reval_seq OVS_GUARDED;           /* Tracks udpif->reval_seq. */
     bool flow_exists OVS_GUARDED;             /* Ensures flows are only deleted
                                                  once. */
+    /* Datapath flow actions as nlattrs.  Protected by RCU.  Read with
+     * ukey_get_actions(), and write with ukey_set_actions(). */
+    OVSRCU_TYPE(struct ofpbuf *) actions;
 
     struct xlate_cache *xcache OVS_GUARDED;   /* Cache for xlate entries that
                                                * are affected by this ukey.
                                                * Used for stats and learning.*/
-    struct odputil_keybuf key_buf;            /* Memory for 'key'. */
+    union {
+        struct odputil_keybuf buf;
+        struct nlattr nla;
+    } keybuf, maskbuf;
+
+    uint32_t key_recirc_id;   /* Non-zero if reference is held by the ukey. */
+    struct recirc_refs recircs;  /* Action recirc IDs with references held. */
 };
 
-/* Flow miss batching.
- *
- * Some dpifs implement operations faster when you hand them off in a batch.
- * To allow batching, "struct flow_miss" queues the dpif-related work needed
- * for a given flow.  Each "struct flow_miss" corresponds to sending one or
- * more packets, plus possibly installing the flow in the dpif. */
-struct flow_miss {
-    struct hmap_node hmap_node;
-    struct ofproto_dpif *ofproto;
-
-    struct flow flow;
-    const struct nlattr *key;
-    size_t key_len;
-    enum dpif_upcall_type upcall_type;
-    struct dpif_flow_stats stats;
-    odp_port_t odp_in_port;
-
-    uint64_t slow_path_buf[128 / 8];
-    struct odputil_keybuf mask_buf;
-
-    struct xlate_out xout;
-
-    bool put;
+/* Datapath operation with optional ukey attached. */
+struct ukey_op {
+    struct udpif_key *ukey;
+    struct dpif_flow_stats stats; /* Stats for 'op'. */
+    struct dpif_op dop;           /* Flow operation. */
 };
 
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
-static struct list all_udpifs = LIST_INITIALIZER(&all_udpifs);
+static struct ovs_list all_udpifs = OVS_LIST_INITIALIZER(&all_udpifs);
 
-static size_t read_upcalls(struct handler *,
-                           struct upcall upcalls[FLOW_MISS_MAX_BATCH],
-                           struct flow_miss miss_buf[FLOW_MISS_MAX_BATCH],
-                           struct hmap *);
-static void handle_upcalls(struct handler *, struct hmap *, struct upcall *,
-                           size_t n_upcalls);
+static size_t recv_upcalls(struct handler *);
+static int process_upcall(struct udpif *, struct upcall *,
+                          struct ofpbuf *odp_actions, struct flow_wildcards *);
+static void handle_upcalls(struct udpif *, struct upcall *, size_t n_upcalls);
 static void udpif_stop_threads(struct udpif *);
 static void udpif_start_threads(struct udpif *, size_t n_handlers,
                                 size_t n_revalidators);
+static void udpif_pause_revalidators(struct udpif *);
+static void udpif_resume_revalidators(struct udpif *);
 static void *udpif_upcall_handler(void *);
 static void *udpif_revalidator(void *);
 static unsigned long udpif_get_n_flows(struct udpif *);
 static void revalidate(struct revalidator *);
+static void revalidator_pause(struct revalidator *);
 static void revalidator_sweep(struct revalidator *);
 static void revalidator_purge(struct revalidator *);
 static void upcall_unixctl_show(struct unixctl_conn *conn, int argc,
@@ -228,21 +297,53 @@ static void upcall_unixctl_disable_megaflows(struct unixctl_conn *, int argc,
                                              const char *argv[], void *aux);
 static void upcall_unixctl_enable_megaflows(struct unixctl_conn *, int argc,
                                             const char *argv[], void *aux);
+static void upcall_unixctl_disable_ufid(struct unixctl_conn *, int argc,
+                                              const char *argv[], void *aux);
+static void upcall_unixctl_enable_ufid(struct unixctl_conn *, int argc,
+                                             const char *argv[], void *aux);
 static void upcall_unixctl_set_flow_limit(struct unixctl_conn *conn, int argc,
                                             const char *argv[], void *aux);
+static void upcall_unixctl_dump_wait(struct unixctl_conn *conn, int argc,
+                                     const char *argv[], void *aux);
+static void upcall_unixctl_purge(struct unixctl_conn *conn, int argc,
+                                 const char *argv[], void *aux);
 
-static struct udpif_key *ukey_create(const struct nlattr *key, size_t key_len,
-                                     long long int used);
-static void ukey_delete(struct revalidator *, struct udpif_key *);
+static struct udpif_key *ukey_create_from_upcall(struct upcall *,
+                                                 struct flow_wildcards *);
+static int ukey_create_from_dpif_flow(const struct udpif *,
+                                      const struct dpif_flow *,
+                                      struct udpif_key **);
+static void ukey_get_actions(struct udpif_key *, const struct nlattr **actions,
+                             size_t *size);
+static bool ukey_install_start(struct udpif *, struct udpif_key *ukey);
+static bool ukey_install_finish(struct udpif_key *ukey, int error);
+static bool ukey_install(struct udpif *udpif, struct udpif_key *ukey);
+static struct udpif_key *ukey_lookup(struct udpif *udpif,
+                                     const ovs_u128 *ufid);
+static int ukey_acquire(struct udpif *, const struct dpif_flow *,
+                        struct udpif_key **result, int *error);
+static void ukey_delete__(struct udpif_key *);
+static void ukey_delete(struct umap *, struct udpif_key *);
+static enum upcall_type classify_upcall(enum dpif_upcall_type type,
+                                        const struct nlattr *userdata);
+
+static int upcall_receive(struct upcall *, const struct dpif_backer *,
+                          const struct dp_packet *packet, enum dpif_upcall_type,
+                          const struct nlattr *userdata, const struct flow *,
+                          const unsigned int mru,
+                          const ovs_u128 *ufid, const unsigned pmd_id);
+static void upcall_uninit(struct upcall *);
+
+static upcall_callback upcall_cb;
+static dp_purge_callback dp_purge_cb;
 
 static atomic_bool enable_megaflows = ATOMIC_VAR_INIT(true);
+static atomic_bool enable_ufid = ATOMIC_VAR_INIT(true);
 
-struct udpif *
-udpif_create(struct dpif_backer *backer, struct dpif *dpif)
+void
+udpif_init(void)
 {
     static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
-    struct udpif *udpif = xzalloc(sizeof *udpif);
-
     if (ovsthread_once_start(&once)) {
         unixctl_command_register("upcall/show", "", 0, 0, upcall_unixctl_show,
                                  NULL);
@@ -250,24 +351,62 @@ udpif_create(struct dpif_backer *backer, struct dpif *dpif)
                                  upcall_unixctl_disable_megaflows, NULL);
         unixctl_command_register("upcall/enable-megaflows", "", 0, 0,
                                  upcall_unixctl_enable_megaflows, NULL);
+        unixctl_command_register("upcall/disable-ufid", "", 0, 0,
+                                 upcall_unixctl_disable_ufid, NULL);
+        unixctl_command_register("upcall/enable-ufid", "", 0, 0,
+                                 upcall_unixctl_enable_ufid, NULL);
         unixctl_command_register("upcall/set-flow-limit", "", 1, 1,
                                  upcall_unixctl_set_flow_limit, NULL);
+        unixctl_command_register("revalidator/wait", "", 0, 0,
+                                 upcall_unixctl_dump_wait, NULL);
+        unixctl_command_register("revalidator/purge", "", 0, 0,
+                                 upcall_unixctl_purge, NULL);
         ovsthread_once_done(&once);
     }
+}
+
+struct udpif *
+udpif_create(struct dpif_backer *backer, struct dpif *dpif)
+{
+    struct udpif *udpif = xzalloc(sizeof *udpif);
 
     udpif->dpif = dpif;
     udpif->backer = backer;
     atomic_init(&udpif->flow_limit, MIN(ofproto_flow_limit, 10000));
-    udpif->secret = random_uint32();
     udpif->reval_seq = seq_create();
     udpif->dump_seq = seq_create();
     latch_init(&udpif->exit_latch);
+    latch_init(&udpif->pause_latch);
     list_push_back(&all_udpifs, &udpif->list_node);
+    atomic_init(&udpif->enable_ufid, false);
     atomic_init(&udpif->n_flows, 0);
     atomic_init(&udpif->n_flows_timestamp, LLONG_MIN);
     ovs_mutex_init(&udpif->n_flows_mutex);
+    udpif->ukeys = xmalloc(N_UMAPS * sizeof *udpif->ukeys);
+    for (int i = 0; i < N_UMAPS; i++) {
+        cmap_init(&udpif->ukeys[i].cmap);
+        ovs_mutex_init(&udpif->ukeys[i].mutex);
+    }
+
+    dpif_register_upcall_cb(dpif, upcall_cb, udpif);
+    dpif_register_dp_purge_cb(dpif, dp_purge_cb, udpif);
 
     return udpif;
+}
+
+void
+udpif_run(struct udpif *udpif)
+{
+    if (udpif->conns && udpif->conn_seq != seq_read(udpif->dump_seq)) {
+        int i;
+
+        for (i = 0; i < udpif->n_conns; i++) {
+            unixctl_command_reply(udpif->conns[i], NULL);
+        }
+        free(udpif->conns);
+        udpif->conns = NULL;
+        udpif->n_conns = 0;
+    }
 }
 
 void
@@ -275,8 +414,16 @@ udpif_destroy(struct udpif *udpif)
 {
     udpif_stop_threads(udpif);
 
+    for (int i = 0; i < N_UMAPS; i++) {
+        cmap_destroy(&udpif->ukeys[i].cmap);
+        ovs_mutex_destroy(&udpif->ukeys[i].mutex);
+    }
+    free(udpif->ukeys);
+    udpif->ukeys = NULL;
+
     list_remove(&udpif->list_node);
     latch_destroy(&udpif->exit_latch);
+    latch_destroy(&udpif->pause_latch);
     seq_destroy(udpif->reval_seq);
     seq_destroy(udpif->dump_seq);
     ovs_mutex_destroy(&udpif->n_flows_mutex);
@@ -303,20 +450,20 @@ udpif_stop_threads(struct udpif *udpif)
             xpthread_join(udpif->revalidators[i].thread, NULL);
         }
 
+        dpif_disable_upcall(udpif->dpif);
+
         for (i = 0; i < udpif->n_revalidators; i++) {
             struct revalidator *revalidator = &udpif->revalidators[i];
 
             /* Delete ukeys, and delete all flows from the datapath to prevent
              * double-counting stats. */
             revalidator_purge(revalidator);
-
-            hmap_destroy(&udpif->ukeys[i].hmap);
-            ovs_mutex_destroy(&udpif->ukeys[i].mutex);
         }
 
         latch_poll(&udpif->exit_latch);
 
         ovs_barrier_destroy(&udpif->reval_barrier);
+        ovs_barrier_destroy(&udpif->pause_barrier);
 
         free(udpif->revalidators);
         udpif->revalidators = NULL;
@@ -325,9 +472,6 @@ udpif_stop_threads(struct udpif *udpif)
         free(udpif->handlers);
         udpif->handlers = NULL;
         udpif->n_handlers = 0;
-
-        free(udpif->ukeys);
-        udpif->ukeys = NULL;
     }
 }
 
@@ -339,6 +483,7 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers,
 {
     if (udpif && n_handlers && n_revalidators) {
         size_t i;
+        bool enable_ufid;
 
         udpif->n_handlers = n_handlers;
         udpif->n_revalidators = n_revalidators;
@@ -353,21 +498,46 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers,
                 "handler", udpif_upcall_handler, handler);
         }
 
+        enable_ufid = ofproto_dpif_get_enable_ufid(udpif->backer);
+        atomic_init(&udpif->enable_ufid, enable_ufid);
+        dpif_enable_upcall(udpif->dpif);
+
         ovs_barrier_init(&udpif->reval_barrier, udpif->n_revalidators);
+        ovs_barrier_init(&udpif->pause_barrier, udpif->n_revalidators + 1);
         udpif->reval_exit = false;
+        udpif->pause = false;
         udpif->revalidators = xzalloc(udpif->n_revalidators
                                       * sizeof *udpif->revalidators);
-        udpif->ukeys = xmalloc(sizeof *udpif->ukeys * n_revalidators);
         for (i = 0; i < udpif->n_revalidators; i++) {
             struct revalidator *revalidator = &udpif->revalidators[i];
 
             revalidator->udpif = udpif;
-            hmap_init(&udpif->ukeys[i].hmap);
-            ovs_mutex_init(&udpif->ukeys[i].mutex);
-            revalidator->ukeys = &udpif->ukeys[i].hmap;
             revalidator->thread = ovs_thread_create(
                 "revalidator", udpif_revalidator, revalidator);
         }
+    }
+}
+
+/* Pauses all revalidators.  Should only be called by the main thread.
+ * When function returns, all revalidators are paused and will proceed
+ * only after udpif_resume_revalidators() is called. */
+static void
+udpif_pause_revalidators(struct udpif *udpif)
+{
+    if (ofproto_dpif_backer_enabled(udpif->backer)) {
+        latch_set(&udpif->pause_latch);
+        ovs_barrier_block(&udpif->pause_barrier);
+    }
+}
+
+/* Resumes the pausing of revalidators.  Should only be called by the
+ * main thread. */
+static void
+udpif_resume_revalidators(struct udpif *udpif)
+{
+    if (ofproto_dpif_backer_enabled(udpif->backer)) {
+        latch_poll(&udpif->pause_latch);
+        ovs_barrier_block(&udpif->pause_barrier);
     }
 }
 
@@ -447,10 +617,8 @@ udpif_get_memory_usage(struct udpif *udpif, struct simap *usage)
     simap_increase(usage, "handlers", udpif->n_handlers);
 
     simap_increase(usage, "revalidators", udpif->n_revalidators);
-    for (i = 0; i < udpif->n_revalidators; i++) {
-        ovs_mutex_lock(&udpif->ukeys[i].mutex);
-        simap_increase(usage, "udpif keys", hmap_count(&udpif->ukeys[i].hmap));
-        ovs_mutex_unlock(&udpif->ukeys[i].mutex);
+    for (i = 0; i < N_UMAPS; i++) {
+        simap_increase(usage, "udpif keys", cmap_count(&udpif->ukeys[i].cmap));
     }
 }
 
@@ -483,6 +651,15 @@ udpif_flush_all_datapaths(void)
     }
 }
 
+static bool
+udpif_use_ufid(struct udpif *udpif)
+{
+    bool enable;
+
+    atomic_read_relaxed(&enable_ufid, &enable);
+    return enable && ofproto_dpif_get_enable_ufid(udpif->backer);
+}
+
 
 static unsigned long
 udpif_get_n_flows(struct udpif *udpif)
@@ -491,22 +668,22 @@ udpif_get_n_flows(struct udpif *udpif)
     unsigned long flow_count;
 
     now = time_msec();
-    atomic_read(&udpif->n_flows_timestamp, &time);
+    atomic_read_relaxed(&udpif->n_flows_timestamp, &time);
     if (time < now - 100 && !ovs_mutex_trylock(&udpif->n_flows_mutex)) {
         struct dpif_dp_stats stats;
 
-        atomic_store(&udpif->n_flows_timestamp, now);
+        atomic_store_relaxed(&udpif->n_flows_timestamp, now);
         dpif_get_dp_stats(udpif->dpif, &stats);
         flow_count = stats.n_flows;
-        atomic_store(&udpif->n_flows, flow_count);
+        atomic_store_relaxed(&udpif->n_flows, flow_count);
         ovs_mutex_unlock(&udpif->n_flows_mutex);
     } else {
-        atomic_read(&udpif->n_flows, &flow_count);
+        atomic_read_relaxed(&udpif->n_flows, &flow_count);
     }
     return flow_count;
 }
 
-/* The upcall handler thread tries to read a batch of FLOW_MISS_MAX_BATCH
+/* The upcall handler thread tries to read a batch of UPCALL_MAX_BATCH
  * upcalls from dpif, processes the batch and installs corresponding flows
  * in dpif. */
 static void *
@@ -514,36 +691,116 @@ udpif_upcall_handler(void *arg)
 {
     struct handler *handler = arg;
     struct udpif *udpif = handler->udpif;
-    struct hmap misses = HMAP_INITIALIZER(&misses);
 
     while (!latch_is_set(&handler->udpif->exit_latch)) {
-        struct upcall upcalls[FLOW_MISS_MAX_BATCH];
-        struct flow_miss miss_buf[FLOW_MISS_MAX_BATCH];
-        struct flow_miss *miss;
-        size_t n_upcalls, i;
-
-        n_upcalls = read_upcalls(handler, upcalls, miss_buf, &misses);
-        if (!n_upcalls) {
+        if (recv_upcalls(handler)) {
+            poll_immediate_wake();
+        } else {
             dpif_recv_wait(udpif->dpif, handler->handler_id);
             latch_wait(&udpif->exit_latch);
-            poll_block();
-        } else {
-            handle_upcalls(handler, &misses, upcalls, n_upcalls);
-
-            HMAP_FOR_EACH (miss, hmap_node, &misses) {
-                xlate_out_uninit(&miss->xout);
-            }
-            hmap_clear(&misses);
-            for (i = 0; i < n_upcalls; i++) {
-                ofpbuf_uninit(&upcalls[i].dpif_upcall.packet);
-                ofpbuf_uninit(&upcalls[i].upcall_buf);
-            }
         }
-        coverage_clear();
+        poll_block();
     }
-    hmap_destroy(&misses);
 
     return NULL;
+}
+
+static size_t
+recv_upcalls(struct handler *handler)
+{
+    struct udpif *udpif = handler->udpif;
+    uint64_t recv_stubs[UPCALL_MAX_BATCH][512 / 8];
+    struct ofpbuf recv_bufs[UPCALL_MAX_BATCH];
+    struct dpif_upcall dupcalls[UPCALL_MAX_BATCH];
+    struct upcall upcalls[UPCALL_MAX_BATCH];
+    struct flow flows[UPCALL_MAX_BATCH];
+    size_t n_upcalls, i;
+
+    n_upcalls = 0;
+    while (n_upcalls < UPCALL_MAX_BATCH) {
+        struct ofpbuf *recv_buf = &recv_bufs[n_upcalls];
+        struct dpif_upcall *dupcall = &dupcalls[n_upcalls];
+        struct upcall *upcall = &upcalls[n_upcalls];
+        struct flow *flow = &flows[n_upcalls];
+        unsigned int mru;
+        int error;
+
+        ofpbuf_use_stub(recv_buf, recv_stubs[n_upcalls],
+                        sizeof recv_stubs[n_upcalls]);
+        if (dpif_recv(udpif->dpif, handler->handler_id, dupcall, recv_buf)) {
+            ofpbuf_uninit(recv_buf);
+            break;
+        }
+
+        if (odp_flow_key_to_flow(dupcall->key, dupcall->key_len, flow)
+            == ODP_FIT_ERROR) {
+            goto free_dupcall;
+        }
+
+        if (dupcall->mru) {
+            mru = nl_attr_get_u16(dupcall->mru);
+        } else {
+            mru = 0;
+        }
+
+        error = upcall_receive(upcall, udpif->backer, &dupcall->packet,
+                               dupcall->type, dupcall->userdata, flow, mru,
+                               &dupcall->ufid, PMD_ID_NULL);
+        if (error) {
+            if (error == ENODEV) {
+                /* Received packet on datapath port for which we couldn't
+                 * associate an ofproto.  This can happen if a port is removed
+                 * while traffic is being received.  Print a rate-limited
+                 * message in case it happens frequently. */
+                dpif_flow_put(udpif->dpif, DPIF_FP_CREATE, dupcall->key,
+                              dupcall->key_len, NULL, 0, NULL, 0,
+                              &dupcall->ufid, PMD_ID_NULL, NULL);
+                VLOG_INFO_RL(&rl, "received packet on unassociated datapath "
+                             "port %"PRIu32, flow->in_port.odp_port);
+            }
+            goto free_dupcall;
+        }
+
+        upcall->key = dupcall->key;
+        upcall->key_len = dupcall->key_len;
+        upcall->ufid = &dupcall->ufid;
+
+        upcall->out_tun_key = dupcall->out_tun_key;
+        upcall->actions = dupcall->actions;
+
+        if (vsp_adjust_flow(upcall->ofproto, flow, &dupcall->packet)) {
+            upcall->vsp_adjusted = true;
+        }
+
+        pkt_metadata_from_flow(&dupcall->packet.md, flow);
+        flow_extract(&dupcall->packet, flow);
+
+        error = process_upcall(udpif, upcall,
+                               &upcall->odp_actions, &upcall->wc);
+        if (error) {
+            goto cleanup;
+        }
+
+        n_upcalls++;
+        continue;
+
+cleanup:
+        upcall_uninit(upcall);
+free_dupcall:
+        dp_packet_uninit(&dupcall->packet);
+        ofpbuf_uninit(recv_buf);
+    }
+
+    if (n_upcalls) {
+        handle_upcalls(handler->udpif, upcalls, n_upcalls);
+        for (i = 0; i < n_upcalls; i++) {
+            dp_packet_uninit(&dupcalls[i].packet);
+            ofpbuf_uninit(&recv_bufs[i]);
+            upcall_uninit(&upcalls[i]);
+        }
+    }
+
+    return n_upcalls;
 }
 
 static void *
@@ -557,7 +814,6 @@ udpif_revalidator(void *arg)
     /* Used only by the leader. */
     long long int start_time = 0;
     uint64_t last_reval_seq = 0;
-    unsigned int flow_limit = 0;
     size_t n_flows = 0;
 
     revalidator->id = ovsthread_id_self();
@@ -565,13 +821,20 @@ udpif_revalidator(void *arg)
         if (leader) {
             uint64_t reval_seq;
 
+            recirc_run(); /* Recirculation cleanup. */
+
             reval_seq = seq_read(udpif->reval_seq);
-            udpif->need_revalidate = last_reval_seq != reval_seq;
             last_reval_seq = reval_seq;
 
             n_flows = udpif_get_n_flows(udpif);
             udpif->max_n_flows = MAX(n_flows, udpif->max_n_flows);
             udpif->avg_n_flows = (udpif->avg_n_flows + n_flows) / 2;
+
+            /* Only the leader checks the pause latch to prevent a race where
+             * some threads think it's false and proceed to block on
+             * reval_barrier and others think it's true and block indefinitely
+             * on the pause_barrier */
+            udpif->pause = latch_is_set(&udpif->pause_latch);
 
             /* Only the leader checks the exit latch to prevent a race where
              * some threads think it's true and exit and others think it's
@@ -580,12 +843,19 @@ udpif_revalidator(void *arg)
 
             start_time = time_msec();
             if (!udpif->reval_exit) {
-                dpif_flow_dump_start(&udpif->dump, udpif->dpif);
+                bool terse_dump;
+
+                terse_dump = udpif_use_ufid(udpif);
+                udpif->dump = dpif_flow_dump_create(udpif->dpif, terse_dump);
             }
         }
 
         /* Wait for the leader to start the flow dump. */
         ovs_barrier_block(&udpif->reval_barrier);
+        if (udpif->pause) {
+            revalidator_pause(revalidator);
+        }
+
         if (udpif->reval_exit) {
             break;
         }
@@ -599,13 +869,15 @@ udpif_revalidator(void *arg)
         ovs_barrier_block(&udpif->reval_barrier);
 
         if (leader) {
+            unsigned int flow_limit;
             long long int duration;
 
-            dpif_flow_dump_done(&udpif->dump);
+            atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
+
+            dpif_flow_dump_destroy(udpif->dump);
             seq_change(udpif->dump_seq);
 
             duration = MAX(time_msec() - start_time, 1);
-            atomic_read(&udpif->flow_limit, &flow_limit);
             udpif->dump_duration = duration;
             if (duration > 2000) {
                 flow_limit /= duration / 1000;
@@ -616,7 +888,7 @@ udpif_revalidator(void *arg)
                 flow_limit += 1000;
             }
             flow_limit = MIN(ofproto_flow_limit, MAX(flow_limit, 1000));
-            atomic_store(&udpif->flow_limit, flow_limit);
+            atomic_store_relaxed(&udpif->flow_limit, flow_limit);
 
             if (duration > 2000) {
                 VLOG_INFO("Spent an unreasonably long %lldms dumping flows",
@@ -626,6 +898,7 @@ udpif_revalidator(void *arg)
             poll_timer_wait_until(start_time + MIN(ofproto_max_idle, 500));
             seq_wait(udpif->reval_seq, last_reval_seq);
             latch_wait(&udpif->exit_latch);
+            latch_wait(&udpif->pause_latch);
             poll_block();
         }
     }
@@ -634,14 +907,13 @@ udpif_revalidator(void *arg)
 }
 
 static enum upcall_type
-classify_upcall(const struct upcall *upcall)
+classify_upcall(enum dpif_upcall_type type, const struct nlattr *userdata)
 {
-    const struct dpif_upcall *dpif_upcall = &upcall->dpif_upcall;
     union user_action_cookie cookie;
     size_t userdata_len;
 
     /* First look at the upcall type. */
-    switch (dpif_upcall->type) {
+    switch (type) {
     case DPIF_UC_ACTION:
         break;
 
@@ -650,17 +922,16 @@ classify_upcall(const struct upcall *upcall)
 
     case DPIF_N_UC_TYPES:
     default:
-        VLOG_WARN_RL(&rl, "upcall has unexpected type %"PRIu32,
-                     dpif_upcall->type);
+        VLOG_WARN_RL(&rl, "upcall has unexpected type %"PRIu32, type);
         return BAD_UPCALL;
     }
 
     /* "action" upcalls need a closer look. */
-    if (!dpif_upcall->userdata) {
+    if (!userdata) {
         VLOG_WARN_RL(&rl, "action upcall missing cookie");
         return BAD_UPCALL;
     }
-    userdata_len = nl_attr_get_size(dpif_upcall->userdata);
+    userdata_len = nl_attr_get_size(userdata);
     if (userdata_len < sizeof cookie.type
         || userdata_len > sizeof cookie) {
         VLOG_WARN_RL(&rl, "action upcall cookie has unexpected size %"PRIuSIZE,
@@ -668,7 +939,7 @@ classify_upcall(const struct upcall *upcall)
         return BAD_UPCALL;
     }
     memset(&cookie, 0, sizeof cookie);
-    memcpy(&cookie, nl_attr_get(dpif_upcall->userdata), userdata_len);
+    memcpy(&cookie, nl_attr_get(userdata), userdata_len);
     if (userdata_len == MAX(8, sizeof cookie.sflow)
         && cookie.type == USER_ACTION_COOKIE_SFLOW) {
         return SFLOW_UPCALL;
@@ -692,7 +963,7 @@ classify_upcall(const struct upcall *upcall)
  * initialized with at least 128 bytes of space. */
 static void
 compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
-                  struct flow *flow, odp_port_t odp_in_port,
+                  const struct flow *flow, odp_port_t odp_in_port,
                   struct ofpbuf *buf)
 {
     union user_action_cookie cookie;
@@ -707,234 +978,326 @@ compose_slow_path(struct udpif *udpif, struct xlate_out *xout,
         ? ODPP_NONE
         : odp_in_port;
     pid = dpif_port_get_pid(udpif->dpif, port, flow_hash_5tuple(flow, 0));
-    odp_put_userspace_action(pid, &cookie, sizeof cookie.slow_path, buf);
+    odp_put_userspace_action(pid, &cookie, sizeof cookie.slow_path,
+                             ODPP_NONE, false, buf);
 }
 
-static struct flow_miss *
-flow_miss_find(struct hmap *todo, const struct ofproto_dpif *ofproto,
-               const struct flow *flow, uint32_t hash)
+/* If there is no error, the upcall must be destroyed with upcall_uninit()
+ * before quiescing, as the referred objects are guaranteed to exist only
+ * until the calling thread quiesces.  Otherwise, do not call upcall_uninit()
+ * since the 'upcall->put_actions' remains uninitialized. */
+static int
+upcall_receive(struct upcall *upcall, const struct dpif_backer *backer,
+               const struct dp_packet *packet, enum dpif_upcall_type type,
+               const struct nlattr *userdata, const struct flow *flow,
+               const unsigned int mru,
+               const ovs_u128 *ufid, const unsigned pmd_id)
 {
-    struct flow_miss *miss;
+    int error;
 
-    HMAP_FOR_EACH_WITH_HASH (miss, hmap_node, hash, todo) {
-        if (miss->ofproto == ofproto && flow_equal(&miss->flow, flow)) {
-            return miss;
-        }
+    error = xlate_lookup(backer, flow, &upcall->ofproto, &upcall->ipfix,
+                         &upcall->sflow, NULL, &upcall->in_port);
+    if (error) {
+        return error;
     }
 
-    return NULL;
-}
+    upcall->recirc = NULL;
+    upcall->have_recirc_ref = false;
+    upcall->flow = flow;
+    upcall->packet = packet;
+    upcall->ufid = ufid;
+    upcall->pmd_id = pmd_id;
+    upcall->type = type;
+    upcall->userdata = userdata;
+    ofpbuf_use_stub(&upcall->odp_actions, upcall->odp_actions_stub,
+                    sizeof upcall->odp_actions_stub);
+    ofpbuf_init(&upcall->put_actions, 0);
 
-/* Reads and classifies upcalls.  Returns the number of upcalls successfully
- * read. */
-static size_t
-read_upcalls(struct handler *handler,
-             struct upcall upcalls[FLOW_MISS_MAX_BATCH],
-             struct flow_miss miss_buf[FLOW_MISS_MAX_BATCH],
-             struct hmap *misses)
-{
-    struct udpif *udpif = handler->udpif;
-    size_t i;
-    size_t n_misses = 0;
-    size_t n_upcalls = 0;
+    upcall->xout_initialized = false;
+    upcall->vsp_adjusted = false;
+    upcall->ukey_persists = false;
 
-    /*
-     * Try reading FLOW_MISS_MAX_BATCH upcalls from dpif.
-     *
-     * Extract the flow from each upcall.  Construct in 'misses' a hash table
-     * that maps each unique flow to a 'struct flow_miss'.
-     *
-     * Most commonly there is a single packet per flow_miss, but there are
-     * several reasons why there might be more than one, e.g.:
-     *
-     *   - The dpif packet interface does not support TSO (or UFO, etc.), so a
-     *     large packet sent to userspace is split into a sequence of smaller
-     *     ones.
-     *
-     *   - A stream of quickly arriving packets in an established "slow-pathed"
-     *     flow.
-     *
-     *   - Rarely, a stream of quickly arriving packets in a flow not yet
-     *     established.  (This is rare because most protocols do not send
-     *     multiple back-to-back packets before receiving a reply from the
-     *     other end of the connection, which gives OVS a chance to set up a
-     *     datapath flow.)
-     */
-    for (i = 0; i < FLOW_MISS_MAX_BATCH; i++) {
-        struct upcall *upcall = &upcalls[n_upcalls];
-        struct flow_miss *miss = &miss_buf[n_misses];
-        struct dpif_upcall *dupcall;
-        struct ofpbuf *packet;
-        struct flow_miss *existing_miss;
-        struct ofproto_dpif *ofproto;
-        struct dpif_sflow *sflow;
-        struct dpif_ipfix *ipfix;
-        struct flow flow;
-        enum upcall_type type;
-        odp_port_t odp_in_port;
-        int error;
+    upcall->ukey = NULL;
+    upcall->key = NULL;
+    upcall->key_len = 0;
+    upcall->mru = mru;
 
-        ofpbuf_use_stub(&upcall->upcall_buf, upcall->upcall_stub,
-                        sizeof upcall->upcall_stub);
-        error = dpif_recv(udpif->dpif, handler->handler_id,
-                          &upcall->dpif_upcall, &upcall->upcall_buf);
-        if (error) {
-            ofpbuf_uninit(&upcall->upcall_buf);
-            break;
-        }
+    upcall->out_tun_key = NULL;
+    upcall->actions = NULL;
 
-        dupcall = &upcall->dpif_upcall;
-        packet = &dupcall->packet;
-        error = xlate_receive(udpif->backer, packet, dupcall->key,
-                              dupcall->key_len, &flow,
-                              &ofproto, &ipfix, &sflow, NULL, &odp_in_port);
-        if (error) {
-            if (error == ENODEV) {
-                /* Received packet on datapath port for which we couldn't
-                 * associate an ofproto.  This can happen if a port is removed
-                 * while traffic is being received.  Print a rate-limited
-                 * message in case it happens frequently.  Install a drop flow
-                 * so that future packets of the flow are inexpensively dropped
-                 * in the kernel. */
-                VLOG_INFO_RL(&rl, "received packet on unassociated datapath "
-                             "port %"PRIu32, odp_in_port);
-                dpif_flow_put(udpif->dpif, DPIF_FP_CREATE,
-                              dupcall->key, dupcall->key_len, NULL, 0, NULL, 0,
-                              NULL);
-            }
-            goto destroy_upcall;
-        }
-
-        type = classify_upcall(upcall);
-        if (type == MISS_UPCALL) {
-            uint32_t hash;
-            struct pkt_metadata md = pkt_metadata_from_flow(&flow);
-
-            flow_extract(packet, &md, &miss->flow);
-            hash = flow_hash(&miss->flow, 0);
-            existing_miss = flow_miss_find(misses, ofproto, &miss->flow,
-                                           hash);
-            if (!existing_miss) {
-                hmap_insert(misses, &miss->hmap_node, hash);
-                miss->ofproto = ofproto;
-                miss->key = dupcall->key;
-                miss->key_len = dupcall->key_len;
-                miss->upcall_type = dupcall->type;
-                miss->stats.n_packets = 0;
-                miss->stats.n_bytes = 0;
-                miss->stats.used = time_msec();
-                miss->stats.tcp_flags = 0;
-                miss->odp_in_port = odp_in_port;
-                miss->put = false;
-                n_misses++;
-            } else {
-                miss = existing_miss;
-            }
-            miss->stats.tcp_flags |= ntohs(miss->flow.tcp_flags);
-            miss->stats.n_bytes += ofpbuf_size(packet);
-            miss->stats.n_packets++;
-
-            upcall->flow_miss = miss;
-            n_upcalls++;
-            continue;
-        }
-
-        switch (type) {
-        case SFLOW_UPCALL:
-            if (sflow) {
-                union user_action_cookie cookie;
-
-                memset(&cookie, 0, sizeof cookie);
-                memcpy(&cookie, nl_attr_get(dupcall->userdata),
-                       sizeof cookie.sflow);
-                dpif_sflow_received(sflow, packet, &flow, odp_in_port,
-                                    &cookie);
-            }
-            break;
-        case IPFIX_UPCALL:
-            if (ipfix) {
-                dpif_ipfix_bridge_sample(ipfix, packet, &flow);
-            }
-            break;
-        case FLOW_SAMPLE_UPCALL:
-            if (ipfix) {
-                union user_action_cookie cookie;
-
-                memset(&cookie, 0, sizeof cookie);
-                memcpy(&cookie, nl_attr_get(dupcall->userdata),
-                       sizeof cookie.flow_sample);
-
-                /* The flow reflects exactly the contents of the packet.
-                 * Sample the packet using it. */
-                dpif_ipfix_flow_sample(ipfix, packet, &flow,
-                                       cookie.flow_sample.collector_set_id,
-                                       cookie.flow_sample.probability,
-                                       cookie.flow_sample.obs_domain_id,
-                                       cookie.flow_sample.obs_point_id);
-            }
-            break;
-        case BAD_UPCALL:
-            break;
-        case MISS_UPCALL:
-            OVS_NOT_REACHED();
-        }
-
-        dpif_ipfix_unref(ipfix);
-        dpif_sflow_unref(sflow);
-
-destroy_upcall:
-        ofpbuf_uninit(&upcall->dpif_upcall.packet);
-        ofpbuf_uninit(&upcall->upcall_buf);
-    }
-
-    return n_upcalls;
+    return 0;
 }
 
 static void
-handle_upcalls(struct handler *handler, struct hmap *misses,
-               struct upcall *upcalls, size_t n_upcalls)
+upcall_xlate(struct udpif *udpif, struct upcall *upcall,
+             struct ofpbuf *odp_actions, struct flow_wildcards *wc)
 {
-    struct udpif *udpif = handler->udpif;
-    struct dpif_op *opsp[FLOW_MISS_MAX_BATCH * 2];
-    struct dpif_op ops[FLOW_MISS_MAX_BATCH * 2];
-    struct flow_miss *miss;
-    size_t n_ops, i;
-    unsigned int flow_limit;
-    bool fail_open, may_put;
+    struct dpif_flow_stats stats;
+    struct xlate_in xin;
 
-    atomic_read(&udpif->flow_limit, &flow_limit);
-    may_put = udpif_get_n_flows(udpif) < flow_limit;
+    stats.n_packets = 1;
+    stats.n_bytes = dp_packet_size(upcall->packet);
+    stats.used = time_msec();
+    stats.tcp_flags = ntohs(upcall->flow->tcp_flags);
 
-    /* Initialize each 'struct flow_miss's ->xout.
-     *
-     * We do this per-flow_miss rather than per-packet because, most commonly,
-     * all the packets in a flow can use the same translation.
-     *
-     * We can't do this in the previous loop because we need the TCP flags for
-     * all the packets in each miss. */
-    fail_open = false;
-    HMAP_FOR_EACH (miss, hmap_node, misses) {
-        struct xlate_in xin;
+    xlate_in_init(&xin, upcall->ofproto, upcall->flow, upcall->in_port, NULL,
+                  stats.tcp_flags, upcall->packet, wc, odp_actions);
 
-        xlate_in_init(&xin, miss->ofproto, &miss->flow, NULL,
-                      miss->stats.tcp_flags, NULL);
-        xin.may_learn = true;
+    if (upcall->type == DPIF_UC_MISS) {
+        xin.resubmit_stats = &stats;
 
-        if (miss->upcall_type == DPIF_UC_MISS) {
-            xin.resubmit_stats = &miss->stats;
-        } else {
-            /* For non-miss upcalls, there's a flow in the datapath which this
-             * packet was accounted to.  Presumably the revalidators will deal
-             * with pushing its stats eventually. */
+        if (xin.recirc) {
+            /* We may install a datapath flow only if we get a reference to the
+             * recirculation context (otherwise we could have recirculation
+             * upcalls using recirculation ID for which no context can be
+             * found).  We may still execute the flow's actions even if we
+             * don't install the flow. */
+            upcall->recirc = xin.recirc;
+            upcall->have_recirc_ref = recirc_id_node_try_ref_rcu(xin.recirc);
         }
-
-        xlate_actions(&xin, &miss->xout);
-        fail_open = fail_open || miss->xout.fail_open;
+    } else {
+        /* For non-miss upcalls, we are either executing actions (one of which
+         * is an userspace action) for an upcall, in which case the stats have
+         * already been taken care of, or there's a flow in the datapath which
+         * this packet was accounted to.  Presumably the revalidators will deal
+         * with pushing its stats eventually. */
     }
 
-    /* Now handle the packets individually in order of arrival.  In the common
-     * case each packet of a miss can share the same actions, but slow-pathed
-     * packets need to be translated individually:
+    upcall->dump_seq = seq_read(udpif->dump_seq);
+    upcall->reval_seq = seq_read(udpif->reval_seq);
+    xlate_actions(&xin, &upcall->xout);
+    upcall->xout_initialized = true;
+
+    /* Special case for fail-open mode.
+     *
+     * If we are in fail-open mode, but we are connected to a controller too,
+     * then we should send the packet up to the controller in the hope that it
+     * will try to set up a flow and thereby allow us to exit fail-open.
+     *
+     * See the top-level comment in fail-open.c for more information.
+     *
+     * Copy packets before they are modified by execution. */
+    if (upcall->xout.fail_open) {
+        const struct dp_packet *packet = upcall->packet;
+        struct ofproto_packet_in *pin;
+
+        pin = xmalloc(sizeof *pin);
+        pin->up.packet = xmemdup(dp_packet_data(packet), dp_packet_size(packet));
+        pin->up.packet_len = dp_packet_size(packet);
+        pin->up.reason = OFPR_NO_MATCH;
+        pin->up.table_id = 0;
+        pin->up.cookie = OVS_BE64_MAX;
+        flow_get_metadata(upcall->flow, &pin->up.flow_metadata);
+        pin->send_len = 0; /* Not used for flow table misses. */
+        pin->miss_type = OFPROTO_PACKET_IN_NO_MISS;
+        ofproto_dpif_send_packet_in(upcall->ofproto, pin);
+    }
+
+    if (!upcall->xout.slow) {
+        ofpbuf_use_const(&upcall->put_actions,
+                         odp_actions->data, odp_actions->size);
+    } else {
+        /* upcall->put_actions already initialized by upcall_receive(). */
+        compose_slow_path(udpif, &upcall->xout, upcall->flow,
+                          upcall->flow->in_port.odp_port,
+                          &upcall->put_actions);
+    }
+
+    /* This function is also called for slow-pathed flows.  As we are only
+     * going to create new datapath flows for actual datapath misses, there is
+     * no point in creating a ukey otherwise. */
+    if (upcall->type == DPIF_UC_MISS) {
+        upcall->ukey = ukey_create_from_upcall(upcall, wc);
+    }
+}
+
+static void
+upcall_uninit(struct upcall *upcall)
+{
+    if (upcall) {
+        if (upcall->xout_initialized) {
+            xlate_out_uninit(&upcall->xout);
+        }
+        ofpbuf_uninit(&upcall->odp_actions);
+        ofpbuf_uninit(&upcall->put_actions);
+        if (upcall->ukey) {
+            if (!upcall->ukey_persists) {
+                ukey_delete__(upcall->ukey);
+            }
+        } else if (upcall->have_recirc_ref) {
+            /* The reference was transferred to the ukey if one was created. */
+            recirc_id_node_unref(upcall->recirc);
+        }
+    }
+}
+
+static int
+upcall_cb(const struct dp_packet *packet, const struct flow *flow, ovs_u128 *ufid,
+          unsigned pmd_id, enum dpif_upcall_type type,
+          const struct nlattr *userdata, struct ofpbuf *actions,
+          struct flow_wildcards *wc, struct ofpbuf *put_actions, void *aux)
+{
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+    struct udpif *udpif = aux;
+    unsigned int flow_limit;
+    struct upcall upcall;
+    bool megaflow;
+    int error;
+
+    atomic_read_relaxed(&enable_megaflows, &megaflow);
+    atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
+
+    error = upcall_receive(&upcall, udpif->backer, packet, type, userdata,
+                           flow, 0, ufid, pmd_id);
+    if (error) {
+        return error;
+    }
+
+    error = process_upcall(udpif, &upcall, actions, wc);
+    if (error) {
+        goto out;
+    }
+
+    if (upcall.xout.slow && put_actions) {
+        ofpbuf_put(put_actions, upcall.put_actions.data,
+                   upcall.put_actions.size);
+    }
+
+    if (OVS_UNLIKELY(!megaflow)) {
+        flow_wildcards_init_for_packet(wc, flow);
+    }
+
+    if (udpif_get_n_flows(udpif) >= flow_limit) {
+        VLOG_WARN_RL(&rl, "upcall_cb failure: datapath flow limit reached");
+        error = ENOSPC;
+        goto out;
+    }
+
+    /* Prevent miss flow installation if the key has recirculation ID but we
+     * were not able to get a reference on it. */
+    if (type == DPIF_UC_MISS && upcall.recirc && !upcall.have_recirc_ref) {
+        VLOG_WARN_RL(&rl, "upcall_cb failure: no reference for recirc flow");
+        error = ENOSPC;
+        goto out;
+    }
+
+    if (upcall.ukey && !ukey_install(udpif, upcall.ukey)) {
+        VLOG_WARN_RL(&rl, "upcall_cb failure: ukey installation fails");
+        error = ENOSPC;
+    }
+out:
+    if (!error) {
+        upcall.ukey_persists = true;
+    }
+    upcall_uninit(&upcall);
+    return error;
+}
+
+static int
+process_upcall(struct udpif *udpif, struct upcall *upcall,
+               struct ofpbuf *odp_actions, struct flow_wildcards *wc)
+{
+    const struct nlattr *userdata = upcall->userdata;
+    const struct dp_packet *packet = upcall->packet;
+    const struct flow *flow = upcall->flow;
+
+    switch (classify_upcall(upcall->type, userdata)) {
+    case MISS_UPCALL:
+        upcall_xlate(udpif, upcall, odp_actions, wc);
+        return 0;
+
+    case SFLOW_UPCALL:
+        if (upcall->sflow) {
+            union user_action_cookie cookie;
+            const struct nlattr *actions;
+            size_t actions_len = 0;
+            struct dpif_sflow_actions sflow_actions;
+            memset(&sflow_actions, 0, sizeof sflow_actions);
+            memset(&cookie, 0, sizeof cookie);
+            memcpy(&cookie, nl_attr_get(userdata), sizeof cookie.sflow);
+            if (upcall->actions) {
+                /* Actions were passed up from datapath. */
+                actions = nl_attr_get(upcall->actions);
+                actions_len = nl_attr_get_size(upcall->actions);
+                if (actions && actions_len) {
+                    dpif_sflow_read_actions(flow, actions, actions_len,
+                                            &sflow_actions);
+                }
+            }
+            if (actions_len == 0) {
+                /* Lookup actions in userspace cache. */
+                struct udpif_key *ukey = ukey_lookup(udpif, upcall->ufid);
+                if (ukey) {
+                    ukey_get_actions(ukey, &actions, &actions_len);
+                    dpif_sflow_read_actions(flow, actions, actions_len,
+                                            &sflow_actions);
+                }
+            }
+            dpif_sflow_received(upcall->sflow, packet, flow,
+                                flow->in_port.odp_port, &cookie,
+                                actions_len > 0 ? &sflow_actions : NULL);
+        }
+        break;
+
+    case IPFIX_UPCALL:
+        if (upcall->ipfix) {
+            union user_action_cookie cookie;
+            struct flow_tnl output_tunnel_key;
+
+            memset(&cookie, 0, sizeof cookie);
+            memcpy(&cookie, nl_attr_get(userdata), sizeof cookie.ipfix);
+
+            if (upcall->out_tun_key) {
+                odp_tun_key_from_attr(upcall->out_tun_key, false,
+                                      &output_tunnel_key);
+            }
+            dpif_ipfix_bridge_sample(upcall->ipfix, packet, flow,
+                                     flow->in_port.odp_port,
+                                     cookie.ipfix.output_odp_port,
+                                     upcall->out_tun_key ?
+                                         &output_tunnel_key : NULL);
+        }
+        break;
+
+    case FLOW_SAMPLE_UPCALL:
+        if (upcall->ipfix) {
+            union user_action_cookie cookie;
+
+            memset(&cookie, 0, sizeof cookie);
+            memcpy(&cookie, nl_attr_get(userdata), sizeof cookie.flow_sample);
+
+            /* The flow reflects exactly the contents of the packet.
+             * Sample the packet using it. */
+            dpif_ipfix_flow_sample(upcall->ipfix, packet, flow,
+                                   cookie.flow_sample.collector_set_id,
+                                   cookie.flow_sample.probability,
+                                   cookie.flow_sample.obs_domain_id,
+                                   cookie.flow_sample.obs_point_id);
+        }
+        break;
+
+    case BAD_UPCALL:
+        break;
+    }
+
+    return EAGAIN;
+}
+
+static void
+handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
+               size_t n_upcalls)
+{
+    struct dpif_op *opsp[UPCALL_MAX_BATCH * 2];
+    struct ukey_op ops[UPCALL_MAX_BATCH * 2];
+    unsigned int flow_limit;
+    size_t n_ops, n_opsp, i;
+    bool may_put;
+
+    atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
+
+    may_put = udpif_get_n_flows(udpif) < flow_limit;
+
+    /* Handle the packets individually in order of arrival.
      *
      *   - For SLOW_CFM, SLOW_LACP, SLOW_STP, and SLOW_BFD, translation is what
      *     processes received packets for these protocols.
@@ -947,231 +1310,427 @@ handle_upcalls(struct handler *handler, struct hmap *misses,
     n_ops = 0;
     for (i = 0; i < n_upcalls; i++) {
         struct upcall *upcall = &upcalls[i];
-        struct flow_miss *miss = upcall->flow_miss;
-        struct ofpbuf *packet = &upcall->dpif_upcall.packet;
-        struct dpif_op *op;
-        ovs_be16 flow_vlan_tci;
+        const struct dp_packet *packet = upcall->packet;
+        struct ukey_op *op;
 
-        /* Save a copy of flow.vlan_tci in case it is changed to
-         * generate proper mega flow masks for VLAN splinter flows. */
-        flow_vlan_tci = miss->flow.vlan_tci;
-
-        if (miss->xout.slow) {
-            struct xlate_in xin;
-
-            xlate_in_init(&xin, miss->ofproto, &miss->flow, NULL, 0, packet);
-            xlate_actions_for_side_effects(&xin);
-        }
-
-        if (miss->flow.in_port.ofp_port
-            != vsp_realdev_to_vlandev(miss->ofproto,
-                                      miss->flow.in_port.ofp_port,
-                                      miss->flow.vlan_tci)) {
-            /* This packet was received on a VLAN splinter port.  We
-             * added a VLAN to the packet to make the packet resemble
-             * the flow, but the actions were composed assuming that
-             * the packet contained no VLAN.  So, we must remove the
-             * VLAN header from the packet before trying to execute the
-             * actions. */
-            if (ofpbuf_size(&miss->xout.odp_actions)) {
-                eth_pop_vlan(packet);
+        if (upcall->vsp_adjusted) {
+            /* This packet was received on a VLAN splinter port.  We added a
+             * VLAN to the packet to make the packet resemble the flow, but the
+             * actions were composed assuming that the packet contained no
+             * VLAN.  So, we must remove the VLAN header from the packet before
+             * trying to execute the actions. */
+            if (upcall->odp_actions.size) {
+                eth_pop_vlan(CONST_CAST(struct dp_packet *, upcall->packet));
             }
 
             /* Remove the flow vlan tags inserted by vlan splinter logic
              * to ensure megaflow masks generated match the data path flow. */
-            miss->flow.vlan_tci = 0;
+            CONST_CAST(struct flow *, upcall->flow)->vlan_tci = 0;
         }
 
         /* Do not install a flow into the datapath if:
          *
          *    - The datapath already has too many flows.
          *
-         *    - An earlier iteration of this loop already put the same flow.
-         *
          *    - We received this packet via some flow installed in the kernel
-         *      already. */
-        if (may_put
-            && !miss->put
-            && upcall->dpif_upcall.type == DPIF_UC_MISS) {
-            struct ofpbuf mask;
-            bool megaflow;
+         *      already.
+         *
+         *    - Upcall was a recirculation but we do not have a reference to
+         *      to the recirculation ID. */
+        if (may_put && upcall->type == DPIF_UC_MISS &&
+            (!upcall->recirc || upcall->have_recirc_ref)) {
+            struct udpif_key *ukey = upcall->ukey;
 
-            miss->put = true;
-
-            atomic_read(&enable_megaflows, &megaflow);
-            ofpbuf_use_stack(&mask, &miss->mask_buf, sizeof miss->mask_buf);
-            if (megaflow) {
-                size_t max_mpls;
-
-                max_mpls = ofproto_dpif_get_max_mpls_depth(miss->ofproto);
-                odp_flow_key_from_mask(&mask, &miss->xout.wc.masks,
-                                       &miss->flow, UINT32_MAX, max_mpls);
-            }
-
+            upcall->ukey_persists = true;
             op = &ops[n_ops++];
-            op->type = DPIF_OP_FLOW_PUT;
-            op->u.flow_put.flags = DPIF_FP_CREATE;
-            op->u.flow_put.key = miss->key;
-            op->u.flow_put.key_len = miss->key_len;
-            op->u.flow_put.mask = ofpbuf_data(&mask);
-            op->u.flow_put.mask_len = ofpbuf_size(&mask);
-            op->u.flow_put.stats = NULL;
 
-            if (!miss->xout.slow) {
-                op->u.flow_put.actions = ofpbuf_data(&miss->xout.odp_actions);
-                op->u.flow_put.actions_len = ofpbuf_size(&miss->xout.odp_actions);
-            } else {
-                struct ofpbuf buf;
-
-                ofpbuf_use_stack(&buf, miss->slow_path_buf,
-                                 sizeof miss->slow_path_buf);
-                compose_slow_path(udpif, &miss->xout, &miss->flow,
-                                  miss->odp_in_port, &buf);
-                op->u.flow_put.actions = ofpbuf_data(&buf);
-                op->u.flow_put.actions_len = ofpbuf_size(&buf);
-            }
+            op->ukey = ukey;
+            op->dop.type = DPIF_OP_FLOW_PUT;
+            op->dop.u.flow_put.flags = DPIF_FP_CREATE;
+            op->dop.u.flow_put.key = ukey->key;
+            op->dop.u.flow_put.key_len = ukey->key_len;
+            op->dop.u.flow_put.mask = ukey->mask;
+            op->dop.u.flow_put.mask_len = ukey->mask_len;
+            op->dop.u.flow_put.ufid = upcall->ufid;
+            op->dop.u.flow_put.stats = NULL;
+            ukey_get_actions(ukey, &op->dop.u.flow_put.actions,
+                             &op->dop.u.flow_put.actions_len);
         }
 
-        /*
-         * The 'miss' may be shared by multiple upcalls. Restore
-         * the saved flow vlan_tci field before processing the next
-         * upcall. */
-        miss->flow.vlan_tci = flow_vlan_tci;
-
-        if (ofpbuf_size(&miss->xout.odp_actions)) {
-
+        if (upcall->odp_actions.size) {
             op = &ops[n_ops++];
-            op->type = DPIF_OP_EXECUTE;
-            op->u.execute.packet = packet;
-            odp_key_to_pkt_metadata(miss->key, miss->key_len,
-                                    &op->u.execute.md);
-            op->u.execute.actions = ofpbuf_data(&miss->xout.odp_actions);
-            op->u.execute.actions_len = ofpbuf_size(&miss->xout.odp_actions);
-            op->u.execute.needs_help = (miss->xout.slow & SLOW_ACTION) != 0;
+            op->ukey = NULL;
+            op->dop.type = DPIF_OP_EXECUTE;
+            op->dop.u.execute.packet = CONST_CAST(struct dp_packet *, packet);
+            odp_key_to_pkt_metadata(upcall->key, upcall->key_len,
+                                    &op->dop.u.execute.packet->md);
+            op->dop.u.execute.actions = upcall->odp_actions.data;
+            op->dop.u.execute.actions_len = upcall->odp_actions.size;
+            op->dop.u.execute.needs_help = (upcall->xout.slow & SLOW_ACTION) != 0;
+            op->dop.u.execute.probe = false;
+            op->dop.u.execute.mtu = upcall->mru;
         }
     }
 
-    /* Special case for fail-open mode.
+    /* Execute batch.
      *
-     * If we are in fail-open mode, but we are connected to a controller too,
-     * then we should send the packet up to the controller in the hope that it
-     * will try to set up a flow and thereby allow us to exit fail-open.
-     *
-     * See the top-level comment in fail-open.c for more information.
-     *
-     * Copy packets before they are modified by execution. */
-    if (fail_open) {
-        for (i = 0; i < n_upcalls; i++) {
-            struct upcall *upcall = &upcalls[i];
-            struct flow_miss *miss = upcall->flow_miss;
-            struct ofpbuf *packet = &upcall->dpif_upcall.packet;
-            struct ofproto_packet_in *pin;
-
-            pin = xmalloc(sizeof *pin);
-            pin->up.packet = xmemdup(ofpbuf_data(packet), ofpbuf_size(packet));
-            pin->up.packet_len = ofpbuf_size(packet);
-            pin->up.reason = OFPR_NO_MATCH;
-            pin->up.table_id = 0;
-            pin->up.cookie = OVS_BE64_MAX;
-            flow_get_metadata(&miss->flow, &pin->up.fmd);
-            pin->send_len = 0; /* Not used for flow table misses. */
-            pin->miss_type = OFPROTO_PACKET_IN_NO_MISS;
-            ofproto_dpif_send_packet_in(miss->ofproto, pin);
-        }
-    }
-
-    /* Execute batch. */
+     * We install ukeys before installing the flows, locking them for exclusive
+     * access by this thread for the period of installation. This ensures that
+     * other threads won't attempt to delete the flows as we are creating them.
+     */
+    n_opsp = 0;
     for (i = 0; i < n_ops; i++) {
-        opsp[i] = &ops[i];
+        struct udpif_key *ukey = ops[i].ukey;
+
+        if (ukey) {
+            /* If we can't install the ukey, don't install the flow. */
+            if (!ukey_install_start(udpif, ukey)) {
+                ukey_delete__(ukey);
+                ops[i].ukey = NULL;
+                continue;
+            }
+        }
+        opsp[n_opsp++] = &ops[i].dop;
     }
-    dpif_operate(udpif->dpif, opsp, n_ops);
+    dpif_operate(udpif->dpif, opsp, n_opsp);
+    for (i = 0; i < n_ops; i++) {
+        if (ops[i].ukey) {
+            ukey_install_finish(ops[i].ukey, ops[i].dop.error);
+        }
+    }
 }
 
-/* Must be called with udpif->ukeys[hash % udpif->n_revalidators].mutex. */
+static uint32_t
+get_ufid_hash(const ovs_u128 *ufid)
+{
+    return ufid->u32[0];
+}
+
 static struct udpif_key *
-ukey_lookup__(struct udpif *udpif, const struct nlattr *key, size_t key_len,
-              uint32_t hash)
+ukey_lookup(struct udpif *udpif, const ovs_u128 *ufid)
 {
     struct udpif_key *ukey;
-    struct hmap *hmap = &udpif->ukeys[hash % udpif->n_revalidators].hmap;
+    int idx = get_ufid_hash(ufid) % N_UMAPS;
+    struct cmap *cmap = &udpif->ukeys[idx].cmap;
 
-    HMAP_FOR_EACH_WITH_HASH (ukey, hmap_node, hash, hmap) {
-        if (ukey->key_len == key_len && !memcmp(ukey->key, key, key_len)) {
+    CMAP_FOR_EACH_WITH_HASH (ukey, cmap_node, get_ufid_hash(ufid), cmap) {
+        if (ovs_u128_equals(&ukey->ufid, ufid)) {
             return ukey;
         }
     }
     return NULL;
 }
 
-static struct udpif_key *
-ukey_lookup(struct udpif *udpif, const struct nlattr *key, size_t key_len,
-            uint32_t hash)
+/* Provides safe lockless access of RCU protected 'ukey->actions'.  Callers may
+ * alternatively access the field directly if they take 'ukey->mutex'. */
+static void
+ukey_get_actions(struct udpif_key *ukey, const struct nlattr **actions, size_t *size)
 {
-    struct udpif_key *ukey;
-    uint32_t idx = hash % udpif->n_revalidators;
-
-    ovs_mutex_lock(&udpif->ukeys[idx].mutex);
-    ukey = ukey_lookup__(udpif, key, key_len, hash);
-    ovs_mutex_unlock(&udpif->ukeys[idx].mutex);
-
-    return ukey;
-}
-
-static struct udpif_key *
-ukey_create(const struct nlattr *key, size_t key_len, long long int used)
-{
-    struct udpif_key *ukey = xmalloc(sizeof *ukey);
-    ovs_mutex_init(&ukey->mutex);
-
-    ukey->key = (struct nlattr *) &ukey->key_buf;
-    memcpy(&ukey->key_buf, key, key_len);
-    ukey->key_len = key_len;
-
-    ovs_mutex_lock(&ukey->mutex);
-    ukey->mark = false;
-    ukey->flow_exists = true;
-    ukey->created = used ? used : time_msec();
-    memset(&ukey->stats, 0, sizeof ukey->stats);
-    ukey->xcache = NULL;
-    ovs_mutex_unlock(&ukey->mutex);
-
-    return ukey;
-}
-
-/* Checks for a ukey in 'udpif->ukeys' with the same 'ukey->key' and 'hash',
- * and inserts 'ukey' if it does not exist.
- *
- * Returns true if 'ukey' was inserted into 'udpif->ukeys', false otherwise. */
-static bool
-udpif_insert_ukey(struct udpif *udpif, struct udpif_key *ukey, uint32_t hash)
-{
-    struct udpif_key *duplicate;
-    uint32_t idx = hash % udpif->n_revalidators;
-    bool ok;
-
-    ovs_mutex_lock(&udpif->ukeys[idx].mutex);
-    duplicate = ukey_lookup__(udpif, ukey->key, ukey->key_len, hash);
-    if (duplicate) {
-        ok = false;
-    } else {
-        hmap_insert(&udpif->ukeys[idx].hmap, &ukey->hmap_node, hash);
-        ok = true;
-    }
-    ovs_mutex_unlock(&udpif->ukeys[idx].mutex);
-
-    return ok;
+    const struct ofpbuf *buf = ovsrcu_get(struct ofpbuf *, &ukey->actions);
+    *actions = buf->data;
+    *size = buf->size;
 }
 
 static void
-ukey_delete(struct revalidator *revalidator, struct udpif_key *ukey)
+ukey_set_actions(struct udpif_key *ukey, const struct ofpbuf *actions)
+{
+    ovsrcu_postpone(ofpbuf_delete,
+                    ovsrcu_get_protected(struct ofpbuf *, &ukey->actions));
+    ovsrcu_set(&ukey->actions, ofpbuf_clone(actions));
+}
+
+static struct udpif_key *
+ukey_create__(const struct nlattr *key, size_t key_len,
+              const struct nlattr *mask, size_t mask_len,
+              bool ufid_present, const ovs_u128 *ufid,
+              const unsigned pmd_id, const struct ofpbuf *actions,
+              uint64_t dump_seq, uint64_t reval_seq, long long int used,
+              uint32_t key_recirc_id, struct xlate_out *xout)
     OVS_NO_THREAD_SAFETY_ANALYSIS
 {
-    if (revalidator) {
-        hmap_remove(revalidator->ukeys, &ukey->hmap_node);
+    struct udpif_key *ukey = xmalloc(sizeof *ukey);
+
+    memcpy(&ukey->keybuf, key, key_len);
+    ukey->key = &ukey->keybuf.nla;
+    ukey->key_len = key_len;
+    memcpy(&ukey->maskbuf, mask, mask_len);
+    ukey->mask = &ukey->maskbuf.nla;
+    ukey->mask_len = mask_len;
+    ukey->ufid_present = ufid_present;
+    ukey->ufid = *ufid;
+    ukey->pmd_id = pmd_id;
+    ukey->hash = get_ufid_hash(&ukey->ufid);
+
+    ovsrcu_init(&ukey->actions, NULL);
+    ukey_set_actions(ukey, actions);
+
+    ovs_mutex_init(&ukey->mutex);
+    ukey->dump_seq = dump_seq;
+    ukey->reval_seq = reval_seq;
+    ukey->flow_exists = false;
+    ukey->created = time_msec();
+    memset(&ukey->stats, 0, sizeof ukey->stats);
+    ukey->stats.used = used;
+    ukey->xcache = NULL;
+
+    ukey->key_recirc_id = key_recirc_id;
+    recirc_refs_init(&ukey->recircs);
+    if (xout) {
+        /* Take ownership of the action recirc id references. */
+        recirc_refs_swap(&ukey->recircs, &xout->recircs);
     }
-    xlate_cache_delete(ukey->xcache);
-    ovs_mutex_destroy(&ukey->mutex);
-    free(ukey);
+
+    return ukey;
+}
+
+static struct udpif_key *
+ukey_create_from_upcall(struct upcall *upcall, struct flow_wildcards *wc)
+{
+    struct odputil_keybuf keystub, maskstub;
+    struct ofpbuf keybuf, maskbuf;
+    bool megaflow;
+    struct odp_flow_key_parms odp_parms = {
+        .flow = upcall->flow,
+        .mask = &wc->masks,
+    };
+
+    odp_parms.support = ofproto_dpif_get_support(upcall->ofproto)->odp;
+    if (upcall->key_len) {
+        ofpbuf_use_const(&keybuf, upcall->key, upcall->key_len);
+    } else {
+        /* dpif-netdev doesn't provide a netlink-formatted flow key in the
+         * upcall, so convert the upcall's flow here. */
+        ofpbuf_use_stack(&keybuf, &keystub, sizeof keystub);
+        odp_parms.odp_in_port = upcall->flow->in_port.odp_port;
+        odp_flow_key_from_flow(&odp_parms, &keybuf);
+    }
+
+    atomic_read_relaxed(&enable_megaflows, &megaflow);
+    ofpbuf_use_stack(&maskbuf, &maskstub, sizeof maskstub);
+    if (megaflow) {
+        odp_parms.odp_in_port = ODPP_NONE;
+        odp_parms.key_buf = &keybuf;
+
+        odp_flow_key_from_mask(&odp_parms, &maskbuf);
+    }
+
+    return ukey_create__(keybuf.data, keybuf.size, maskbuf.data, maskbuf.size,
+                         true, upcall->ufid, upcall->pmd_id,
+                         &upcall->put_actions, upcall->dump_seq,
+                         upcall->reval_seq, 0,
+                         upcall->have_recirc_ref ? upcall->recirc->id : 0,
+                         &upcall->xout);
+}
+
+static int
+ukey_create_from_dpif_flow(const struct udpif *udpif,
+                           const struct dpif_flow *flow,
+                           struct udpif_key **ukey)
+{
+    struct dpif_flow full_flow;
+    struct ofpbuf actions;
+    uint64_t dump_seq, reval_seq;
+    uint64_t stub[DPIF_FLOW_BUFSIZE / 8];
+    const struct nlattr *a;
+    unsigned int left;
+
+    if (!flow->key_len || !flow->actions_len) {
+        struct ofpbuf buf;
+        int err;
+
+        /* If the key or actions were not provided by the datapath, fetch the
+         * full flow. */
+        ofpbuf_use_stack(&buf, &stub, sizeof stub);
+        err = dpif_flow_get(udpif->dpif, NULL, 0, &flow->ufid,
+                            flow->pmd_id, &buf, &full_flow);
+        if (err) {
+            return err;
+        }
+        flow = &full_flow;
+    }
+
+    /* Check the flow actions for recirculation action.  As recirculation
+     * relies on OVS userspace internal state, we need to delete all old
+     * datapath flows with either a non-zero recirc_id in the key, or any
+     * recirculation actions upon OVS restart. */
+    NL_ATTR_FOR_EACH_UNSAFE (a, left, flow->key, flow->key_len) {
+        if (nl_attr_type(a) == OVS_KEY_ATTR_RECIRC_ID
+            && nl_attr_get_u32(a) != 0) {
+            return EINVAL;
+        }
+    }
+    NL_ATTR_FOR_EACH_UNSAFE (a, left, flow->actions, flow->actions_len) {
+        if (nl_attr_type(a) == OVS_ACTION_ATTR_RECIRC) {
+            return EINVAL;
+        }
+    }
+
+    dump_seq = seq_read(udpif->dump_seq);
+    reval_seq = seq_read(udpif->reval_seq);
+    ofpbuf_use_const(&actions, &flow->actions, flow->actions_len);
+    *ukey = ukey_create__(flow->key, flow->key_len,
+                          flow->mask, flow->mask_len, flow->ufid_present,
+                          &flow->ufid, flow->pmd_id, &actions, dump_seq,
+                          reval_seq, flow->stats.used, 0, NULL);
+
+    return 0;
+}
+
+/* Attempts to insert a ukey into the shared ukey maps.
+ *
+ * On success, returns true, installs the ukey and returns it in a locked
+ * state. Otherwise, returns false. */
+static bool
+ukey_install_start(struct udpif *udpif, struct udpif_key *new_ukey)
+    OVS_TRY_LOCK(true, new_ukey->mutex)
+{
+    struct umap *umap;
+    struct udpif_key *old_ukey;
+    uint32_t idx;
+    bool locked = false;
+
+    idx = new_ukey->hash % N_UMAPS;
+    umap = &udpif->ukeys[idx];
+    ovs_mutex_lock(&umap->mutex);
+    old_ukey = ukey_lookup(udpif, &new_ukey->ufid);
+    if (old_ukey) {
+        /* Uncommon case: A ukey is already installed with the same UFID. */
+        if (old_ukey->key_len == new_ukey->key_len
+            && !memcmp(old_ukey->key, new_ukey->key, new_ukey->key_len)) {
+            COVERAGE_INC(handler_duplicate_upcall);
+        } else {
+            struct ds ds = DS_EMPTY_INITIALIZER;
+
+            odp_format_ufid(&old_ukey->ufid, &ds);
+            ds_put_cstr(&ds, " ");
+            odp_flow_key_format(old_ukey->key, old_ukey->key_len, &ds);
+            ds_put_cstr(&ds, "\n");
+            odp_format_ufid(&new_ukey->ufid, &ds);
+            ds_put_cstr(&ds, " ");
+            odp_flow_key_format(new_ukey->key, new_ukey->key_len, &ds);
+
+            VLOG_WARN_RL(&rl, "Conflicting ukey for flows:\n%s", ds_cstr(&ds));
+            ds_destroy(&ds);
+        }
+    } else {
+        ovs_mutex_lock(&new_ukey->mutex);
+        cmap_insert(&umap->cmap, &new_ukey->cmap_node, new_ukey->hash);
+        locked = true;
+    }
+    ovs_mutex_unlock(&umap->mutex);
+
+    return locked;
+}
+
+static void
+ukey_install_finish__(struct udpif_key *ukey) OVS_REQUIRES(ukey->mutex)
+{
+    ukey->flow_exists = true;
+}
+
+static bool
+ukey_install_finish(struct udpif_key *ukey, int error)
+    OVS_RELEASES(ukey->mutex)
+{
+    if (!error) {
+        ukey_install_finish__(ukey);
+    }
+    ovs_mutex_unlock(&ukey->mutex);
+
+    return !error;
+}
+
+static bool
+ukey_install(struct udpif *udpif, struct udpif_key *ukey)
+{
+    /* The usual way to keep 'ukey->flow_exists' in sync with the datapath is
+     * to call ukey_install_start(), install the corresponding datapath flow,
+     * then call ukey_install_finish(). The netdev interface using upcall_cb()
+     * doesn't provide a function to separately finish the flow installation,
+     * so we perform the operations together here.
+     *
+     * This is fine currently, as revalidator threads will only delete this
+     * ukey during revalidator_sweep() and only if the dump_seq is mismatched.
+     * It is unlikely for a revalidator thread to advance dump_seq and reach
+     * the next GC phase between ukey creation and flow installation. */
+    return ukey_install_start(udpif, ukey) && ukey_install_finish(ukey, 0);
+}
+
+/* Searches for a ukey in 'udpif->ukeys' that matches 'flow' and attempts to
+ * lock the ukey. If the ukey does not exist, create it.
+ *
+ * Returns 0 on success, setting *result to the matching ukey and returning it
+ * in a locked state. Otherwise, returns an errno and clears *result. EBUSY
+ * indicates that another thread is handling this flow. Other errors indicate
+ * an unexpected condition creating a new ukey.
+ *
+ * *error is an output parameter provided to appease the threadsafety analyser,
+ * and its value matches the return value. */
+static int
+ukey_acquire(struct udpif *udpif, const struct dpif_flow *flow,
+             struct udpif_key **result, int *error)
+    OVS_TRY_LOCK(0, (*result)->mutex)
+{
+    struct udpif_key *ukey;
+    int retval;
+
+    ukey = ukey_lookup(udpif, &flow->ufid);
+    if (ukey) {
+        retval = ovs_mutex_trylock(&ukey->mutex);
+    } else {
+        /* Usually we try to avoid installing flows from revalidator threads,
+         * because locking on a umap may cause handler threads to block.
+         * However there are certain cases, like when ovs-vswitchd is
+         * restarted, where it is desirable to handle flows that exist in the
+         * datapath gracefully (ie, don't just clear the datapath). */
+        bool install;
+
+        retval = ukey_create_from_dpif_flow(udpif, flow, &ukey);
+        if (retval) {
+            goto done;
+        }
+        install = ukey_install_start(udpif, ukey);
+        if (install) {
+            ukey_install_finish__(ukey);
+            retval = 0;
+        } else {
+            ukey_delete__(ukey);
+            retval = EBUSY;
+        }
+    }
+
+done:
+    *error = retval;
+    if (retval) {
+        *result = NULL;
+    } else {
+        *result = ukey;
+    }
+    return retval;
+}
+
+static void
+ukey_delete__(struct udpif_key *ukey)
+    OVS_NO_THREAD_SAFETY_ANALYSIS
+{
+    if (ukey) {
+        if (ukey->key_recirc_id) {
+            recirc_free_id(ukey->key_recirc_id);
+        }
+        recirc_refs_unref(&ukey->recircs);
+        xlate_cache_delete(ukey->xcache);
+        ofpbuf_delete(ovsrcu_get(struct ofpbuf *, &ukey->actions));
+        ovs_mutex_destroy(&ukey->mutex);
+        free(ukey);
+    }
+}
+
+static void
+ukey_delete(struct umap *umap, struct udpif_key *ukey)
+    OVS_REQUIRES(umap->mutex)
+{
+    cmap_remove(&umap->cmap, &ukey->cmap_node, ukey->hash);
+    ovsrcu_postpone(ukey_delete__, ukey);
 }
 
 static bool
@@ -1207,167 +1766,229 @@ should_revalidate(const struct udpif *udpif, uint64_t packets,
     return false;
 }
 
-static bool
+/* Verifies that the datapath actions of 'ukey' are still correct, and pushes
+ * 'stats' for it.
+ *
+ * Returns a recommended action for 'ukey', options include:
+ *      UKEY_DELETE The ukey should be deleted.
+ *      UKEY_KEEP   The ukey is fine as is.
+ *      UKEY_MODIFY The ukey's actions should be changed but is otherwise
+ *                  fine.  Callers should change the actions to those found
+ *                  in the caller supplied 'odp_actions' buffer.  The
+ *                  recirculation references can be found in 'recircs' and
+ *                  must be handled by the caller.
+ *
+ * If the result is UKEY_MODIFY, then references to all recirc_ids used by the
+ * new flow will be held within 'recircs' (which may be none).
+ *
+ * The caller is responsible for both initializing 'recircs' prior this call,
+ * and ensuring any references are eventually freed.
+ */
+static enum reval_result
 revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
-                const struct nlattr *mask, size_t mask_len,
-                const struct nlattr *actions, size_t actions_len,
-                const struct dpif_flow_stats *stats)
+                const struct dpif_flow_stats *stats,
+                struct ofpbuf *odp_actions, uint64_t reval_seq,
+                struct recirc_refs *recircs)
     OVS_REQUIRES(ukey->mutex)
 {
-    uint64_t slow_path_buf[128 / 8];
     struct xlate_out xout, *xoutp;
     struct netflow *netflow;
     struct ofproto_dpif *ofproto;
     struct dpif_flow_stats push;
-    struct ofpbuf xout_actions;
-    struct flow flow, dp_mask;
-    uint32_t *dp32, *xout32;
-    odp_port_t odp_in_port;
+    struct flow flow;
+    struct flow_wildcards dp_mask, wc;
+    enum reval_result result;
+    ofp_port_t ofp_in_port;
     struct xlate_in xin;
     long long int last_used;
     int error;
-    size_t i;
-    bool may_learn, ok;
+    bool need_revalidate;
 
-    ok = false;
+    result = UKEY_DELETE;
     xoutp = NULL;
     netflow = NULL;
 
+    ofpbuf_clear(odp_actions);
+    need_revalidate = (ukey->reval_seq != reval_seq);
     last_used = ukey->stats.used;
     push.used = stats->used;
     push.tcp_flags = stats->tcp_flags;
-    push.n_packets = stats->n_packets > ukey->stats.n_packets
-        ? stats->n_packets - ukey->stats.n_packets
-        : 0;
-    push.n_bytes = stats->n_bytes > ukey->stats.n_bytes
-        ? stats->n_bytes - ukey->stats.n_bytes
-        : 0;
+    push.n_packets = (stats->n_packets > ukey->stats.n_packets
+                      ? stats->n_packets - ukey->stats.n_packets
+                      : 0);
+    push.n_bytes = (stats->n_bytes > ukey->stats.n_bytes
+                    ? stats->n_bytes - ukey->stats.n_bytes
+                    : 0);
 
-    if (udpif->need_revalidate && last_used
+    if (need_revalidate && last_used
         && !should_revalidate(udpif, push.n_packets, last_used)) {
-        ok = false;
         goto exit;
     }
 
     /* We will push the stats, so update the ukey stats cache. */
     ukey->stats = *stats;
-    if (!push.n_packets && !udpif->need_revalidate) {
-        ok = true;
+    if (!push.n_packets && !need_revalidate) {
+        result = UKEY_KEEP;
         goto exit;
     }
 
-    may_learn = push.n_packets > 0;
-    if (ukey->xcache && !udpif->need_revalidate) {
-        xlate_push_stats(ukey->xcache, may_learn, &push);
-        ok = true;
+    if (ukey->xcache && !need_revalidate) {
+        xlate_push_stats(ukey->xcache, &push);
+        result = UKEY_KEEP;
         goto exit;
     }
 
-    error = xlate_receive(udpif->backer, NULL, ukey->key, ukey->key_len, &flow,
-                          &ofproto, NULL, NULL, &netflow, &odp_in_port);
+    if (odp_flow_key_to_flow(ukey->key, ukey->key_len, &flow)
+        == ODP_FIT_ERROR) {
+        goto exit;
+    }
+
+    error = xlate_lookup(udpif->backer, &flow, &ofproto, NULL, NULL, &netflow,
+                         &ofp_in_port);
     if (error) {
         goto exit;
     }
 
-    if (udpif->need_revalidate) {
+    if (need_revalidate) {
         xlate_cache_clear(ukey->xcache);
     }
     if (!ukey->xcache) {
         ukey->xcache = xlate_cache_new();
     }
 
-    xlate_in_init(&xin, ofproto, &flow, NULL, push.tcp_flags, NULL);
-    xin.resubmit_stats = push.n_packets ? &push : NULL;
+    xlate_in_init(&xin, ofproto, &flow, ofp_in_port, NULL, push.tcp_flags,
+                  NULL, need_revalidate ? &wc : NULL, odp_actions);
+    if (push.n_packets) {
+        xin.resubmit_stats = &push;
+        xin.may_learn = true;
+    }
     xin.xcache = ukey->xcache;
-    xin.may_learn = may_learn;
-    xin.skip_wildcards = !udpif->need_revalidate;
     xlate_actions(&xin, &xout);
     xoutp = &xout;
 
-    if (!udpif->need_revalidate) {
-        ok = true;
+    if (!need_revalidate) {
+        result = UKEY_KEEP;
         goto exit;
     }
 
-    if (!xout.slow) {
-        ofpbuf_use_const(&xout_actions, ofpbuf_data(&xout.odp_actions),
-                         ofpbuf_size(&xout.odp_actions));
-    } else {
-        ofpbuf_use_stack(&xout_actions, slow_path_buf, sizeof slow_path_buf);
-        compose_slow_path(udpif, &xout, &flow, odp_in_port, &xout_actions);
+    if (xout.slow) {
+        ofpbuf_clear(odp_actions);
+        compose_slow_path(udpif, &xout, &flow, flow.in_port.odp_port,
+                          odp_actions);
     }
 
-    if (actions_len != ofpbuf_size(&xout_actions)
-        || memcmp(ofpbuf_data(&xout_actions), actions, actions_len)) {
-        goto exit;
-    }
-
-    if (odp_flow_key_to_mask(mask, mask_len, &dp_mask, &flow)
+    if (odp_flow_key_to_mask(ukey->mask, ukey->mask_len, ukey->key,
+                             ukey->key_len, &dp_mask, &flow)
         == ODP_FIT_ERROR) {
         goto exit;
     }
 
-    /* Since the kernel is free to ignore wildcarded bits in the mask, we can't
-     * directly check that the masks are the same.  Instead we check that the
-     * mask in the kernel is more specific i.e. less wildcarded, than what
-     * we've calculated here.  This guarantees we don't catch any packets we
-     * shouldn't with the megaflow. */
-    dp32 = (uint32_t *) &dp_mask;
-    xout32 = (uint32_t *) &xout.wc.masks;
-    for (i = 0; i < FLOW_U32S; i++) {
-        if ((dp32[i] | xout32[i]) != dp32[i]) {
-            goto exit;
-        }
+    /* Do not modify if any bit is wildcarded by the installed datapath flow,
+     * but not the newly revalidated wildcard mask (wc), i.e., if revalidation
+     * tells that the datapath flow is now too generic and must be narrowed
+     * down.  Note that we do not know if the datapath has ignored any of the
+     * wildcarded bits, so we may be overtly conservative here. */
+    if (flow_wildcards_has_extra(&dp_mask, &wc)) {
+        goto exit;
     }
-    ok = true;
+
+    if (!ofpbuf_equal(odp_actions,
+                      ovsrcu_get(struct ofpbuf *, &ukey->actions))) {
+        /* The datapath mask was OK, but the actions seem to have changed.
+         * Let's modify it in place. */
+        result = UKEY_MODIFY;
+        /* Transfer recirc action ID references to the caller. */
+        recirc_refs_swap(recircs, &xoutp->recircs);
+        goto exit;
+    }
+
+    result = UKEY_KEEP;
 
 exit:
-    if (netflow) {
-        if (!ok) {
-            netflow_flow_clear(netflow, &flow);
-        }
-        netflow_unref(netflow);
+    if (result != UKEY_DELETE) {
+        ukey->reval_seq = reval_seq;
+    }
+    if (netflow && result == UKEY_DELETE) {
+        netflow_flow_clear(netflow, &flow);
     }
     xlate_out_uninit(xoutp);
-    return ok;
+    return result;
 }
 
-struct dump_op {
-    struct udpif_key *ukey;
-    struct dpif_flow_stats stats; /* Stats for 'op'. */
-    struct dpif_op op;            /* Flow del operation. */
-};
+static void
+delete_op_init__(struct udpif *udpif, struct ukey_op *op,
+                 const struct dpif_flow *flow)
+{
+    op->ukey = NULL;
+    op->dop.type = DPIF_OP_FLOW_DEL;
+    op->dop.u.flow_del.key = flow->key;
+    op->dop.u.flow_del.key_len = flow->key_len;
+    op->dop.u.flow_del.ufid = flow->ufid_present ? &flow->ufid : NULL;
+    op->dop.u.flow_del.pmd_id = flow->pmd_id;
+    op->dop.u.flow_del.stats = &op->stats;
+    op->dop.u.flow_del.terse = udpif_use_ufid(udpif);
+}
 
 static void
-dump_op_init(struct dump_op *op, const struct nlattr *key, size_t key_len,
-             struct udpif_key *ukey)
+delete_op_init(struct udpif *udpif, struct ukey_op *op, struct udpif_key *ukey)
 {
     op->ukey = ukey;
-    op->op.type = DPIF_OP_FLOW_DEL;
-    op->op.u.flow_del.key = key;
-    op->op.u.flow_del.key_len = key_len;
-    op->op.u.flow_del.stats = &op->stats;
+    op->dop.type = DPIF_OP_FLOW_DEL;
+    op->dop.u.flow_del.key = ukey->key;
+    op->dop.u.flow_del.key_len = ukey->key_len;
+    op->dop.u.flow_del.ufid = ukey->ufid_present ? &ukey->ufid : NULL;
+    op->dop.u.flow_del.pmd_id = ukey->pmd_id;
+    op->dop.u.flow_del.stats = &op->stats;
+    op->dop.u.flow_del.terse = udpif_use_ufid(udpif);
 }
 
 static void
-push_dump_ops__(struct udpif *udpif, struct dump_op *ops, size_t n_ops)
+modify_op_init(struct ukey_op *op, struct udpif_key *ukey)
+{
+    op->ukey = ukey;
+    op->dop.type = DPIF_OP_FLOW_PUT;
+    op->dop.u.flow_put.flags = DPIF_FP_MODIFY;
+    op->dop.u.flow_put.key = ukey->key;
+    op->dop.u.flow_put.key_len = ukey->key_len;
+    op->dop.u.flow_put.mask = ukey->mask;
+    op->dop.u.flow_put.mask_len = ukey->mask_len;
+    op->dop.u.flow_put.ufid = &ukey->ufid;
+    op->dop.u.flow_put.pmd_id = ukey->pmd_id;
+    op->dop.u.flow_put.stats = NULL;
+    ukey_get_actions(ukey, &op->dop.u.flow_put.actions,
+                     &op->dop.u.flow_put.actions_len);
+}
+
+static void
+push_ukey_ops__(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
 {
     struct dpif_op *opsp[REVALIDATE_MAX_BATCH];
     size_t i;
 
     ovs_assert(n_ops <= REVALIDATE_MAX_BATCH);
     for (i = 0; i < n_ops; i++) {
-        opsp[i] = &ops[i].op;
+        opsp[i] = &ops[i].dop;
     }
     dpif_operate(udpif->dpif, opsp, n_ops);
 
     for (i = 0; i < n_ops; i++) {
-        struct dump_op *op = &ops[i];
+        struct ukey_op *op = &ops[i];
         struct dpif_flow_stats *push, *stats, push_buf;
 
-        stats = op->op.u.flow_del.stats;
+        stats = op->dop.u.flow_del.stats;
+        push = &push_buf;
+
+        if (op->dop.type != DPIF_OP_FLOW_DEL) {
+            /* Only deleted flows need their stats pushed. */
+            continue;
+        }
+
+        if (op->dop.error) {
+            /* flow_del error, 'stats' is unusable. */
+            continue;
+        }
+
         if (op->ukey) {
-            push = &push_buf;
             ovs_mutex_lock(&op->ukey->mutex);
             push->used = MAX(stats->used, op->ukey->stats.used);
             push->tcp_flags = stats->tcp_flags | op->ukey->stats.tcp_flags;
@@ -1379,37 +2000,44 @@ push_dump_ops__(struct udpif *udpif, struct dump_op *ops, size_t n_ops)
         }
 
         if (push->n_packets || netflow_exists()) {
+            const struct nlattr *key = op->dop.u.flow_del.key;
+            size_t key_len = op->dop.u.flow_del.key_len;
             struct ofproto_dpif *ofproto;
             struct netflow *netflow;
+            ofp_port_t ofp_in_port;
             struct flow flow;
-            bool may_learn;
+            int error;
 
-            may_learn = push->n_packets > 0;
             if (op->ukey) {
                 ovs_mutex_lock(&op->ukey->mutex);
                 if (op->ukey->xcache) {
-                    xlate_push_stats(op->ukey->xcache, may_learn, push);
+                    xlate_push_stats(op->ukey->xcache, push);
                     ovs_mutex_unlock(&op->ukey->mutex);
                     continue;
                 }
                 ovs_mutex_unlock(&op->ukey->mutex);
+                key = op->ukey->key;
+                key_len = op->ukey->key_len;
             }
 
-            if (!xlate_receive(udpif->backer, NULL, op->op.u.flow_del.key,
-                               op->op.u.flow_del.key_len, &flow, &ofproto,
-                               NULL, NULL, &netflow, NULL)) {
+            if (odp_flow_key_to_flow(key, key_len, &flow)
+                == ODP_FIT_ERROR) {
+                continue;
+            }
+
+            error = xlate_lookup(udpif->backer, &flow, &ofproto, NULL, NULL,
+                                 &netflow, &ofp_in_port);
+            if (!error) {
                 struct xlate_in xin;
 
-                xlate_in_init(&xin, ofproto, &flow, NULL, push->tcp_flags,
-                              NULL);
+                xlate_in_init(&xin, ofproto, &flow, ofp_in_port, NULL,
+                              push->tcp_flags, NULL, NULL, NULL);
                 xin.resubmit_stats = push->n_packets ? push : NULL;
-                xin.may_learn = may_learn;
-                xin.skip_wildcards = true;
+                xin.may_learn = push->n_packets > 0;
                 xlate_actions_for_side_effects(&xin);
 
                 if (netflow) {
                     netflow_flow_clear(netflow, &flow);
-                    netflow_unref(netflow);
                 }
             }
         }
@@ -1417,187 +2045,250 @@ push_dump_ops__(struct udpif *udpif, struct dump_op *ops, size_t n_ops)
 }
 
 static void
-push_dump_ops(struct revalidator *revalidator,
-              struct dump_op *ops, size_t n_ops)
+push_ukey_ops(struct udpif *udpif, struct umap *umap,
+              struct ukey_op *ops, size_t n_ops)
 {
     int i;
 
-    push_dump_ops__(revalidator->udpif, ops, n_ops);
+    push_ukey_ops__(udpif, ops, n_ops);
+    ovs_mutex_lock(&umap->mutex);
     for (i = 0; i < n_ops; i++) {
-        ukey_delete(revalidator, ops[i].ukey);
+        if (ops[i].dop.type == DPIF_OP_FLOW_DEL) {
+            ukey_delete(umap, ops[i].ukey);
+        }
+    }
+    ovs_mutex_unlock(&umap->mutex);
+}
+
+static void
+log_unexpected_flow(const struct dpif_flow *flow, int error)
+{
+    static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(10, 60);
+    struct ds ds = DS_EMPTY_INITIALIZER;
+
+    ds_put_format(&ds, "Failed to acquire udpif_key corresponding to "
+                  "unexpected flow (%s): ", ovs_strerror(error));
+    odp_format_ufid(&flow->ufid, &ds);
+    VLOG_WARN_RL(&rl, "%s", ds_cstr(&ds));
+}
+
+static void
+reval_op_init(struct ukey_op *op, enum reval_result result,
+              struct udpif *udpif, struct udpif_key *ukey,
+              struct recirc_refs *recircs, struct ofpbuf *odp_actions)
+{
+    if (result == UKEY_DELETE) {
+        delete_op_init(udpif, op, ukey);
+    } else if (result == UKEY_MODIFY) {
+        /* Store the new recircs. */
+        recirc_refs_swap(&ukey->recircs, recircs);
+        /* Release old recircs. */
+        recirc_refs_unref(recircs);
+        /* ukey->key_recirc_id remains, as the key is the same as before. */
+
+        ukey_set_actions(ukey, odp_actions);
+        modify_op_init(op, ukey);
     }
 }
 
 static void
 revalidate(struct revalidator *revalidator)
 {
+    uint64_t odp_actions_stub[1024 / 8];
+    struct ofpbuf odp_actions = OFPBUF_STUB_INITIALIZER(odp_actions_stub);
+
     struct udpif *udpif = revalidator->udpif;
-
-    struct dump_op ops[REVALIDATE_MAX_BATCH];
-    const struct nlattr *key, *mask, *actions;
-    size_t key_len, mask_len, actions_len;
-    const struct dpif_flow_stats *stats;
-    long long int now;
+    struct dpif_flow_dump_thread *dump_thread;
+    uint64_t dump_seq, reval_seq;
     unsigned int flow_limit;
-    size_t n_ops;
-    void *state;
 
-    n_ops = 0;
-    now = time_msec();
-    atomic_read(&udpif->flow_limit, &flow_limit);
+    dump_seq = seq_read(udpif->dump_seq);
+    reval_seq = seq_read(udpif->reval_seq);
+    atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
+    dump_thread = dpif_flow_dump_thread_create(udpif->dump);
+    for (;;) {
+        struct ukey_op ops[REVALIDATE_MAX_BATCH];
+        int n_ops = 0;
 
-    dpif_flow_dump_state_init(udpif->dpif, &state);
-    while (dpif_flow_dump_next(&udpif->dump, state, &key, &key_len, &mask,
-                               &mask_len, &actions, &actions_len, &stats)) {
-        struct udpif_key *ukey;
-        bool mark, may_destroy;
-        long long int used, max_idle;
-        uint32_t hash;
-        size_t n_flows;
+        struct dpif_flow flows[REVALIDATE_MAX_BATCH];
+        const struct dpif_flow *f;
+        int n_dumped;
 
-        hash = hash_bytes(key, key_len, udpif->secret);
-        ukey = ukey_lookup(udpif, key, key_len, hash);
+        long long int max_idle;
+        long long int now;
+        size_t n_dp_flows;
+        bool kill_them_all;
 
-        used = stats->used;
-        if (!ukey) {
-            ukey = ukey_create(key, key_len, used);
-            if (!udpif_insert_ukey(udpif, ukey, hash)) {
-                /* The same ukey has already been created. This means that
-                 * another revalidator is processing this flow
-                 * concurrently, so don't bother processing it. */
-                COVERAGE_INC(upcall_duplicate_flow);
-                ukey_delete(NULL, ukey);
-                goto next;
+        n_dumped = dpif_flow_dump_next(dump_thread, flows, ARRAY_SIZE(flows));
+        if (!n_dumped) {
+            break;
+        }
+
+        now = time_msec();
+
+        /* In normal operation we want to keep flows around until they have
+         * been idle for 'ofproto_max_idle' milliseconds.  However:
+         *
+         *     - If the number of datapath flows climbs above 'flow_limit',
+         *       drop that down to 100 ms to try to bring the flows down to
+         *       the limit.
+         *
+         *     - If the number of datapath flows climbs above twice
+         *       'flow_limit', delete all the datapath flows as an emergency
+         *       measure.  (We reassess this condition for the next batch of
+         *       datapath flows, so we will recover before all the flows are
+         *       gone.) */
+        n_dp_flows = udpif_get_n_flows(udpif);
+        kill_them_all = n_dp_flows > flow_limit * 2;
+        max_idle = n_dp_flows > flow_limit ? 100 : ofproto_max_idle;
+
+        for (f = flows; f < &flows[n_dumped]; f++) {
+            long long int used = f->stats.used;
+            struct recirc_refs recircs = RECIRC_REFS_EMPTY_INITIALIZER;
+            enum reval_result result;
+            struct udpif_key *ukey;
+            bool already_dumped;
+            int error;
+
+            if (ukey_acquire(udpif, f, &ukey, &error)) {
+                if (error == EBUSY) {
+                    /* Another thread is processing this flow, so don't bother
+                     * processing it.*/
+                    COVERAGE_INC(upcall_ukey_contention);
+                } else {
+                    log_unexpected_flow(f, error);
+                    if (error != ENOENT) {
+                        delete_op_init__(udpif, &ops[n_ops++], f);
+                    }
+                }
+                continue;
             }
-        }
 
-        if (ovs_mutex_trylock(&ukey->mutex)) {
-            /* The flow has been dumped, and is being handled by another
-             * revalidator concurrently. This can occasionally occur if the
-             * datapath is changed in the middle of a flow dump. Rather than
-             * perform the same work twice, skip the flow this time. */
-            COVERAGE_INC(upcall_duplicate_flow);
-            goto next;
-        }
+            already_dumped = ukey->dump_seq == dump_seq;
+            if (already_dumped) {
+                /* The flow has already been handled during this flow dump
+                 * operation. Skip it. */
+                if (ukey->xcache) {
+                    COVERAGE_INC(dumped_duplicate_flow);
+                } else {
+                    COVERAGE_INC(dumped_new_flow);
+                }
+                ovs_mutex_unlock(&ukey->mutex);
+                continue;
+            }
 
-        if (ukey->mark || !ukey->flow_exists) {
-            /* The flow has already been dumped and handled by another
-             * revalidator during this flow dump operation. Skip it. */
-            COVERAGE_INC(upcall_duplicate_flow);
+            if (!used) {
+                used = ukey->created;
+            }
+            if (kill_them_all || (used && used < now - max_idle)) {
+                result = UKEY_DELETE;
+            } else {
+                result = revalidate_ukey(udpif, ukey, &f->stats, &odp_actions,
+                                         reval_seq, &recircs);
+            }
+            ukey->dump_seq = dump_seq;
+            ukey->flow_exists = result != UKEY_DELETE;
+
+            if (result != UKEY_KEEP) {
+                /* Takes ownership of 'recircs'. */
+                reval_op_init(&ops[n_ops++], result, udpif, ukey, &recircs,
+                              &odp_actions);
+            }
             ovs_mutex_unlock(&ukey->mutex);
-            goto next;
         }
 
-        if (!used) {
-            used = ukey->created;
+        if (n_ops) {
+            push_ukey_ops__(udpif, ops, n_ops);
         }
-        n_flows = udpif_get_n_flows(udpif);
-        max_idle = ofproto_max_idle;
-        if (n_flows > flow_limit) {
-            max_idle = 100;
-        }
-
-        if ((used && used < now - max_idle) || n_flows > flow_limit * 2) {
-            mark = false;
-        } else {
-            mark = revalidate_ukey(udpif, ukey, mask, mask_len, actions,
-                                   actions_len, stats);
-        }
-        ukey->mark = ukey->flow_exists = mark;
-
-        if (!mark) {
-            dump_op_init(&ops[n_ops++], key, key_len, ukey);
-        }
-        ovs_mutex_unlock(&ukey->mutex);
-
-    next:
-        may_destroy = dpif_flow_dump_next_may_destroy_keys(&udpif->dump,
-                                                           state);
-
-        /* Only update 'now' immediately before 'buffer' will be updated.
-         * This gives us the current time relative to the time the datapath
-         * will write into 'stats'. */
-        if (may_destroy) {
-            now = time_msec();
-        }
-
-        /* Only do a dpif_operate when we've hit our maximum batch, or when our
-         * memory is about to be clobbered by the next call to
-         * dpif_flow_dump_next(). */
-        if (n_ops == REVALIDATE_MAX_BATCH || (n_ops && may_destroy)) {
-            push_dump_ops__(udpif, ops, n_ops);
-            n_ops = 0;
-        }
+        ovsrcu_quiesce();
     }
-
-    if (n_ops) {
-        push_dump_ops__(udpif, ops, n_ops);
-    }
-
-    dpif_flow_dump_state_uninit(udpif->dpif, state);
+    dpif_flow_dump_thread_destroy(dump_thread);
+    ofpbuf_uninit(&odp_actions);
 }
 
-/* Called with exclusive access to 'revalidator' and 'ukey'. */
-static bool
-handle_missed_revalidation(struct revalidator *revalidator,
-                           struct udpif_key *ukey)
-    OVS_NO_THREAD_SAFETY_ANALYSIS
+/* Pauses the 'revalidator', can only proceed after main thread
+ * calls udpif_resume_revalidators(). */
+static void
+revalidator_pause(struct revalidator *revalidator)
 {
-    struct udpif *udpif = revalidator->udpif;
-    struct nlattr *mask, *actions;
-    size_t mask_len, actions_len;
-    struct dpif_flow_stats stats;
-    struct ofpbuf *buf;
-    bool keep = false;
-
-    COVERAGE_INC(revalidate_missed_dp_flow);
-
-    if (!dpif_flow_get(udpif->dpif, ukey->key, ukey->key_len, &buf,
-                       &mask, &mask_len, &actions, &actions_len, &stats)) {
-        keep = revalidate_ukey(udpif, ukey, mask, mask_len, actions,
-                               actions_len, &stats);
-        ofpbuf_delete(buf);
-    }
-
-    return keep;
+    /* The first block is for sync'ing the pause with main thread. */
+    ovs_barrier_block(&revalidator->udpif->pause_barrier);
+    /* The second block is for pausing until main thread resumes. */
+    ovs_barrier_block(&revalidator->udpif->pause_barrier);
 }
 
 static void
 revalidator_sweep__(struct revalidator *revalidator, bool purge)
-    OVS_NO_THREAD_SAFETY_ANALYSIS
 {
-    struct dump_op ops[REVALIDATE_MAX_BATCH];
-    struct udpif_key *ukey, *next;
-    size_t n_ops;
+    struct udpif *udpif;
+    uint64_t dump_seq, reval_seq;
+    int slice;
 
-    n_ops = 0;
+    udpif = revalidator->udpif;
+    dump_seq = seq_read(udpif->dump_seq);
+    reval_seq = seq_read(udpif->reval_seq);
+    slice = revalidator - udpif->revalidators;
+    ovs_assert(slice < udpif->n_revalidators);
 
-    /* During garbage collection, this revalidator completely owns its ukeys
-     * map, and therefore doesn't need to do any locking. */
-    HMAP_FOR_EACH_SAFE (ukey, next, hmap_node, revalidator->ukeys) {
-        if (ukey->flow_exists) {
-            bool missed_flow = !ukey->mark;
+    for (int i = slice; i < N_UMAPS; i += udpif->n_revalidators) {
+        uint64_t odp_actions_stub[1024 / 8];
+        struct ofpbuf odp_actions = OFPBUF_STUB_INITIALIZER(odp_actions_stub);
 
-            ukey->mark = false;
-            if (purge
-                || (missed_flow
-                    && revalidator->udpif->need_revalidate
-                    && !handle_missed_revalidation(revalidator, ukey))) {
-                struct dump_op *op = &ops[n_ops++];
+        struct ukey_op ops[REVALIDATE_MAX_BATCH];
+        struct udpif_key *ukey;
+        struct umap *umap = &udpif->ukeys[i];
+        size_t n_ops = 0;
 
-                dump_op_init(op, ukey->key, ukey->key_len, ukey);
-                if (n_ops == REVALIDATE_MAX_BATCH) {
-                    push_dump_ops(revalidator, ops, n_ops);
-                    n_ops = 0;
-                }
+        CMAP_FOR_EACH(ukey, cmap_node, &umap->cmap) {
+            bool flow_exists, seq_mismatch;
+            struct recirc_refs recircs = RECIRC_REFS_EMPTY_INITIALIZER;
+            enum reval_result result;
+
+            /* Handler threads could be holding a ukey lock while it installs a
+             * new flow, so don't hang around waiting for access to it. */
+            if (ovs_mutex_trylock(&ukey->mutex)) {
+                continue;
             }
-        } else {
-            ukey_delete(revalidator, ukey);
-        }
-    }
+            flow_exists = ukey->flow_exists;
+            seq_mismatch = (ukey->dump_seq != dump_seq
+                            && ukey->reval_seq != reval_seq);
 
-    if (n_ops) {
-        push_dump_ops(revalidator, ops, n_ops);
+            if (purge) {
+                result = UKEY_DELETE;
+            } else if (!seq_mismatch) {
+                result = UKEY_KEEP;
+            } else {
+                struct dpif_flow_stats stats;
+                COVERAGE_INC(revalidate_missed_dp_flow);
+                memset(&stats, 0, sizeof stats);
+                result = revalidate_ukey(udpif, ukey, &stats, &odp_actions,
+                                         reval_seq, &recircs);
+            }
+            if (flow_exists && result != UKEY_KEEP) {
+                /* Takes ownership of 'recircs'. */
+                reval_op_init(&ops[n_ops++], result, udpif, ukey, &recircs,
+                              &odp_actions);
+            }
+            ovs_mutex_unlock(&ukey->mutex);
+
+            if (n_ops == REVALIDATE_MAX_BATCH) {
+                push_ukey_ops(udpif, umap, ops, n_ops);
+                n_ops = 0;
+            }
+
+            if (!flow_exists) {
+                ovs_mutex_lock(&umap->mutex);
+                ukey_delete(umap, ukey);
+                ovs_mutex_unlock(&umap->mutex);
+            }
+        }
+
+        if (n_ops) {
+            push_ukey_ops(udpif, umap, ops, n_ops);
+        }
+
+        ofpbuf_uninit(&odp_actions);
+        ovsrcu_quiesce();
     }
 }
 
@@ -1612,6 +2303,39 @@ revalidator_purge(struct revalidator *revalidator)
 {
     revalidator_sweep__(revalidator, true);
 }
+
+/* In reaction to dpif purge, purges all 'ukey's with same 'pmd_id'. */
+static void
+dp_purge_cb(void *aux, unsigned pmd_id)
+{
+    struct udpif *udpif = aux;
+    size_t i;
+
+    udpif_pause_revalidators(udpif);
+    for (i = 0; i < N_UMAPS; i++) {
+        struct ukey_op ops[REVALIDATE_MAX_BATCH];
+        struct udpif_key *ukey;
+        struct umap *umap = &udpif->ukeys[i];
+        size_t n_ops = 0;
+
+        CMAP_FOR_EACH(ukey, cmap_node, &umap->cmap) {
+             if (ukey->pmd_id == pmd_id) {
+                delete_op_init(udpif, &ops[n_ops++], ukey);
+                if (n_ops == REVALIDATE_MAX_BATCH) {
+                    push_ukey_ops(udpif, umap, ops, n_ops);
+                    n_ops = 0;
+                }
+            }
+        }
+
+        if (n_ops) {
+            push_ukey_ops(udpif, umap, ops, n_ops);
+        }
+
+        ovsrcu_quiesce();
+    }
+    udpif_resume_revalidators(udpif);
+}
 
 static void
 upcall_unixctl_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
@@ -1622,24 +2346,33 @@ upcall_unixctl_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
     LIST_FOR_EACH (udpif, list_node, &all_udpifs) {
         unsigned int flow_limit;
+        bool ufid_enabled;
         size_t i;
 
-        atomic_read(&udpif->flow_limit, &flow_limit);
+        atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
+        ufid_enabled = udpif_use_ufid(udpif);
 
         ds_put_format(&ds, "%s:\n", dpif_name(udpif->dpif));
         ds_put_format(&ds, "\tflows         : (current %lu)"
             " (avg %u) (max %u) (limit %u)\n", udpif_get_n_flows(udpif),
             udpif->avg_n_flows, udpif->max_n_flows, flow_limit);
         ds_put_format(&ds, "\tdump duration : %lldms\n", udpif->dump_duration);
-
+        ds_put_format(&ds, "\tufid enabled : ");
+        if (ufid_enabled) {
+            ds_put_format(&ds, "true\n");
+        } else {
+            ds_put_format(&ds, "false\n");
+        }
         ds_put_char(&ds, '\n');
+
         for (i = 0; i < n_revalidators; i++) {
             struct revalidator *revalidator = &udpif->revalidators[i];
+            int j, elements = 0;
 
-            ovs_mutex_lock(&udpif->ukeys[i].mutex);
-            ds_put_format(&ds, "\t%u: (keys %"PRIuSIZE")\n",
-                          revalidator->id, hmap_count(&udpif->ukeys[i].hmap));
-            ovs_mutex_unlock(&udpif->ukeys[i].mutex);
+            for (j = i; j < N_UMAPS; j += n_revalidators) {
+                elements += cmap_count(&udpif->ukeys[j].cmap);
+            }
+            ds_put_format(&ds, "\t%u: (keys %d)\n", revalidator->id, elements);
         }
     }
 
@@ -1657,7 +2390,7 @@ upcall_unixctl_disable_megaflows(struct unixctl_conn *conn,
                                  const char *argv[] OVS_UNUSED,
                                  void *aux OVS_UNUSED)
 {
-    atomic_store(&enable_megaflows, false);
+    atomic_store_relaxed(&enable_megaflows, false);
     udpif_flush_all_datapaths();
     unixctl_command_reply(conn, "megaflows disabled");
 }
@@ -1672,9 +2405,34 @@ upcall_unixctl_enable_megaflows(struct unixctl_conn *conn,
                                 const char *argv[] OVS_UNUSED,
                                 void *aux OVS_UNUSED)
 {
-    atomic_store(&enable_megaflows, true);
+    atomic_store_relaxed(&enable_megaflows, true);
     udpif_flush_all_datapaths();
     unixctl_command_reply(conn, "megaflows enabled");
+}
+
+/* Disable skipping flow attributes during flow dump.
+ *
+ * This command is only needed for advanced debugging, so it's not
+ * documented in the man page. */
+static void
+upcall_unixctl_disable_ufid(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                           const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
+{
+    atomic_store_relaxed(&enable_ufid, false);
+    unixctl_command_reply(conn, "Datapath dumping tersely using UFID disabled");
+}
+
+/* Re-enable skipping flow attributes during flow dump.
+ *
+ * This command is only needed for advanced debugging, so it's not documented
+ * in the man page. */
+static void
+upcall_unixctl_enable_ufid(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                          const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
+{
+    atomic_store_relaxed(&enable_ufid, true);
+    unixctl_command_reply(conn, "Datapath dumping tersely using UFID enabled "
+                                "for supported datapaths");
 }
 
 /* Set the flow limit.
@@ -1692,9 +2450,45 @@ upcall_unixctl_set_flow_limit(struct unixctl_conn *conn,
     unsigned int flow_limit = atoi(argv[1]);
 
     LIST_FOR_EACH (udpif, list_node, &all_udpifs) {
-        atomic_store(&udpif->flow_limit, flow_limit);
+        atomic_store_relaxed(&udpif->flow_limit, flow_limit);
     }
     ds_put_format(&ds, "set flow_limit to %u\n", flow_limit);
     unixctl_command_reply(conn, ds_cstr(&ds));
     ds_destroy(&ds);
+}
+
+static void
+upcall_unixctl_dump_wait(struct unixctl_conn *conn,
+                         int argc OVS_UNUSED,
+                         const char *argv[] OVS_UNUSED,
+                         void *aux OVS_UNUSED)
+{
+    if (list_is_singleton(&all_udpifs)) {
+        struct udpif *udpif = NULL;
+        size_t len;
+
+        udpif = OBJECT_CONTAINING(list_front(&all_udpifs), udpif, list_node);
+        len = (udpif->n_conns + 1) * sizeof *udpif->conns;
+        udpif->conn_seq = seq_read(udpif->dump_seq);
+        udpif->conns = xrealloc(udpif->conns, len);
+        udpif->conns[udpif->n_conns++] = conn;
+    } else {
+        unixctl_command_reply_error(conn, "can't wait on multiple udpifs.");
+    }
+}
+
+static void
+upcall_unixctl_purge(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                     const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
+{
+    struct udpif *udpif;
+
+    LIST_FOR_EACH (udpif, list_node, &all_udpifs) {
+        int n;
+
+        for (n = 0; n < udpif->n_revalidators; n++) {
+            revalidator_purge(&udpif->revalidators[n]);
+        }
+    }
+    unixctl_command_reply(conn, "");
 }

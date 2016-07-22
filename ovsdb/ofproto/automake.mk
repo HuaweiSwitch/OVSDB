@@ -1,4 +1,4 @@
-# Copyright (C) 2009, 2010, 2011, 2012 Nicira, Inc.
+# Copyright (C) 2009, 2010, 2011, 2012, 2014 Nicira, Inc.
 #
 # Copying and distribution of this file, with or without modification,
 # are permitted in any medium without royalty provided the copyright
@@ -6,7 +6,10 @@
 # without warranty of any kind.
 
 lib_LTLIBRARIES += ofproto/libofproto.la
-ofproto_libofproto_la_LDFLAGS = -release $(VERSION)
+ofproto_libofproto_la_LDFLAGS = \
+        -version-info $(LT_CURRENT):$(LT_REVISION):$(LT_AGE) \
+        -Wl,--version-script=$(top_builddir)/ofproto/libofproto.sym \
+        $(AM_LDFLAGS)
 ofproto_libofproto_la_SOURCES = \
 	ofproto/bond.c \
 	ofproto/bond.h \
@@ -56,6 +59,8 @@ if WIN32
 ofproto_libofproto_la_LIBADD += ${PTHREAD_LIBS}
 endif
 
+pkgconfig_DATA += \
+	$(srcdir)/ofproto/libofproto.pc
 
 # Distribute this generated file in order not to require Python at
 # build time if ofproto/ipfix.xml is not modified.
@@ -65,11 +70,15 @@ BUILT_SOURCES += ofproto/ipfix-entities.def
 
 CLEANFILES += ofproto/ipfix-entities.def
 
-MAN_FRAGMENTS += ofproto/ofproto-unixctl.man ofproto/ofproto-dpif-unixctl.man
+MAN_FRAGMENTS += ofproto/ofproto-unixctl.man ofproto/ofproto-dpif-unixctl.man \
+		 ofproto/ofproto-tnl-unixctl.man
 
 # IPFIX entity definition macros generation from IANA's XML definition.
 EXTRA_DIST += ofproto/ipfix.xml
 dist_noinst_SCRIPTS = ofproto/ipfix-gen-entities
 ofproto/ipfix-entities.def: ofproto/ipfix.xml ofproto/ipfix-gen-entities
-	$(run_python) $(srcdir)/ofproto/ipfix-gen-entities $< > $@.tmp
+	$(AM_V_GEN)$(run_python) $(srcdir)/ofproto/ipfix-gen-entities $< > $@.tmp && \
 	mv $@.tmp $@
+
+# IPFIX enterprise entity definition macros.
+EXTRA_DIST += ofproto/ipfix-enterprise-entities.def

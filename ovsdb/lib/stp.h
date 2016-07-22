@@ -25,12 +25,7 @@
 #include "compiler.h"
 #include "util.h"
 
-struct ofpbuf;
-
-/* LLC field values used for STP frames. */
-#define STP_LLC_SSAP 0x42
-#define STP_LLC_DSAP 0x42
-#define STP_LLC_CNTL 0x03
+struct dp_packet;
 
 /* Bridge and port priorities that should be used by default. */
 #define STP_DEFAULT_BRIDGE_PRIORITY 32768
@@ -57,7 +52,7 @@ typedef uint64_t stp_identifier;
 #define STP_MAX_PORTS 255
 void stp_init(void);
 struct stp *stp_create(const char *name, stp_identifier bridge_id,
-                       void (*send_bpdu)(struct ofpbuf *bpdu, int port_no,
+                       void (*send_bpdu)(struct dp_packet *bpdu, int port_no,
                                          void *aux),
                        void *aux);
 struct stp *stp_ref(const struct stp *);
@@ -146,6 +141,7 @@ const char *stp_role_name(enum stp_role);
 void stp_received_bpdu(struct stp_port *, const void *bpdu, size_t bpdu_size);
 
 struct stp *stp_port_get_stp(struct stp_port *);
+void stp_port_set_name(struct stp_port *, const char *);
 void stp_port_set_aux(struct stp_port *, void *);
 void *stp_port_get_aux(struct stp_port *);
 int stp_port_no(const struct stp_port *);

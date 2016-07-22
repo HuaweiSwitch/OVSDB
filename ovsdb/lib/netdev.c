@@ -26,6 +26,7 @@
 
 #include "coverage.h"
 #include "dpif.h"
+#include "dp-packet.h"
 #include "dynamic-string.h"
 #include "fatal-signal.h"
 #include "hash.h"
@@ -33,15 +34,17 @@
 #include "netdev-dpdk.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
-#include "ofpbuf.h"
+#include "odp-netlink.h"
 #include "openflow/openflow.h"
 #include "packets.h"
 #include "poll-loop.h"
+#include "seq.h"
 #include "shash.h"
 #include "smap.h"
 #include "sset.h"
 #include "svec.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
+#include "flow.h"
 
 VLOG_DEFINE_THIS_MODULE(netdev);
 
@@ -52,7 +55,7 @@ COVERAGE_DEFINE(netdev_get_stats);
 
 struct netdev_saved_flags {
     struct netdev *netdev;
-    struct list node;           /* In struct netdev's saved_flags_list. */
+    struct ovs_list node;           /* In struct netdev's saved_flags_list. */
     enum netdev_flags saved_flags;
     enum netdev_flags saved_values;
 };
@@ -77,9 +80,11 @@ static struct hmap netdev_classes OVS_GUARDED_BY(netdev_class_mutex)
     = HMAP_INITIALIZER(&netdev_classes);
 
 struct netdev_registered_class {
-    struct hmap_node hmap_node; /* In 'netdev_classes', by class->type. */
-    const struct netdev_class *class;
-    atomic_int ref_cnt;         /* Number of 'struct netdev's of this class. */
+    /* In 'netdev_classes', by class->type. */
+    struct hmap_node hmap_node OVS_GUARDED_BY(netdev_class_mutex);
+    const struct netdev_class *class OVS_GUARDED_BY(netdev_class_mutex);
+    /* Number of 'struct netdev's of this class. */
+    int ref_cnt OVS_GUARDED_BY(netdev_class_mutex);
 };
 
 /* This is set pretty low because we probably won't learn anything from the
@@ -90,6 +95,12 @@ static void restore_all_flags(void *aux OVS_UNUSED);
 void update_device_args(struct netdev *, const struct shash *args);
 
 int
+netdev_n_txq(const struct netdev *netdev)
+{
+    return netdev->n_txq;
+}
+
+int
 netdev_n_rxq(const struct netdev *netdev)
 {
     return netdev->n_rxq;
@@ -98,7 +109,10 @@ netdev_n_rxq(const struct netdev *netdev)
 bool
 netdev_is_pmd(const struct netdev *netdev)
 {
-    return !strcmp(netdev->netdev_class->type, "dpdk");
+    return (!strcmp(netdev->netdev_class->type, "dpdk") ||
+            !strcmp(netdev->netdev_class->type, "dpdkr") ||
+            !strcmp(netdev->netdev_class->type, "dpdkvhostcuse") ||
+            !strcmp(netdev->netdev_class->type, "dpdkvhostuser"));
 }
 
 static void
@@ -134,6 +148,11 @@ netdev_initialize(void)
 #if defined(__FreeBSD__) || defined(__NetBSD__)
         netdev_register_provider(&netdev_tap_class);
         netdev_register_provider(&netdev_bsd_class);
+#endif
+#ifdef _WIN32
+        netdev_register_provider(&netdev_windows_class);
+        netdev_register_provider(&netdev_internal_class);
+        netdev_vport_tunnel_register();
 #endif
         netdev_dpdk_register();
 
@@ -218,7 +237,7 @@ netdev_register_provider(const struct netdev_class *new_class)
             hmap_insert(&netdev_classes, &rc->hmap_node,
                         hash_string(new_class->type, 0));
             rc->class = new_class;
-            atomic_init(&rc->ref_cnt, 0);
+            rc->ref_cnt = 0;
         } else {
             VLOG_ERR("failed to initialize %s network device class: %s",
                      new_class->type, ovs_strerror(error));
@@ -239,6 +258,8 @@ netdev_unregister_provider(const char *type)
     struct netdev_registered_class *rc;
     int error;
 
+    netdev_initialize();
+
     ovs_mutex_lock(&netdev_class_mutex);
     rc = netdev_lookup_class(type);
     if (!rc) {
@@ -246,10 +267,7 @@ netdev_unregister_provider(const char *type)
                   "registered: %s", type);
         error = EAFNOSUPPORT;
     } else {
-        int ref_cnt;
-
-        atomic_read(&rc->ref_cnt, &ref_cnt);
-        if (!ref_cnt) {
+        if (!rc->ref_cnt) {
             hmap_remove(&netdev_classes, &rc->hmap_node);
             free(rc);
             error = 0;
@@ -298,7 +316,7 @@ netdev_is_reserved_name(const char *name)
     ovs_mutex_lock(&netdev_class_mutex);
     HMAP_FOR_EACH (rc, hmap_node, &netdev_classes) {
         const char *dpif_port = netdev_vport_class_get_dpif_port(rc->class);
-        if (dpif_port && !strcmp(dpif_port, name)) {
+        if (dpif_port && !strncmp(name, dpif_port, strlen(dpif_port))) {
             ovs_mutex_unlock(&netdev_class_mutex);
             return true;
         }
@@ -355,19 +373,15 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
                 netdev->change_seq = 1;
                 netdev->node = shash_add(&netdev_shash, name, netdev);
 
-                /* By default enable one rx queue per netdev. */
-                if (netdev->netdev_class->rxq_alloc) {
-                    netdev->n_rxq = 1;
-                } else {
-                    netdev->n_rxq = 0;
-                }
+                /* By default enable one tx and rx queue per netdev. */
+                netdev->n_txq = netdev->netdev_class->send ? 1 : 0;
+                netdev->n_rxq = netdev->netdev_class->rxq_alloc ? 1 : 0;
+
                 list_init(&netdev->saved_flags_list);
 
                 error = rc->class->construct(netdev);
                 if (!error) {
-                    int old_ref_cnt;
-
-                    atomic_add(&rc->ref_cnt, 1, &old_ref_cnt);
+                    rc->ref_cnt++;
                     netdev_change_seq_changed(netdev);
                 } else {
                     free(netdev->name);
@@ -419,7 +433,7 @@ netdev_ref(const struct netdev *netdev_)
 /* Reconfigures the device 'netdev' with 'args'.  'args' may be empty
  * or NULL if none are needed. */
 int
-netdev_set_config(struct netdev *netdev, const struct smap *args)
+netdev_set_config(struct netdev *netdev, const struct smap *args, char **errp)
     OVS_EXCLUDED(netdev_mutex)
 {
     if (netdev->netdev_class->set_config) {
@@ -429,13 +443,13 @@ netdev_set_config(struct netdev *netdev, const struct smap *args)
         error = netdev->netdev_class->set_config(netdev,
                                                  args ? args : &no_args);
         if (error) {
-            VLOG_WARN("%s: could not set configuration (%s)",
-                      netdev_get_name(netdev), ovs_strerror(error));
+            VLOG_WARN_BUF(errp, "%s: could not set configuration (%s)",
+                          netdev_get_name(netdev), ovs_strerror(error));
         }
         return error;
     } else if (args && !smap_is_empty(args)) {
-        VLOG_WARN("%s: arguments provided to device that is not configurable",
-                  netdev_get_name(netdev));
+        VLOG_WARN_BUF(errp, "%s: arguments provided to device that is not configurable",
+                      netdev_get_name(netdev));
     }
     return 0;
 }
@@ -477,6 +491,18 @@ netdev_get_tunnel_config(const struct netdev *netdev)
     }
 }
 
+/* Returns the id of the numa node the 'netdev' is on.  If the function
+ * is not implemented, returns NETDEV_NUMA_UNSPEC. */
+int
+netdev_get_numa_id(const struct netdev *netdev)
+{
+    if (netdev->netdev_class->get_numa_id) {
+        return netdev->netdev_class->get_numa_id(netdev);
+    } else {
+        return NETDEV_NUMA_UNSPEC;
+    }
+}
+
 static void
 netdev_unref(struct netdev *dev)
     OVS_RELEASES(netdev_mutex)
@@ -485,19 +511,20 @@ netdev_unref(struct netdev *dev)
     if (!--dev->ref_cnt) {
         const struct netdev_class *class = dev->netdev_class;
         struct netdev_registered_class *rc;
-        int old_ref_cnt;
 
         dev->netdev_class->destruct(dev);
 
-        shash_delete(&netdev_shash, dev->node);
+        if (dev->node) {
+            shash_delete(&netdev_shash, dev->node);
+        }
         free(dev->name);
         dev->netdev_class->dealloc(dev);
         ovs_mutex_unlock(&netdev_mutex);
 
         ovs_mutex_lock(&netdev_class_mutex);
         rc = netdev_lookup_class(class->type);
-        atomic_sub(&rc->ref_cnt, 1, &old_ref_cnt);
-        ovs_assert(old_ref_cnt > 0);
+        ovs_assert(rc->ref_cnt > 0);
+        rc->ref_cnt--;
         ovs_mutex_unlock(&netdev_class_mutex);
     } else {
         ovs_mutex_unlock(&netdev_mutex);
@@ -511,6 +538,28 @@ netdev_close(struct netdev *netdev)
 {
     if (netdev) {
         ovs_mutex_lock(&netdev_mutex);
+        netdev_unref(netdev);
+    }
+}
+
+/* Removes 'netdev' from the global shash and unrefs 'netdev'.
+ *
+ * This allows handler and revalidator threads to still retain references
+ * to this netdev while the main thread changes interface configuration.
+ *
+ * This function should only be called by the main thread when closing
+ * netdevs during user configuration changes. Otherwise, netdev_close should be
+ * used to close netdevs. */
+void
+netdev_remove(struct netdev *netdev)
+{
+    if (netdev) {
+        ovs_mutex_lock(&netdev_mutex);
+        if (netdev->node) {
+            shash_delete(&netdev_shash, netdev->node);
+            netdev->node = NULL;
+            netdev_change_seq_changed(netdev);
+        }
         netdev_unref(netdev);
     }
 }
@@ -588,7 +637,7 @@ netdev_rxq_close(struct netdev_rxq *rx)
  * Returns EAGAIN immediately if no packet is ready to be received.
  *
  * Returns EMSGSIZE, and discards the packet, if the received packet is longer
- * than 'ofpbuf_tailroom(buffer)'.
+ * than 'dp_packet_tailroom(buffer)'.
  *
  * It is advised that the tailroom of 'buffer' should be
  * VLAN_HEADER_LEN bytes longer than the MTU to allow space for an
@@ -598,7 +647,7 @@ netdev_rxq_close(struct netdev_rxq *rx)
  * This function may be set to null if it would always return EOPNOTSUPP
  * anyhow. */
 int
-netdev_rxq_recv(struct netdev_rxq *rx, struct ofpbuf **buffers, int *cnt)
+netdev_rxq_recv(struct netdev_rxq *rx, struct dp_packet **buffers, int *cnt)
 {
     int retval;
 
@@ -626,25 +675,70 @@ netdev_rxq_drain(struct netdev_rxq *rx)
             : 0);
 }
 
-/* Sends 'buffer' on 'netdev'.  Returns 0 if successful, otherwise a positive
- * errno value.  Returns EAGAIN without blocking if the packet cannot be queued
- * immediately.  Returns EMSGSIZE if a partial packet was transmitted or if
- * the packet is too big or too small to transmit on the device.
+/* Configures the number of tx queues and rx queues of 'netdev'.
+ * Return 0 if successful, otherwise a positive errno value.
+ *
+ * 'n_rxq' specifies the maximum number of receive queues to create.
+ * The netdev provider might choose to create less (e.g. if the hardware
+ * supports only a smaller number).  The caller can check how many have been
+ * actually created by calling 'netdev_n_rxq()'
+ *
+ * 'n_txq' specifies the exact number of transmission queues to create.
+ * If this function returns successfully, the caller can make 'n_txq'
+ * concurrent calls to netdev_send() (each one with a different 'qid' in the
+ * range [0..'n_txq'-1]).
+ *
+ * On error, the tx queue and rx queue configuration is indeterminant.
+ * Caller should make decision on whether to restore the previous or
+ * the default configuration.  Also, caller must make sure there is no
+ * other thread accessing the queues at the same time. */
+int
+netdev_set_multiq(struct netdev *netdev, unsigned int n_txq,
+                  unsigned int n_rxq)
+{
+    int error;
+
+    error = (netdev->netdev_class->set_multiq
+             ? netdev->netdev_class->set_multiq(netdev,
+                                                MAX(n_txq, 1),
+                                                MAX(n_rxq, 1))
+             : EOPNOTSUPP);
+
+    if (error && error != EOPNOTSUPP) {
+        VLOG_DBG_RL(&rl, "failed to set tx/rx queue for network device %s:"
+                    "%s", netdev_get_name(netdev), ovs_strerror(error));
+    }
+
+    return error;
+}
+
+/* Sends 'buffers' on 'netdev'.  Returns 0 if successful (for every packet),
+ * otherwise a positive errno value.  Returns EAGAIN without blocking if
+ * at least one the packets cannot be queued immediately.  Returns EMSGSIZE
+ * if a partial packet was transmitted or if a packet is too big or too small
+ * to transmit on the device.
+ *
+ * If the function returns a non-zero value, some of the packets might have
+ * been sent anyway.
  *
  * To retain ownership of 'buffer' caller can set may_steal to false.
  *
- * The kernel maintains a packet transmission queue, so the caller is not
- * expected to do additional queuing of packets.
+ * The network device is expected to maintain one or more packet
+ * transmission queues, so that the caller does not ordinarily have to
+ * do additional queuing of packets.  'qid' specifies the queue to use
+ * and can be ignored if the implementation does not support multiple
+ * queues.
  *
  * Some network devices may not implement support for this function.  In such
  * cases this function will always return EOPNOTSUPP. */
 int
-netdev_send(struct netdev *netdev, struct ofpbuf *buffer, bool may_steal)
+netdev_send(struct netdev *netdev, int qid, struct dp_packet **buffers,
+            int cnt, bool may_steal)
 {
     int error;
 
     error = (netdev->netdev_class->send
-             ? netdev->netdev_class->send(netdev, buffer, may_steal)
+             ? netdev->netdev_class->send(netdev, qid, buffers, cnt, may_steal)
              : EOPNOTSUPP);
     if (!error) {
         COVERAGE_INC(netdev_sent);
@@ -652,25 +746,77 @@ netdev_send(struct netdev *netdev, struct ofpbuf *buffer, bool may_steal)
     return error;
 }
 
+int
+netdev_pop_header(struct netdev *netdev, struct dp_packet **buffers, int cnt)
+{
+    int i;
+
+    if (!netdev->netdev_class->pop_header) {
+        return EOPNOTSUPP;
+    }
+
+    for (i = 0; i < cnt; i++) {
+        int err;
+
+        err = netdev->netdev_class->pop_header(buffers[i]);
+        if (err) {
+            dp_packet_clear(buffers[i]);
+        }
+    }
+
+    return 0;
+}
+
+int
+netdev_build_header(const struct netdev *netdev, struct ovs_action_push_tnl *data,
+                    const struct flow *tnl_flow)
+{
+    if (netdev->netdev_class->build_header) {
+        return netdev->netdev_class->build_header(netdev, data, tnl_flow);
+    }
+    return EOPNOTSUPP;
+}
+
+int
+netdev_push_header(const struct netdev *netdev,
+                   struct dp_packet **buffers, int cnt,
+                   const struct ovs_action_push_tnl *data)
+{
+    int i;
+
+    if (!netdev->netdev_class->push_header) {
+        return -EINVAL;
+    }
+
+    for (i = 0; i < cnt; i++) {
+        netdev->netdev_class->push_header(buffers[i], data);
+        pkt_metadata_init(&buffers[i]->md, u32_to_odp(data->out_port));
+    }
+
+    return 0;
+}
+
 /* Registers with the poll loop to wake up from the next call to poll_block()
  * when the packet transmission queue has sufficient room to transmit a packet
  * with netdev_send().
  *
- * The kernel maintains a packet transmission queue, so the client is not
- * expected to do additional queuing of packets.  Thus, this function is
- * unlikely to ever be used.  It is included for completeness. */
+ * The network device is expected to maintain one or more packet
+ * transmission queues, so that the caller does not ordinarily have to
+ * do additional queuing of packets.  'qid' specifies the queue to use
+ * and can be ignored if the implementation does not support multiple
+ * queues. */
 void
-netdev_send_wait(struct netdev *netdev)
+netdev_send_wait(struct netdev *netdev, int qid)
 {
     if (netdev->netdev_class->send_wait) {
-        netdev->netdev_class->send_wait(netdev);
+        netdev->netdev_class->send_wait(netdev, qid);
     }
 }
 
 /* Attempts to set 'netdev''s MAC address to 'mac'.  Returns 0 if successful,
  * otherwise a positive errno value. */
 int
-netdev_set_etheraddr(struct netdev *netdev, const uint8_t mac[ETH_ADDR_LEN])
+netdev_set_etheraddr(struct netdev *netdev, const struct eth_addr mac)
 {
     return netdev->netdev_class->set_etheraddr(netdev, mac);
 }
@@ -679,7 +825,7 @@ netdev_set_etheraddr(struct netdev *netdev, const uint8_t mac[ETH_ADDR_LEN])
  * the MAC address into 'mac'.  On failure, returns a positive errno value and
  * clears 'mac' to all-zeros. */
 int
-netdev_get_etheraddr(const struct netdev *netdev, uint8_t mac[ETH_ADDR_LEN])
+netdev_get_etheraddr(const struct netdev *netdev, struct eth_addr *mac)
 {
     return netdev->netdev_class->get_etheraddr(netdev, mac);
 }
@@ -1113,13 +1259,13 @@ netdev_restore_flags(struct netdev_saved_flags *sf)
  * ENXIO indicates that there is no ARP table entry for 'ip' on 'netdev'. */
 int
 netdev_arp_lookup(const struct netdev *netdev,
-                  ovs_be32 ip, uint8_t mac[ETH_ADDR_LEN])
+                  ovs_be32 ip, struct eth_addr *mac)
 {
     int error = (netdev->netdev_class->arp_lookup
                  ? netdev->netdev_class->arp_lookup(netdev, ip, mac)
                  : EOPNOTSUPP);
     if (error) {
-        memset(mac, 0, ETH_ADDR_LEN);
+        *mac = eth_addr_zero;
     }
     return error;
 }
@@ -1190,19 +1336,6 @@ netdev_get_stats(const struct netdev *netdev, struct netdev_stats *stats)
         memset(stats, 0xff, sizeof *stats);
     }
     return error;
-}
-
-/* Attempts to change the stats for 'netdev' to those provided in 'stats'.
- * Returns 0 if successful, otherwise a positive errno value.
- *
- * This will probably fail for most network devices.  Some devices might only
- * allow setting their stats to 0. */
-int
-netdev_set_stats(struct netdev *netdev, const struct netdev_stats *stats)
-{
-    return (netdev->netdev_class->set_stats
-             ? netdev->netdev_class->set_stats(netdev, stats)
-             : EOPNOTSUPP);
 }
 
 /* Attempts to set input rate limiting (policing) policy, such that up to

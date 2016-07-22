@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  * Copyright (c) 2013 InMon Corp.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +16,8 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
+#include "netflow.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <getopt.h>
@@ -24,21 +25,19 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <setjmp.h>
-
 #include "command-line.h"
 #include "daemon.h"
 #include "dynamic-string.h"
-#include "netflow.h"
 #include "ofpbuf.h"
+#include "ovstest.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "socket-util.h"
 #include "unixctl.h"
 #include "util.h"
-#include "vlog.h"
-#include "ovstest.h"
+#include "openvswitch/vlog.h"
 
-static void usage(void) NO_RETURN;
+OVS_NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[]);
 
 static unixctl_cb_func test_sflow_exit;
@@ -55,8 +54,19 @@ static unixctl_cb_func test_sflow_exit;
 
 /* Structure element tag numbers. */
 #define SFLOW_TAG_CTR_IFCOUNTERS 1
+#define SFLOW_TAG_CTR_LACPCOUNTERS 7
+#define SFLOW_TAG_CTR_OPENFLOWPORT 1004
+#define SFLOW_TAG_CTR_PORTNAME 1005
 #define SFLOW_TAG_PKT_HEADER 1
 #define SFLOW_TAG_PKT_SWITCH 1001
+#define SFLOW_TAG_PKT_TUNNEL4_OUT 1023
+#define SFLOW_TAG_PKT_TUNNEL4_IN 1024
+#define SFLOW_TAG_PKT_TUNNEL_VNI_OUT 1029
+#define SFLOW_TAG_PKT_TUNNEL_VNI_IN 1030
+#define SFLOW_TAG_PKT_MPLS 1006
+
+/* string sizes */
+#define SFL_MAX_PORTNAME_LEN 255
 
 struct sflow_addr {
     enum {
@@ -100,7 +110,15 @@ struct sflow_xdr {
     struct {
         uint32_t HEADER;
         uint32_t SWITCH;
+	uint32_t TUNNEL4_OUT;
+	uint32_t TUNNEL4_IN;
+	uint32_t TUNNEL_VNI_OUT;
+	uint32_t TUNNEL_VNI_IN;
+	uint32_t MPLS;
         uint32_t IFCOUNTERS;
+	uint32_t LACPCOUNTERS;
+	uint32_t OPENFLOWPORT;
+	uint32_t PORTNAME;
     } offset;
 
     /* Flow sample fields. */
@@ -222,6 +240,63 @@ process_counter_sample(struct sflow_xdr *x)
         printf(" promiscuous=%"PRIu32, sflowxdr_next(x));
         printf("\n");
     }
+    if (x->offset.LACPCOUNTERS) {
+	struct eth_addr *mac;
+	union {
+	    ovs_be32 all;
+	    struct {
+		uint8_t actorAdmin;
+		uint8_t actorOper;
+		uint8_t partnerAdmin;
+		uint8_t partnerOper;
+	    } v;
+	} state;
+
+        sflowxdr_setc(x, x->offset.LACPCOUNTERS);
+        printf("LACPCOUNTERS");
+	mac = (void *)sflowxdr_str(x);
+	printf(" sysID="ETH_ADDR_FMT, ETH_ADDR_ARGS(*mac));
+	sflowxdr_skip(x, 2);
+	mac = (void *)sflowxdr_str(x);
+	printf(" partnerID="ETH_ADDR_FMT, ETH_ADDR_ARGS(*mac));
+	sflowxdr_skip(x, 2);
+	printf(" aggID=%"PRIu32, sflowxdr_next(x));
+	state.all = sflowxdr_next_n(x);
+	printf(" actorAdmin=0x%"PRIx32, state.v.actorAdmin);
+	printf(" actorOper=0x%"PRIx32, state.v.actorOper);
+	printf(" partnerAdmin=0x%"PRIx32, state.v.partnerAdmin);
+	printf(" partnerOper=0x%"PRIx32, state.v.partnerOper);
+	printf(" LACPUDsRx=%"PRIu32, sflowxdr_next(x));
+	printf(" markerPDUsRx=%"PRIu32, sflowxdr_next(x));
+	printf(" markerRespPDUsRx=%"PRIu32, sflowxdr_next(x));
+	printf(" unknownRx=%"PRIu32, sflowxdr_next(x));
+	printf(" illegalRx=%"PRIu32, sflowxdr_next(x));
+	printf(" LACPUDsTx=%"PRIu32, sflowxdr_next(x));
+	printf(" markerPDUsTx=%"PRIu32, sflowxdr_next(x));
+	printf(" markerRespPDUsTx=%"PRIu32, sflowxdr_next(x));
+        printf("\n");
+    }
+    if (x->offset.OPENFLOWPORT) {
+        sflowxdr_setc(x, x->offset.OPENFLOWPORT);
+        printf("OPENFLOWPORT");
+        printf(" datapath_id=%"PRIu64, sflowxdr_next_int64(x));
+        printf(" port_no=%"PRIu32, sflowxdr_next(x));
+	printf("\n");
+    }
+    if (x->offset.PORTNAME) {
+	uint32_t pnLen;
+	const char *pnBytes;
+	char portName[SFL_MAX_PORTNAME_LEN + 1];
+        sflowxdr_setc(x, x->offset.PORTNAME);
+        printf("PORTNAME");
+	pnLen = sflowxdr_next(x);
+	SFLOWXDR_assert(x, (pnLen <= SFL_MAX_PORTNAME_LEN));
+	pnBytes = sflowxdr_str(x);
+	memcpy(portName, pnBytes, pnLen);
+	portName[pnLen] = '\0';
+	printf(" portName=%s", portName);
+	printf("\n");
+    }
 }
 
 static char
@@ -252,6 +327,25 @@ print_hex(const char *a, int len, char *buf, int bufLen)
     return b;
 }
 
+static void
+print_struct_ipv4(struct sflow_xdr *x, const char *prefix)
+{
+    ovs_be32 src, dst;
+
+    printf(" %s_length=%"PRIu32,    prefix, sflowxdr_next(x));
+    printf(" %s_protocol=%"PRIu32,  prefix, sflowxdr_next(x));
+
+    src = sflowxdr_next_n(x);
+    dst = sflowxdr_next_n(x);
+    printf(" %s_src="IP_FMT,        prefix, IP_ARGS(src));
+    printf(" %s_dst="IP_FMT,        prefix, IP_ARGS(dst));
+
+    printf(" %s_src_port=%"PRIu32,  prefix, sflowxdr_next(x));
+    printf(" %s_dst_port=%"PRIu32,  prefix, sflowxdr_next(x));
+    printf(" %s_tcp_flags=%"PRIu32, prefix, sflowxdr_next(x));
+    printf(" %s_tos=%"PRIu32,       prefix, sflowxdr_next(x));
+}
+
 #define SFLOW_HEX_SCRATCH 1024
 
 static void
@@ -266,6 +360,52 @@ process_flow_sample(struct sflow_xdr *x)
         printf(" ds=%s>%"PRIu32":%"PRIu32,
                x->agentIPStr, x->dsClass, x->dsIndex);
         printf(" fsSeqNo=%"PRIu32, x->fsSeqNo);
+
+        if (x->offset.TUNNEL4_IN) {
+            sflowxdr_setc(x, x->offset.TUNNEL4_IN);
+	    print_struct_ipv4(x, "tunnel4_in");
+        }
+
+        if (x->offset.TUNNEL4_OUT) {
+            sflowxdr_setc(x, x->offset.TUNNEL4_OUT);
+	    print_struct_ipv4(x, "tunnel4_out");
+        }
+
+        if (x->offset.TUNNEL_VNI_IN) {
+            sflowxdr_setc(x, x->offset.TUNNEL_VNI_IN);
+	    printf( " tunnel_in_vni=%"PRIu32, sflowxdr_next(x));
+        }
+
+        if (x->offset.TUNNEL_VNI_OUT) {
+            sflowxdr_setc(x, x->offset.TUNNEL_VNI_OUT);
+	    printf( " tunnel_out_vni=%"PRIu32, sflowxdr_next(x));
+        }
+
+        if (x->offset.MPLS) {
+            uint32_t addr_type, stack_depth, ii;
+            ovs_be32 mpls_lse;
+            sflowxdr_setc(x, x->offset.MPLS);
+            /* OVS only sets the out_stack. The rest will be blank. */
+            /* skip next hop address */
+            addr_type = sflowxdr_next(x);
+            sflowxdr_skip(x, addr_type == SFLOW_ADDRTYPE_IP6 ? 4 : 1);
+            /* skip in_stack */
+            stack_depth = sflowxdr_next(x);
+            sflowxdr_skip(x, stack_depth);
+            /* print out_stack */
+            stack_depth = sflowxdr_next(x);
+            for(ii = 0; ii < stack_depth; ii++) {
+                mpls_lse=sflowxdr_next_n(x);
+                printf(" mpls_label_%"PRIu32"=%"PRIu32,
+                       ii, mpls_lse_to_label(mpls_lse));
+                printf(" mpls_tc_%"PRIu32"=%"PRIu32,
+                       ii, mpls_lse_to_tc(mpls_lse));
+                printf(" mpls_ttl_%"PRIu32"=%"PRIu32,
+                       ii, mpls_lse_to_ttl(mpls_lse));
+                printf(" mpls_bos_%"PRIu32"=%"PRIu32,
+                       ii, mpls_lse_to_bos(mpls_lse));
+            }
+        }
 
         if (x->offset.SWITCH) {
             sflowxdr_setc(x, x->offset.SWITCH);
@@ -373,6 +513,15 @@ process_datagram(struct sflow_xdr *x)
                 case SFLOW_TAG_CTR_IFCOUNTERS:
                     sflowxdr_mark_unique(x, &x->offset.IFCOUNTERS);
                     break;
+                case SFLOW_TAG_CTR_LACPCOUNTERS:
+                    sflowxdr_mark_unique(x, &x->offset.LACPCOUNTERS);
+                    break;
+                case SFLOW_TAG_CTR_PORTNAME:
+                    sflowxdr_mark_unique(x, &x->offset.PORTNAME);
+                    break;
+                case SFLOW_TAG_CTR_OPENFLOWPORT:
+                    sflowxdr_mark_unique(x, &x->offset.OPENFLOWPORT);
+                    break;
 
                     /* Add others here... */
                 }
@@ -441,6 +590,26 @@ process_datagram(struct sflow_xdr *x)
                     sflowxdr_mark_unique(x, &x->offset.SWITCH);
                     break;
 
+		case SFLOW_TAG_PKT_TUNNEL4_OUT:
+                    sflowxdr_mark_unique(x, &x->offset.TUNNEL4_OUT);
+                    break;
+
+		case SFLOW_TAG_PKT_TUNNEL4_IN:
+                    sflowxdr_mark_unique(x, &x->offset.TUNNEL4_IN);
+                    break;
+
+		case SFLOW_TAG_PKT_TUNNEL_VNI_OUT:
+                    sflowxdr_mark_unique(x, &x->offset.TUNNEL_VNI_OUT);
+                    break;
+
+		case SFLOW_TAG_PKT_TUNNEL_VNI_IN:
+                    sflowxdr_mark_unique(x, &x->offset.TUNNEL_VNI_IN);
+                    break;
+
+		case SFLOW_TAG_PKT_MPLS:
+                    sflowxdr_mark_unique(x, &x->offset.MPLS);
+                    break;
+
                     /* Add others here... */
                 }
 
@@ -470,13 +639,13 @@ static void
 print_sflow(struct ofpbuf *buf)
 {
     char *dgram_buf;
-    int dgram_len = ofpbuf_size(buf);
+    int dgram_len = buf->size;
     struct sflow_xdr xdrDatagram;
     struct sflow_xdr *x = &xdrDatagram;
 
     memset(x, 0, sizeof *x);
     if (SFLOWXDR_try(x)) {
-        SFLOWXDR_assert(x, (dgram_buf = ofpbuf_try_pull(buf, ofpbuf_size(buf))));
+        SFLOWXDR_assert(x, (dgram_buf = ofpbuf_try_pull(buf, buf->size)));
         sflowxdr_init(x, dgram_buf, dgram_len);
         SFLOWXDR_assert(x, dgram_len >= SFLOW_MIN_LEN);
         process_datagram(x);
@@ -497,8 +666,9 @@ test_sflow_main(int argc, char *argv[])
     int error;
     int sock;
 
-    proctitle_init(argc, argv);
+    ovs_cmdl_proctitle_init(argc, argv);
     set_program_name(argv[0]);
+    service_start(&argc, &argv);
     parse_options(argc, argv);
 
     if (argc - optind != 1) {
@@ -507,13 +677,13 @@ test_sflow_main(int argc, char *argv[])
     }
     target = argv[optind];
 
-    sock = inet_open_passive(SOCK_DGRAM, target, 0, NULL, 0);
+    sock = inet_open_passive(SOCK_DGRAM, target, 0, NULL, 0, true);
     if (sock < 0) {
-        ovs_fatal(0, "%s: failed to open (%s)", argv[1], ovs_strerror(-sock));
+        ovs_fatal(0, "%s: failed to open (%s)", target, ovs_strerror(-sock));
     }
 
     daemon_save_fd(STDOUT_FILENO);
-    daemonize_start();
+    daemonize_start(false);
 
     error = unixctl_server_create(NULL, &server);
     if (error) {
@@ -531,7 +701,7 @@ test_sflow_main(int argc, char *argv[])
 
         ofpbuf_clear(&buf);
         do {
-            retval = read(sock, ofpbuf_data(&buf), buf.allocated);
+            retval = recv(sock, buf.data, buf.allocated, 0);
         } while (retval < 0 && errno == EINTR);
         if (retval > 0) {
             ofpbuf_put_uninit(&buf, retval);
@@ -547,6 +717,8 @@ test_sflow_main(int argc, char *argv[])
         unixctl_server_wait(server);
         poll_block();
     }
+    ofpbuf_uninit(&buf);
+    unixctl_server_destroy(server);
 }
 
 static void
@@ -563,7 +735,7 @@ parse_options(int argc, char *argv[])
         VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
 
     for (;;) {
         int c = getopt_long(argc, argv, short_options, long_options, NULL);

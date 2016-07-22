@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@
 #include <inttypes.h>
 #include <sys/types.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +31,7 @@
 #include "util.h"
 #include "stream-provider.h"
 #include "stream-fd.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(stream_tcp);
 
@@ -42,27 +41,11 @@ static int
 new_tcp_stream(const char *name, int fd, int connect_status,
                struct stream **streamp)
 {
-    struct sockaddr_storage local;
-    socklen_t local_len = sizeof local;
-    int on = 1;
-    int retval;
-
-    /* Get the local IP and port information */
-    retval = getsockname(fd, (struct sockaddr *) &local, &local_len);
-    if (retval) {
-        memset(&local, 0, sizeof local);
+    if (connect_status == 0) {
+        setsockopt_tcp_nodelay(fd);
     }
 
-    retval = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
-    if (retval) {
-        int error = sock_errno();
-        VLOG_ERR("%s: setsockopt(TCP_NODELAY): %s",
-                 name, sock_strerror(error));
-        closesocket(fd);
-        return error;
-    }
-
-    return new_fd_stream(name, fd, connect_status, streamp);
+    return new_fd_stream(name, fd, connect_status, AF_INET, streamp);
 }
 
 static int
@@ -93,6 +76,8 @@ const struct stream_class tcp_stream_class = {
 };
 
 #ifdef _WIN32
+#include "dirs.h"
+
 static int
 windows_open(const char *name, char *suffix, struct stream **streamp,
              uint8_t dscp)
@@ -106,7 +91,7 @@ windows_open(const char *name, char *suffix, struct stream **streamp,
     if (!strchr(suffix, ':')) {
         path = xasprintf("%s/%s", ovs_rundir(), suffix);
     } else {
-        path = strdup(suffix);
+        path = xstrdup(suffix);
     }
 
     file = fopen(path, "r");
@@ -154,31 +139,42 @@ static int ptcp_accept(int fd, const struct sockaddr_storage *,
                        size_t, struct stream **streamp);
 
 static int
-ptcp_open(const char *name OVS_UNUSED, char *suffix, struct pstream **pstreamp,
-          uint8_t dscp)
+new_pstream(char *suffix, const char *name, struct pstream **pstreamp,
+            int dscp, char *unlink_path, bool kernel_print_port)
 {
     char bound_name[SS_NTOP_BUFSIZE + 16];
     char addrbuf[SS_NTOP_BUFSIZE];
     struct sockaddr_storage ss;
-    uint16_t port;
     int error;
+    uint16_t port;
     int fd;
+    char *conn_name = CONST_CAST(char *, name);
 
-    fd = inet_open_passive(SOCK_STREAM, suffix, -1, &ss, dscp);
+    fd = inet_open_passive(SOCK_STREAM, suffix, -1, &ss, dscp,
+                           kernel_print_port);
     if (fd < 0) {
         return -fd;
     }
 
     port = ss_get_port(&ss);
-    snprintf(bound_name, sizeof bound_name, "ptcp:%"PRIu16":%s",
-             port, ss_format_address(&ss, addrbuf, sizeof addrbuf));
+    if (!conn_name) {
+        snprintf(bound_name, sizeof bound_name, "ptcp:%"PRIu16":%s",
+                 port, ss_format_address(&ss, addrbuf, sizeof addrbuf));
+        conn_name = bound_name;
+    }
 
-    error = new_fd_pstream(bound_name, fd, ptcp_accept, set_dscp, NULL,
-                           pstreamp);
+    error = new_fd_pstream(conn_name, fd, ptcp_accept, unlink_path, pstreamp);
     if (!error) {
         pstream_set_bound_port(*pstreamp, htons(port));
     }
     return error;
+}
+
+static int
+ptcp_open(const char *name OVS_UNUSED, char *suffix, struct pstream **pstreamp,
+          uint8_t dscp)
+{
+    return new_pstream(suffix, NULL, pstreamp, dscp, NULL, true);
 }
 
 static int
@@ -201,13 +197,12 @@ const struct pstream_class ptcp_pstream_class = {
     NULL,
     NULL,
     NULL,
-    NULL,
 };
 
 #ifdef _WIN32
 static int
-pwindows_open(const char *name OVS_UNUSED, char *suffix,
-              struct pstream **pstreamp, uint8_t dscp)
+pwindows_open(const char *name, char *suffix, struct pstream **pstreamp,
+              uint8_t dscp)
 {
     int error;
     char *suffix_new, *path;
@@ -215,19 +210,20 @@ pwindows_open(const char *name OVS_UNUSED, char *suffix,
     struct pstream *listener;
 
     suffix_new = xstrdup("0:127.0.0.1");
-    error = ptcp_open(name, suffix_new, pstreamp, dscp);
-    if (error) {
-        goto exit;
-    }
-    listener = *pstreamp;
 
     /* If the path does not contain a ':', assume it is relative to
      * OVS_RUNDIR. */
     if (!strchr(suffix, ':')) {
         path = xasprintf("%s/%s", ovs_rundir(), suffix);
     } else {
-        path = strdup(suffix);
+        path = xstrdup(suffix);
     }
+
+    error = new_pstream(suffix_new, name, pstreamp, dscp, path, false);
+    if (error) {
+        goto exit;
+    }
+    listener = *pstreamp;
 
     file = fopen(path, "w");
     if (!file) {
@@ -244,7 +240,6 @@ pwindows_open(const char *name OVS_UNUSED, char *suffix,
         goto exit;
     }
     fclose(file);
-    free(path);
 
 exit:
     free(suffix_new);
@@ -255,7 +250,6 @@ const struct pstream_class pwindows_pstream_class = {
     "punix",
     false,
     pwindows_open,
-    NULL,
     NULL,
     NULL,
     NULL,

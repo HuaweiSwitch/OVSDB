@@ -46,17 +46,20 @@ else
 fi
 
 case "$TYPE" in
-	OVSBridge)
+	OVSBridge|OVSUserBridge)
 		${OTHERSCRIPT} ${CONFIG} $2
 		retval=$?
 		ovs-vsctl -t ${TIMEOUT} -- --if-exists del-br "$DEVICE"
 		;;
-	OVSPort|OVSIntPort|OVSBond|OVSTunnel)
+	OVSPort|OVSIntPort|OVSBond)
 		${OTHERSCRIPT} ${CONFIG} $2
 		retval=$?
 		ovs-vsctl -t ${TIMEOUT} -- --if-exists del-port "$OVS_BRIDGE" "$DEVICE"
 		;;
-	OVSPatchPort)
+	OVSPatchPort|OVSTunnel)
+		ovs-vsctl -t ${TIMEOUT} -- --if-exists del-port "$OVS_BRIDGE" "$DEVICE"
+		;;
+	OVSDPDKPort|OVSDPDKRPort|OVSDPDKVhostPort|OVSDPDKVhostUserPort)
 		ovs-vsctl -t ${TIMEOUT} -- --if-exists del-port "$OVS_BRIDGE" "$DEVICE"
 		;;
 	*)

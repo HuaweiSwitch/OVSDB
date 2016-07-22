@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,22 +15,19 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
+#include "util.h"
+#include <assert.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
-
 #include "byte-order.h"
 #include "command-line.h"
-#include "random.h"
-#include "util.h"
-#include "vlog.h"
 #include "ovstest.h"
-
-#undef NDEBUG
-#include <assert.h>
+#include "random.h"
+#include "openvswitch/vlog.h"
 
 static void
 check_log_2_floor(uint32_t x, int n)
@@ -43,7 +40,7 @@ check_log_2_floor(uint32_t x, int n)
 }
 
 static void
-test_log_2_floor(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_log_2_floor(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int n;
 
@@ -82,7 +79,7 @@ check_ctz64(uint64_t x, int n)
 }
 
 static void
-test_ctz(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_ctz(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int n;
 
@@ -135,7 +132,7 @@ check_clz64(uint64_t x, int n)
 }
 
 static void
-test_clz(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_clz(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int n;
 
@@ -185,7 +182,7 @@ check_rup2(uint32_t x, int n)
 }
 
 static void
-test_round_up_pow2(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_round_up_pow2(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int n;
 
@@ -213,7 +210,7 @@ check_rdp2(uint32_t x, int n)
 }
 
 static void
-test_round_down_pow2(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_round_down_pow2(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int n;
 
@@ -251,7 +248,7 @@ check_count_1bits(uint64_t x, int n)
 }
 
 static void
-test_count_1bits(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_count_1bits(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     uint64_t bits[64];
     int i;
@@ -290,7 +287,7 @@ sum_of_squares(int n)
 }
 
 static void
-test_bitwise_copy(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_bitwise_copy(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     unsigned int n_loops;
     int src_ofs;
@@ -340,7 +337,7 @@ test_bitwise_copy(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-test_bitwise_zero(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_bitwise_zero(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     unsigned int n_loops;
     int dst_ofs;
@@ -381,7 +378,7 @@ test_bitwise_zero(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-test_bitwise_one(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_bitwise_one(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     unsigned int n_loops;
     int dst_ofs;
@@ -422,7 +419,7 @@ test_bitwise_one(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-test_bitwise_is_all_zeros(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_bitwise_is_all_zeros(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int n_loops;
 
@@ -466,25 +463,25 @@ test_bitwise_is_all_zeros(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-test_follow_symlinks(int argc, char *argv[])
+test_follow_symlinks(struct ovs_cmdl_context *ctx)
 {
     int i;
 
-    for (i = 1; i < argc; i++) {
-        char *target = follow_symlinks(argv[i]);
+    for (i = 1; i < ctx->argc; i++) {
+        char *target = follow_symlinks(ctx->argv[i]);
         puts(target);
         free(target);
     }
 }
 
 static void
-test_assert(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_assert(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     ovs_assert(false);
 }
 
 static void
-test_ovs_scan(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_ovs_scan(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     char str[16], str2[16], str3[16];
     long double ld, ld2;
@@ -500,7 +497,6 @@ test_ovs_scan(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     long l, l2;
     int i, i2;
 
-    ovs_assert(ovs_scan("", ""));
     ovs_assert(ovs_scan("", " "));
     ovs_assert(ovs_scan(" ", " "));
     ovs_assert(ovs_scan("  ", " "));
@@ -1016,7 +1012,7 @@ test_ovs_scan(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-test_snprintf(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+test_snprintf(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     char s[16];
 
@@ -1031,23 +1027,46 @@ test_snprintf(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 
     ovs_assert(snprintf(NULL, 0, "abcde") == 5);
 }
+
+#ifndef _WIN32
+static void
+test_file_name(struct ovs_cmdl_context *ctx)
+{
+    int i;
+
+    for (i = 1; i < ctx->argc; i++) {
+        char *dir, *base;
+
+        dir = dir_name(ctx->argv[i]);
+        puts(dir);
+        free(dir);
+
+        base = base_name(ctx->argv[i]);
+        puts(base);
+        free(base);
+    }
+}
+#endif /* _WIN32 */
 
-static const struct command commands[] = {
-    {"ctz", 0, 0, test_ctz},
-    {"clz", 0, 0, test_clz},
-    {"round_up_pow2", 0, 0, test_round_up_pow2},
-    {"round_down_pow2", 0, 0, test_round_down_pow2},
-    {"count_1bits", 0, 0, test_count_1bits},
-    {"log_2_floor", 0, 0, test_log_2_floor},
-    {"bitwise_copy", 0, 0, test_bitwise_copy},
-    {"bitwise_zero", 0, 0, test_bitwise_zero},
-    {"bitwise_one", 0, 0, test_bitwise_one},
-    {"bitwise_is_all_zeros", 0, 0, test_bitwise_is_all_zeros},
-    {"follow-symlinks", 1, INT_MAX, test_follow_symlinks},
-    {"assert", 0, 0, test_assert},
-    {"ovs_scan", 0, 0, test_ovs_scan},
-    {"snprintf", 0, 0, test_snprintf},
-    {NULL, 0, 0, NULL},
+static const struct ovs_cmdl_command commands[] = {
+    {"ctz", NULL, 0, 0, test_ctz},
+    {"clz", NULL, 0, 0, test_clz},
+    {"round_up_pow2", NULL, 0, 0, test_round_up_pow2},
+    {"round_down_pow2", NULL, 0, 0, test_round_down_pow2},
+    {"count_1bits", NULL, 0, 0, test_count_1bits},
+    {"log_2_floor", NULL, 0, 0, test_log_2_floor},
+    {"bitwise_copy", NULL, 0, 0, test_bitwise_copy},
+    {"bitwise_zero", NULL, 0, 0, test_bitwise_zero},
+    {"bitwise_one", NULL, 0, 0, test_bitwise_one},
+    {"bitwise_is_all_zeros", NULL, 0, 0, test_bitwise_is_all_zeros},
+    {"follow-symlinks", NULL, 1, INT_MAX, test_follow_symlinks},
+    {"assert", NULL, 0, 0, test_assert},
+    {"ovs_scan", NULL, 0, 0, test_ovs_scan},
+    {"snprintf", NULL, 0, 0, test_snprintf},
+#ifndef _WIN32
+    {"file_name", NULL, 1, INT_MAX, test_file_name},
+#endif
+    {NULL, NULL, 0, 0, NULL},
 };
 
 static void
@@ -1060,7 +1079,7 @@ parse_options(int argc, char *argv[])
         VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
 
     for (;;) {
         int c = getopt_long(argc, argv, short_options, long_options, NULL);
@@ -1084,9 +1103,17 @@ parse_options(int argc, char *argv[])
 static void
 test_util_main(int argc, char *argv[])
 {
+    struct ovs_cmdl_context ctx = { .argc = 0, };
     set_program_name(argv[0]);
     parse_options(argc, argv);
-    run_command(argc - optind, argv + optind, commands);
+    /* On Windows, stderr is fully buffered if connected to a pipe.
+     * Make it _IONBF so that an abort does not miss log contents.
+     * POSIX doesn't define the circumstances in which stderr is
+     * fully buffered either. */
+    setvbuf(stderr, NULL, _IONBF, 0);
+    ctx.argc = argc - optind;
+    ctx.argv = argv + optind;
+    ovs_cmdl_run_command(&ctx, commands);
 }
 
 OVSTEST_REGISTER("test-util", test_util_main);

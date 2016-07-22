@@ -12,7 +12,7 @@
 %define oname openvswitch
 
 Name:           %{oname}-kmod
-Version:        2.3.0
+Version:        2.5.0
 Release:        1%{?dist}
 Summary:        Open vSwitch kernel module
 
@@ -62,6 +62,9 @@ export INSTALL_MOD_DIR=extra/%{oname}
 for flavor in %flavors_to_build ; do
          make -C %{kernel_source $flavor} modules_install \
                  M="`pwd`"/_$flavor/datapath/linux
+
+         # Cleanup unnecessary kernel-generated module dependency files.
+         find $INSTALL_MOD_PATH/lib/modules -iname 'modules.*' -exec rm {} \;
 done
 install -d %{buildroot}%{_sysconfdir}/depmod.d/
 install -m 644 %{oname}.conf %{buildroot}%{_sysconfdir}/depmod.d/

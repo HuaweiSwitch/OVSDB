@@ -203,7 +203,7 @@ ff fe 50 54 00 00 00 01 62 72 30 00 00 00 00 00 \
 OFPT_FEATURES_REPLY (xid=0x1): dpid:0000505400000001
 n_tables:2, n_buffers:256
 capabilities: FLOW_STATS TABLE_STATS PORT_STATS ARP_MATCH_IP
-actions: OUTPUT SET_VLAN_VID SET_VLAN_PCP STRIP_VLAN SET_DL_SRC SET_DL_DST SET_NW_SRC SET_NW_DST SET_NW_TOS SET_TP_SRC SET_TP_DST ENQUEUE
+actions: output enqueue set_vlan_vid set_vlan_pcp strip_vlan mod_dl_src mod_dl_dst mod_nw_src mod_nw_dst mod_nw_tos mod_tp_src mod_tp_dst
  1(eth1): addr:50:54:00:00:00:02
      config:     0
      state:      0
@@ -447,11 +447,11 @@ c0 a8 00 02 27 2f 00 00 78 50 cc 5b 57 af 42 1e \
 50 02 02 00 26 e8 00 00 00 00 00 00 00 00 \
 "], [0], [dnl
 OFPT_PACKET_IN (xid=0x0): total_len=60 in_port=3 (via no_match) data_len=60 buffer=0x00000111
-tcp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=50:54:00:00:00:05,dl_dst=50:54:00:00:00:06,nw_src=192.168.0.1,nw_dst=192.168.0.2,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=10031,tp_dst=0,tcp_flags=0x002 tcp_csum:26e8
+tcp,vlan_tci=0x0000,dl_src=50:54:00:00:00:05,dl_dst=50:54:00:00:00:06,nw_src=192.168.0.1,nw_dst=192.168.0.2,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=10031,tp_dst=0,tcp_flags=syn tcp_csum:26e8
 ])
 AT_CLEANUP
 
-AT_SETUP([OFPT_PACKET_IN - OF1.0, with hex output of packet data)])
+AT_SETUP([OFPT_PACKET_IN - OF1.0, with hex output of packet data])
 AT_KEYWORDS([ofp-print])
 AT_CHECK([ovs-ofctl ofp-print "\
 01 0a 00 4e 00 00 00 00 00 00 01 11 00 3c 00 03 \
@@ -461,7 +461,7 @@ c0 a8 00 02 27 2f 00 00 78 50 cc 5b 57 af 42 1e \
 50 10 02 00 26 e8 00 00 00 00 00 00 00 00 \
 " 3], [0], [dnl
 OFPT_PACKET_IN (xid=0x0): total_len=60 in_port=3 (via no_match) data_len=60 buffer=0x00000111
-tcp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=50:54:00:00:00:05,dl_dst=50:54:00:00:00:06,nw_src=192.168.0.1,nw_dst=192.168.0.2,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=10031,tp_dst=0,tcp_flags=0x010 tcp_csum:26e8
+tcp,vlan_tci=0x0000,dl_src=50:54:00:00:00:05,dl_dst=50:54:00:00:00:06,nw_src=192.168.0.1,nw_dst=192.168.0.2,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=10031,tp_dst=0,tcp_flags=ack tcp_csum:26e8
 00000000  50 54 00 00 00 06 50 54-00 00 00 05 08 00 45 00
 00000010  00 28 bd 12 00 00 40 06-3c 6a c0 a8 00 01 c0 a8
 00000020  00 02 27 2f 00 00 78 50-cc 5b 57 af 42 1e 50 10
@@ -480,7 +480,7 @@ c0 a8 00 02 27 2f 00 00 78 50 cc 5b 57 af 42 1e \
 50 02 02 00 26 e8 00 00 00 00 00 00 00 00 \
 "], [0], [dnl
 OFPT_PACKET_IN (OF1.1) (xid=0x0): total_len=60 in_port=3 (via no_match) data_len=60 buffer=0x00000111
-tcp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=50:54:00:00:00:05,dl_dst=50:54:00:00:00:06,nw_src=192.168.0.1,nw_dst=192.168.0.2,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=10031,tp_dst=0,tcp_flags=0x002 tcp_csum:26e8
+tcp,vlan_tci=0x0000,dl_src=50:54:00:00:00:05,dl_dst=50:54:00:00:00:06,nw_src=192.168.0.1,nw_dst=192.168.0.2,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=10031,tp_dst=0,tcp_flags=syn tcp_csum:26e8
 ])
 AT_CLEANUP
 
@@ -494,7 +494,7 @@ AT_CHECK([ovs-ofctl ofp-print "\
 00 00 00 23 20 83 c1 5f 00 00 00 00 \
 "], [0], [dnl
 OFPT_PACKET_IN (OF1.2) (xid=0x0): total_len=42 in_port=LOCAL (via no_match) data_len=42 buffer=0xffffff00
-rarp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=1,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
+rarp,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=1,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
 ])
 AT_CLEANUP
 
@@ -508,7 +508,7 @@ AT_CHECK([ovs-ofctl ofp-print "\
 00 00 00 23 20 83 c1 5f 00 00 00 00 \
 " 3], [0], [dnl
 OFPT_PACKET_IN (OF1.2) (xid=0x0): total_len=42 in_port=LOCAL (via no_match) data_len=42 buffer=0xffffff00
-rarp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
+rarp,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
 00000000  ff ff ff ff ff ff 00 23-20 83 c1 5f 80 35 00 01
 00000010  08 00 06 04 00 03 00 23-20 83 c1 5f 00 00 00 00
 00000020  00 23 20 83 c1 5f 00 00-00 00
@@ -526,7 +526,37 @@ ff ff ff fe 00 00 00 00 00 00 ff ff ff ff ff ff \
 00 00 00 00 \
 "], [0], [dnl
 OFPT_PACKET_IN (OF1.3) (xid=0x0): cookie=0x102030405060708 total_len=42 in_port=LOCAL (via no_match) data_len=42 buffer=0xffffff00
-rarp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
+rarp,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_PACKET_IN - OF1.4])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 0a 00 54 00 00 00 00 ff ff ff 00 00 2a 00 00 \
+01 02 03 04 05 06 07 08 00 01 00 0c 80 00 00 04 \
+ff ff ff fe 00 00 00 00 00 00 ff ff ff ff ff ff \
+00 23 20 83 c1 5f 80 35 00 01 08 00 06 04 00 03 \
+00 23 20 83 c1 5f 00 00 00 00 00 23 20 83 c1 5f \
+00 00 00 00 \
+"], [0], [dnl
+OFPT_PACKET_IN (OF1.4) (xid=0x0): cookie=0x102030405060708 total_len=42 in_port=LOCAL (via no_match) data_len=42 buffer=0xffffff00
+rarp,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_PACKET_IN - OF1.5])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+06 0a 00 54 00 00 00 00 ff ff ff 00 00 2a 00 00 \
+01 02 03 04 05 06 07 08 00 01 00 0c 80 00 00 04 \
+ff ff ff fe 00 00 00 00 00 00 ff ff ff ff ff ff \
+00 23 20 83 c1 5f 80 35 00 01 08 00 06 04 00 03 \
+00 23 20 83 c1 5f 00 00 00 00 00 23 20 83 c1 5f \
+00 00 00 00 \
+"], [0], [dnl
+OFPT_PACKET_IN (OF1.5) (xid=0x0): cookie=0x102030405060708 total_len=42 in_port=LOCAL (via no_match) data_len=42 buffer=0xffffff00
+rarp,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
 ])
 AT_CLEANUP
 
@@ -541,7 +571,7 @@ ff ff ff fe 00 00 00 00 00 00 ff ff ff ff ff ff \
 00 00 00 00 \
 " 3], [0], [dnl
 OFPT_PACKET_IN (OF1.3) (xid=0x0): cookie=0x102030405060708 total_len=42 in_port=LOCAL (via no_match) data_len=42 buffer=0xffffff00
-rarp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
+rarp,vlan_tci=0x0000,dl_src=00:23:20:83:c1:5f,dl_dst=ff:ff:ff:ff:ff:ff,arp_spa=0.0.0.0,arp_tpa=0.0.0.0,arp_op=3,arp_sha=00:23:20:83:c1:5f,arp_tha=00:23:20:83:c1:5f
 00000000  ff ff ff ff ff ff 00 23-20 83 c1 5f 80 35 00 01
 00000010  08 00 06 04 00 03 00 23-20 83 c1 5f 00 00 00 00
 00000020  00 23 20 83 c1 5f 00 00-00 00
@@ -666,7 +696,7 @@ b9 7c c0 a8 00 02 c0 a8 00 01 00 00 2b 60 00 00 \
 00 00 00 00 \
 "], [0], [dnl
 OFPT_PACKET_OUT (xid=0x0): in_port=1 actions=output:3 data_len=60
-tcp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=50:54:00:00:00:06,dl_dst=50:54:00:00:00:05,nw_src=192.168.0.2,nw_dst=192.168.0.1,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=11104,tcp_flags=0x014 tcp_csum:6d75
+tcp,vlan_tci=0x0000,dl_src=50:54:00:00:00:06,dl_dst=50:54:00:00:00:05,nw_src=192.168.0.2,nw_dst=192.168.0.1,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=11104,tcp_flags=rst|ack tcp_csum:6d75
 ])
 AT_CLEANUP
 
@@ -681,7 +711,7 @@ b9 7c c0 a8 00 02 c0 a8 00 01 00 00 2b 60 00 00 \
 00 00 00 00 \
 " 3], [0], [dnl
 OFPT_PACKET_OUT (xid=0x0): in_port=1 actions=output:3 data_len=60
-tcp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=50:54:00:00:00:06,dl_dst=50:54:00:00:00:05,nw_src=192.168.0.2,nw_dst=192.168.0.1,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=11104,tcp_flags=0x014 tcp_csum:6d75
+tcp,vlan_tci=0x0000,dl_src=50:54:00:00:00:06,dl_dst=50:54:00:00:00:05,nw_src=192.168.0.2,nw_dst=192.168.0.1,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=11104,tcp_flags=rst|ack tcp_csum:6d75
 00000000  50 54 00 00 00 05 50 54-00 00 00 06 08 00 45 00
 00000010  00 28 00 00 40 00 40 06-b9 7c c0 a8 00 02 c0 a8
 00000020  00 01 00 00 2b 60 00 00-00 00 6a 4f 2b 58 50 14
@@ -712,7 +742,7 @@ b9 7c c0 a8 00 02 c0 a8 00 01 00 00 2b 60 00 00 \
 00 00 00 00 \
 "], [0], [dnl
 OFPT_PACKET_OUT (OF1.2) (xid=0x8858dfc5): in_port=LOCAL actions=FLOOD data_len=60
-tcp,metadata=0,in_port=0,vlan_tci=0x0000,dl_src=50:54:00:00:00:06,dl_dst=50:54:00:00:00:05,nw_src=192.168.0.2,nw_dst=192.168.0.1,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=11104,tcp_flags=0x014 tcp_csum:6d75
+tcp,vlan_tci=0x0000,dl_src=50:54:00:00:00:06,dl_dst=50:54:00:00:00:05,nw_src=192.168.0.2,nw_dst=192.168.0.1,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=11104,tcp_flags=rst|ack tcp_csum:6d75
 ])
 AT_CLEANUP
 
@@ -890,6 +920,37 @@ OFPT_FLOW_MOD (OF1.2) (xid=0x52334507): ADD priority=255,sctp actions=set_field:
 ])
 AT_CLEANUP
 
+AT_SETUP([OFPT_FLOW_MOD - OF1.2 - experimenter OXM])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl '-vPATTERN:console:%c|%p|%m' ofp-print "\
+03 0e 00 48 52 33 45 07 00 00 00 00 00 00 00 00 \
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff \
+ff ff ff ff ff ff ff ff ff ff ff ff 00 00 00 00 \
+00 01 00 14 ff ff 01 0c 00 00 23 20 01 23 45 67 \
+0f ff ff ff 00 00 00 00
+" 2], [0], [dnl
+OFPT_FLOW_MOD (OF1.2) (xid=0x52334507): ADD priority=255,dp_hash=0x1234567/0xfffffff actions=drop
+], [dnl
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_FLOW_MOD - OF1.2 - set-field nd_target, nd_sll])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl '-vPATTERN:console:%c|%p|%m' ofp-print "\
+03 0e 00 78 00 00 00 02 00 00 00 00 00 00 00 00 \
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ff \
+ff ff ff ff ff ff ff ff ff ff ff ff 00 00 00 00 \
+00 01 00 14 80 00 0a 02 86 dd 80 00 14 01 3a 80 \
+00 3a 01 87 00 00 00 00 00 04 00 30 00 00 00 00 \
+00 19 00 18 80 00 3e 10 00 00 00 00 00 00 00 00 \
+00 00 00 00 00 00 00 01 00 19 00 10 80 00 40 06 \
+aa aa aa aa aa aa 00 00
+" 2], [0], [dnl
+OFPT_FLOW_MOD (OF1.2) (xid=0x2): ADD priority=255,icmp6,icmp_type=135 actions=set_field:::1->nd_target,set_field:aa:aa:aa:aa:aa:aa->nd_sll
+], [dnl
+])
+AT_CLEANUP
+
 dnl This triggered a buggy "instructions out of order" message earlier.
 AT_SETUP([OFPT_FLOW_MOD - OF1.3 - meter])
 AT_KEYWORDS([ofp-print])
@@ -1057,13 +1118,12 @@ OFPT_TABLE_MOD (OF1.2) (xid=0x2): table_id=2, flow_miss_config=continue
 ])
 AT_CLEANUP
 
-# ofp_table_mod.config is actually "reserved for future use" in OF1.3.
 AT_SETUP([OFPT_TABLE_MOD - OF1.3])
 AT_KEYWORDS([ofp-print])
 AT_CHECK([ovs-ofctl ofp-print "\
 04 11 00 10 00 00 00 02 02 00 00 00 00 00 00 00 \
 " 3], [0], [dnl
-OFPT_TABLE_MOD (OF1.3) (xid=0x2): table_id=2, flow_miss_config=controller
+OFPT_TABLE_MOD (OF1.3) (xid=0x2): table_id=2
 ])
 AT_CLEANUP
 
@@ -1072,7 +1132,7 @@ AT_KEYWORDS([ofp-print])
 AT_CHECK([ovs-ofctl ofp-print "\
 05 11 00 10 00 00 00 02 02 00 00 00 00 00 00 00 \
 " 3], [0], [dnl
-OFPT_TABLE_MOD (OF1.4) (xid=0x2): table_id=2, flow_miss_config=controller
+OFPT_TABLE_MOD (OF1.4) (xid=0x2): table_id=2, eviction=off, vacancy=off
 ])
 AT_CLEANUP
 
@@ -1384,34 +1444,84 @@ AT_CHECK([ovs-ofctl ofp-print "\
 00 3f ff ff 00 10 00 00 00 00 00 0b 00 00 00 00 \
 00 00 00 00 00 00 00 00 00 00 00 00 \
 "], [0], [dnl
-OFPST_TABLE reply (xid=0x1): 1 tables
-  0: classifier: wild=0x3fffff, max=1048576, active=11
-               lookup=0, matched=0
+OFPST_TABLE reply (xid=0x1):
+  table 0 ("classifier"):
+    active=11, lookup=0, matched=0
+    max_entries=1048576
+    matching:
+      in_port: exact match or wildcard
+      eth_src: exact match or wildcard
+      eth_dst: exact match or wildcard
+      eth_type: exact match or wildcard
+      vlan_vid: exact match or wildcard
+      vlan_pcp: exact match or wildcard
+      ip_src: exact match or wildcard
+      ip_dst: exact match or wildcard
+      nw_proto: exact match or wildcard
+      nw_tos: exact match or wildcard
+      tcp_src: exact match or wildcard
+      tcp_dst: exact match or wildcard
 ])
 AT_CLEANUP
 
 AT_SETUP([OFPST_TABLE reply - OF1.2])
 AT_KEYWORDS([ofp-print OFPT_STATS_REPLY])
-(mid="wild=0xfffffffff, max=1000000,"
- tail="
-               match=0xfffffffff, instructions=0x00000007, config=0x00000000
-               write_actions=0x00000000, apply_actions=0x00000000
-               write_setfields=0x0000000fffffffff
-               apply_setfields=0x0000000fffffffff
-               metadata_match=0x0000000000000000
-               metadata_write=0x0000000000000000"
- echo "OFPST_TABLE reply (OF1.2) (xid=0x2): 255 tables
-  0: classifier: $mid active=1
-               lookup=74614, matched=106024$tail"
- x=1
- while test $x -lt 254; do
-   printf "  %d: %-8s: $mid active=0
-               lookup=0, matched=0$tail
-" $x table$x
-   x=`expr $x + 1`
+(echo 'OFPST_TABLE reply (OF1.2) (xid=0x2):
+  table 0 ("classifier"):
+    active=1, lookup=74614, matched=106024
+    config=controller
+    max_entries=1000000
+    instructions (table miss and others):
+      instructions: write_metadata,goto_table
+      Write-Actions and Apply-Actions features:
+        supported on Set-Field: metadata in_port_oxm eth_src eth_dst eth_type vlan_vid vlan_pcp mpls_label mpls_tc ip_src ip_dst ipv6_src ipv6_dst ipv6_label nw_proto ip_dscp nw_ecn arp_op arp_spa arp_tpa arp_sha arp_tha tcp_src tcp_dst udp_src udp_dst sctp_src sctp_dst icmp_type icmp_code icmpv6_type icmpv6_code nd_target nd_sll nd_tll
+    matching:
+      metadata: exact match or wildcard
+      in_port_oxm: exact match or wildcard
+      eth_src: exact match or wildcard
+      eth_dst: exact match or wildcard
+      eth_type: exact match or wildcard
+      vlan_vid: exact match or wildcard
+      vlan_pcp: exact match or wildcard
+      mpls_label: exact match or wildcard
+      mpls_tc: exact match or wildcard
+      ip_src: exact match or wildcard
+      ip_dst: exact match or wildcard
+      ipv6_src: exact match or wildcard
+      ipv6_dst: exact match or wildcard
+      ipv6_label: exact match or wildcard
+      nw_proto: exact match or wildcard
+      ip_dscp: exact match or wildcard
+      nw_ecn: exact match or wildcard
+      arp_op: exact match or wildcard
+      arp_spa: exact match or wildcard
+      arp_tpa: exact match or wildcard
+      arp_sha: exact match or wildcard
+      arp_tha: exact match or wildcard
+      tcp_src: exact match or wildcard
+      tcp_dst: exact match or wildcard
+      udp_src: exact match or wildcard
+      udp_dst: exact match or wildcard
+      sctp_src: exact match or wildcard
+      sctp_dst: exact match or wildcard
+      icmp_type: exact match or wildcard
+      icmp_code: exact match or wildcard
+      icmpv6_type: exact match or wildcard
+      icmpv6_code: exact match or wildcard
+      nd_target: exact match or wildcard
+      nd_sll: exact match or wildcard
+      nd_tll: exact match or wildcard
+
+  table 1 ("table1"):
+    active=0, lookup=0, matched=0
+    (same features)
+'
+ for i in `seq 2 253`; do
+     printf '  table %d ("table%d"): ditto\n' $i $i
  done
- echo "  254: table254: $mid active=2
-               lookup=0, matched=0$tail") > expout
+ echo '  table 254 ("table254"):
+    active=2, lookup=0, matched=0
+    (same features)') > expout
 
 (pad32="\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
  pad7="00 00 00 00 00 00 00 "
@@ -1442,7 +1552,7 @@ AT_KEYWORDS([ofp-print OFPT_STATS_REPLY])
  printf "%02x $pad7" $x
  printf "%s$pad32" "table$x" | od -A n -t x1 -v -N 32 | tr '\n' ' '
  echo -n "$mid 00 00 00 02 $tail") > in
-AT_CHECK([ovs-ofctl ofp-print "$(cat in)"], [0], [expout])
+AT_CHECK([ovs-ofctl ofp-print - < in], [0], [expout])
 AT_CLEANUP
 
 AT_SETUP([OFPST_TABLE reply - OF1.3])
@@ -1453,9 +1563,12 @@ AT_CHECK([ovs-ofctl ofp-print "\
 00 00 00 00 00 00 01 00 01 00 00 00 00 00 00 0c \
 00 00 00 00 00 00 02 01 00 00 00 00 00 00 01 01 \
 "], [0], [dnl
-OFPST_TABLE reply (OF1.3) (xid=0x1): 2 tables
-  0: active=11, lookup=512, matched=256
-  1: active=12, lookup=513, matched=257
+OFPST_TABLE reply (OF1.3) (xid=0x1):
+  table 0:
+    active=11, lookup=512, matched=256
+
+  table 1:
+    active=12, lookup=513, matched=257
 ])
 AT_CLEANUP
 
@@ -1886,13 +1999,13 @@ AT_CLEANUP
 AT_SETUP([OFPST_GROUP_DESC request - OF1.5])
 AT_KEYWORDS([ofp-print OFPT_STATS_REQUEST])
 AT_CHECK([ovs-ofctl ofp-print "\
-06 12 00 14 00 00 00 02 00 07 00 00 00 00 00 00 \
-00 00 00 01
+06 12 00 18 00 00 00 02 00 07 00 00 00 00 00 00 \
+00 00 00 01 00 00 00 00
 "], [0], [OFPST_GROUP_DESC request (OF1.5) (xid=0x2): group_id=1
 ])
 AT_CLEANUP
 
-AT_SETUP([OFPST_GROUP_DESC reply])
+AT_SETUP([OFPST_GROUP_DESC reply - OF1.1])
 AT_KEYWORDS([ofp-print OFPT_STATS_REQUEST])
 AT_CHECK([ovs-ofctl ofp-print "\
 02 13 00 78 00 00 00 02 00 07 00 00 00 00 00 00 \
@@ -1906,6 +2019,31 @@ AT_CHECK([ovs-ofctl ofp-print "\
 "], [0], [dnl
 OFPST_GROUP_DESC reply (OF1.1) (xid=0x2):
  group_id=8192,type=select,bucket=weight:100,watch_port:1,actions=output:1,bucket=weight:200,watch_port:2,actions=output:2,bucket=weight:200,watch_port:3,actions=output:3
+])
+AT_CLEANUP
+
+AT_SETUP([OFPST_GROUP_DESC reply - OF1.5])
+AT_KEYWORDS([ofp-print OFPT_STATS_REPLY])
+AT_CHECK([ovs-ofctl ofp-print "\
+06 13 00 d8 00 00 00 02 00 07 00 00 00 00 00 00 \
+00 c8 01 00 00 00 20 00 00 78 00 00 00 00 00 00 \
+00 28 00 10 00 00 00 00 00 00 00 10 00 00 00 01 \
+00 00 00 00 00 00 00 00 00 00 00 08 00 64 00 00 \
+00 01 00 08 00 00 00 01 \
+00 28 00 10 00 00 00 01 00 00 00 10 00 00 00 02 \
+00 00 00 00 00 00 00 00 00 00 00 08 00 c8 00 00 \
+00 01 00 08 00 00 00 02 \
+00 28 00 10 00 00 00 02 00 00 00 10 00 00 00 03 \
+00 00 00 00 00 00 00 00 00 00 00 08 00 c8 00 00 \
+00 01 00 08 00 00 00 03 \
+ff ff 00 3b 00 00 15 40 00 00 00 01 00 00 00 00 \
+68 61 73 68 00 00 00 00 00 00 00 00 00 00 00 00 \
+00 00 00 00 00 00 00 00 \
+80 00 18 04 ff ff ff 00 80 00 1a 02 ff ff 80 00 \
+14 01 ff 00 00 00 00 00 \
+"], [0], [dnl
+OFPST_GROUP_DESC reply (OF1.5) (xid=0x2):
+ group_id=8192,type=select,selection_method=hash,fields(ip_dst=255.255.255.0,nw_proto,tcp_src),bucket=bucket_id:0,weight:100,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:200,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:200,watch_port:3,actions=output:3
 ])
 AT_CLEANUP
 
@@ -1923,20 +2061,24 @@ AT_CHECK([ovs-ofctl ofp-print "\
 03 13 00 38 00 00 00 02 00 08 00 00 00 00 00 00 \
 00 00 00 0f 00 00 00 0f \
 00 00 00 01 00 00 00 02 00 00 00 03 00 00 00 04 \
-00 00 00 01 00 00 00 03 00 00 00 07 00 00 00 0f \
+00 00 00 01 00 02 00 01 00 06 00 01 00 0e 00 01 \
 "], [0], [dnl
 OFPST_GROUP_FEATURES reply (OF1.2) (xid=0x2):
  Group table:
     Types:  0xf
     Capabilities:  0xf
-    All group :
-        max_groups = 0x1 actions=0x00000001
-    Select group :
-        max_groups = 0x2 actions=0x00000003
-    Indirect group :
-        max_groups = 0x3 actions=0x00000007
-    Fast Failover group :
-        max_groups = 0x4 actions=0x0000000f
+    all group:
+       max_groups=0x1
+       actions: output
+    select group:
+       max_groups=0x2
+       actions: output push_vlan
+    indirect group:
+       max_groups=0x3
+       actions: output strip_vlan push_vlan
+    fast failover group:
+       max_groups=0x4
+       actions: output strip_vlan push_vlan push_mpls
 ])
 AT_CLEANUP
 
@@ -1950,8 +2092,8 @@ AT_CLEANUP
 AT_SETUP([OFPST_PORT_DESC request - OF1.5])
 AT_KEYWORDS([ofp-print OFPT_STATS_REQUEST])
 AT_CHECK([ovs-ofctl ofp-print "\
-06 12 00 14 00 00 00 02 00 0d 00 00 00 00 00 00 \
-00 00 00 05"], [0], [dnl
+06 12 00 18 00 00 00 02 00 0d 00 00 00 00 00 00 \
+00 00 00 05 00 00 00 00"], [0], [dnl
 OFPST_PORT_DESC request (OF1.5) (xid=0x2): port=5
 ])
 AT_CLEANUP
@@ -2266,17 +2408,15 @@ f5 f6 f7 f8 f9 fa fb fc fd 00 00 00 00 00 00 00 \
 80 00 30 06 80 00 32 06 80 00 1a 02 80 00 1c 02 \
 80 00 1e 02 80 00 20 02 80 00 22 02 80 00 24 02 \
 "], [0], [OFPST_TABLE_FEATURES reply (OF1.3) (xid=0xd5):
-  table 0:
-    name="table0"
+  table 0 ("table0"):
     metadata: match=0xffffffffffffffff write=0xffffffffffffffff
-    config=Unknown
     max_entries=1000000
     instructions (table miss and others):
       next tables: 1-253
       instructions: apply_actions,clear_actions,write_actions,write_metadata,goto_table
       Write-Actions and Apply-Actions features:
-        actions: output,copy_ttl_out,copy_ttl_in,set_mpls_ttl,dec_mpls_ttl,push_vlan,pop_vlan,push_mpls,pop_mpls,set_queue,group,set_nw_ttl,dec_nw_ttl,set_field,push_pbb,pop_pbb
-        supported on Set-Field: tun_id,tun_src,tun_dst,metadata,in_port,in_port_oxm,pkt_mark,reg0,reg1,reg2,reg3,reg4,reg5,reg6,reg7,eth_src,eth_dst,vlan_tci,vlan_vid,vlan_pcp,mpls_label,mpls_tc,ip_src,ip_dst,ipv6_src,ipv6_dst,nw_tos,ip_dscp,nw_ecn,nw_ttl,arp_op,arp_spa,arp_tpa,arp_sha,arp_tha,tcp_src,tcp_dst,udp_src,udp_dst,sctp_src,sctp_dst
+        actions: output group set_field strip_vlan push_vlan mod_nw_ttl dec_ttl set_mpls_ttl dec_mpls_ttl push_mpls pop_mpls set_queue
+        supported on Set-Field: tun_id tun_src tun_dst metadata in_port in_port_oxm pkt_mark reg0 reg1 reg2 reg3 reg4 reg5 reg6 reg7 eth_src eth_dst vlan_tci vlan_vid vlan_pcp mpls_label mpls_tc ip_src ip_dst ipv6_src ipv6_dst nw_tos ip_dscp nw_ecn nw_ttl arp_op arp_spa arp_tpa arp_sha arp_tha tcp_src tcp_dst udp_src udp_dst sctp_src sctp_dst
     matching:
       tun_id: exact match or wildcard
       tun_src: exact match or wildcard
@@ -2535,6 +2675,52 @@ OFPT_ROLE_STATUS (OF1.4) (xid=0xa): role=master generation_id=16 reason=configur
 ])
 AT_CLEANUP
 
+AT_SETUP([OFP_REQUESTFORWARD - OF1.4])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 20 00 18 00 00 00 02 \
+05 0f 00 10 02 00 00 00 \
+00 00 00 00 00 00 00 01 \
+"], [0], [dnl
+OFPT_REQUESTFORWARD (OF1.4) (xid=0x2): reason=group_mod
+ ADD group_id=1,type=all
+])
+AT_CLEANUP
+
+AT_SETUP([OFP_REQUESTFORWARD - OF1.4])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 20 00 18 00 00 00 02 \
+05 0f 00 10 02 00 00 00 \
+00 01 01 00 00 00 00 01 \
+"], [0], [dnl
+OFPT_REQUESTFORWARD (OF1.4) (xid=0x2): reason=group_mod
+ MOD group_id=1,type=select
+])
+AT_CLEANUP
+
+AT_SETUP([OFP_REQUESTFORWARD - OF1.4])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 20 00 18 00 00 00 02 \
+05 1d 00 10 02 00 00 00 \
+00 00 00 00 00 00 00 01 \
+"], [0], [dnl
+OFPT_REQUESTFORWARD (OF1.4) (xid=0x2): reason=meter_mod ADD meter=1 bands=
+])
+AT_CLEANUP
+
+AT_SETUP([OFP_REQUESTFORWARD - OF1.4])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 20 00 18 00 00 00 02 \
+05 1d 00 10 02 00 00 00 \
+00 01 01 00 00 00 00 01 \
+"], [0], [dnl
+OFPT_REQUESTFORWARD (OF1.4) (xid=0x2): reason=meter_mod MOD meter=1 flags:0x100 bands=
+])
+AT_CLEANUP
+
 AT_SETUP([NXT_SET_PACKET_IN])
 AT_KEYWORDS([ofp-print])
 AT_CHECK([ovs-ofctl ofp-print "\
@@ -2561,8 +2747,8 @@ ff ff ff ff ff ff 00 00 00 00 82 82 82 82 82 82 \
 00 55 00 56 00 00 00 00 00 00 00 00 50 02 00 00 \
 31 6d 00 00 00 00 00 00 00 00 \
 "], [0], [dnl
-NXT_PACKET_IN (xid=0x0): table_id=7 cookie=0x9 total_len=64 in_port=1 tun_id=0x6 metadata=0x5a5a5a5a5a5a5a5a reg0=0x1 reg1=0x2 reg2=0x3 reg3=0x4 reg4=0x5 (via action) data_len=64 (unbuffered)
-tcp,metadata=0,in_port=0,dl_vlan=80,dl_vlan_pcp=0,dl_src=80:81:81:81:81:81,dl_dst=82:82:82:82:82:82,nw_src=83.83.83.83,nw_dst=84.84.84.84,nw_tos=0,nw_ecn=0,nw_ttl=0,tp_src=85,tp_dst=86,tcp_flags=0x002 tcp_csum:316d
+NXT_PACKET_IN (xid=0x0): table_id=7 cookie=0x9 total_len=64 reg0=0x1,reg1=0x2,reg2=0x3,reg3=0x4,reg4=0x5,tun_id=0x6,metadata=0x5a5a5a5a5a5a5a5a,in_port=1 (via action) data_len=64 (unbuffered)
+tcp,dl_vlan=80,dl_vlan_pcp=0,dl_src=80:81:81:81:81:81,dl_dst=82:82:82:82:82:82,nw_src=83.83.83.83,nw_dst=84.84.84.84,nw_tos=0,nw_ecn=0,nw_ttl=0,tp_src=85,tp_dst=86,tcp_flags=syn tcp_csum:316d
 ])
 AT_CLEANUP
 
@@ -2582,8 +2768,8 @@ ff ff ff ff ff ff 00 00 00 00 82 82 82 82 82 82 \
 00 55 00 56 00 00 00 00 00 00 00 00 50 01 00 00 \
 31 6d 00 00 00 00 00 00 00 00 \
 " 3], [0], [dnl
-NXT_PACKET_IN (xid=0x0): table_id=7 cookie=0x9 total_len=64 in_port=1 tun_id=0x6 metadata=0x5a5a5a5a5a5a5a5a reg0=0x1 reg1=0x2 reg2=0x3 reg3=0x4 reg4=0x5 (via action) data_len=64 (unbuffered)
-tcp,metadata=0,in_port=0,dl_vlan=80,dl_vlan_pcp=0,dl_src=80:81:81:81:81:81,dl_dst=82:82:82:82:82:82,nw_src=83.83.83.83,nw_dst=84.84.84.84,nw_tos=0,nw_ecn=0,nw_ttl=0,tp_src=85,tp_dst=86,tcp_flags=0x001 tcp_csum:316d
+NXT_PACKET_IN (xid=0x0): table_id=7 cookie=0x9 total_len=64 reg0=0x1,reg1=0x2,reg2=0x3,reg3=0x4,reg4=0x5,tun_id=0x6,metadata=0x5a5a5a5a5a5a5a5a,in_port=1 (via action) data_len=64 (unbuffered)
+tcp,dl_vlan=80,dl_vlan_pcp=0,dl_src=80:81:81:81:81:81,dl_dst=82:82:82:82:82:82,nw_src=83.83.83.83,nw_dst=84.84.84.84,nw_tos=0,nw_ecn=0,nw_ttl=0,tp_src=85,tp_dst=86,tcp_flags=fin tcp_csum:316d
 00000000  82 82 82 82 82 82 80 81-81 81 81 81 81 00 00 50
 00000010  08 00 45 00 00 28 00 00-00 00 00 06 32 05 53 53
 00000020  53 53 54 54 54 54 00 55-00 56 00 00 00 00 00 00
@@ -2608,6 +2794,57 @@ NXT_SET_ASYNC_CONFIG (xid=0x0):
        PACKET_IN: no_match action invalid_ttl 12
      PORT_STATUS: add delete modify
     FLOW_REMOVED: idle hard
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_SET_ASYNC_CONFIG])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 1c 00 38 00 00 00 02 00 00 00 08 00 00 00 05 \
+00 01 00 08 00 00 00 02 00 02 00 08 00 00 00 02 \
+00 03 00 08 00 00 00 05 00 04 00 08 00 00 00 1c \
+00 05 00 08 00 00 00 05 \
+"], [0], [dnl
+OFPT_SET_ASYNC (OF1.4) (xid=0x2):
+ master:
+       PACKET_IN: action
+     PORT_STATUS: add modify
+    FLOW_REMOVED: idle delete
+     ROLE_STATUS: (off)
+    TABLE_STATUS: (off)
+  REQUESTFORWARD: (off)
+
+ slave:
+       PACKET_IN: no_match invalid_ttl
+     PORT_STATUS: delete
+    FLOW_REMOVED: delete group_delete meter_delete
+     ROLE_STATUS: (off)
+    TABLE_STATUS: (off)
+  REQUESTFORWARD: (off)
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_SET_ASYNC_CONFIG - invalid mask - OF1.4])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 1c 00 38 00 00 00 02 00 00 00 08 00 00 00 40 \
+00 01 00 08 00 00 00 02 00 02 00 08 00 00 00 02 \
+00 03 00 08 00 00 00 05 00 04 00 08 00 00 00 1c \
+00 05 00 08 00 00 00 05 \
+"], [0], [dnl
+OFPT_SET_ASYNC (OF1.4) (xid=0x2): ***decode error: OFPACFC_INVALID***
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_SET_ASYNC_CONFIG - unsupported configuration - OF1.4])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 1c 00 38 00 00 00 02 00 00 00 08 00 00 00 05 \
+00 11 00 08 00 00 00 02 00 02 00 08 00 00 00 02 \
+00 03 00 08 00 00 00 05 00 04 00 08 00 00 00 1c \
+00 05 00 08 00 00 00 05\
+"], [0], [dnl
+OFPT_SET_ASYNC (OF1.4) (xid=0x2): ***decode error: OFPACFC_UNSUPPORTED***
 ])
 AT_CLEANUP
 
@@ -2690,7 +2927,7 @@ NXT_FLOW_MOD (xid=0x2): ADD NXM_NX_TUN_ID(00000000000001c8), NXM_NX_REG0(0000007
 ])
 AT_CLEANUP
 
-AT_SETUP([OFPT_GROUP_MOD])
+AT_SETUP([OFPT_GROUP_MOD - OF1.1])
 AT_KEYWORDS([ofp-print])
 AT_CHECK([ovs-ofctl ofp-print "\
 02 0f 00 70 11 22 33 44 00 00 01 00 87 65 43 21 \
@@ -2703,6 +2940,45 @@ AT_CHECK([ovs-ofctl ofp-print "\
 "], [0], [dnl
 OFPT_GROUP_MOD (OF1.1) (xid=0x11223344):
  ADD group_id=2271560481,type=select,bucket=weight:100,watch_port:1,actions=output:1,bucket=weight:200,watch_port:2,actions=output:2,bucket=weight:200,watch_port:3,actions=output:3
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_GROUP_MOD add - OF1.5])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+06 0f 00 b8 11 22 33 44 00 00 01 00 87 65 43 21 \
+00 78 00 00 ff ff ff ff 00 28 00 10 00 00 00 00 \
+00 00 00 10 00 00 00 01 00 00 00 00 00 00 00 00 \
+00 00 00 08 00 64 00 00 00 01 00 08 00 00 00 01 \
+00 28 00 10 00 00 00 01 00 00 00 10 00 00 00 02 \
+00 00 00 00 00 00 00 00 00 00 00 08 00 c8 00 00 \
+00 01 00 08 00 00 00 02 00 28 00 10 00 00 00 02 \
+00 00 00 10 00 00 00 03 00 00 00 00 00 00 00 00 \
+00 00 00 08 00 c8 00 00 00 01 00 08 00 00 00 03 \
+ff ff 00 28 00 00 15 40 00 00 00 01 00 00 00 00 \
+68 61 73 68 00 00 00 00 00 00 00 00 00 00 00 00 \
+00 00 00 00 00 00 00 07 \
+"], [0], [dnl
+OFPT_GROUP_MOD (OF1.5) (xid=0x11223344):
+ ADD group_id=2271560481,type=select,selection_method=hash,selection_method_param=7,bucket=bucket_id:0,weight:100,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:200,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:200,watch_port:3,actions=output:3
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_GROUP_MOD insert bucket - OF1.5])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+06 0f 00 90 11 22 33 44 00 03 01 00 87 65 43 21 \
+00 78 00 00 ff ff ff fd 00 28 00 10 00 00 00 00 \
+00 00 00 10 00 00 00 01 00 00 00 00 00 00 00 00 \
+00 00 00 08 00 64 00 00 00 01 00 08 00 00 00 01 \
+00 28 00 10 00 00 00 01 00 00 00 10 00 00 00 02 \
+00 00 00 00 00 00 00 00 00 00 00 08 00 c8 00 00 \
+00 01 00 08 00 00 00 02 00 28 00 10 00 00 00 02 \
+00 00 00 10 00 00 00 03 00 00 00 00 00 00 00 00 \
+00 00 00 08 00 c8 00 00 00 01 00 08 00 00 00 03 \
+"], [0], [dnl
+OFPT_GROUP_MOD (OF1.5) (xid=0x11223344):
+ INSERT_BUCKET command_bucket_id:first,group_id=2271560481,bucket=bucket_id:0,weight:100,watch_port:1,actions=output:1,bucket=bucket_id:1,weight:200,watch_port:2,actions=output:2,bucket=bucket_id:2,weight:200,watch_port:3,actions=output:3
 ])
 AT_CLEANUP
 
@@ -3055,16 +3331,61 @@ OFPT_BUNDLE_CONTROL (OF1.4) (xid=0x0):
 ])
 AT_CLEANUP
 
-AT_SETUP([OFPT_BUNDLE_ADD_MESSAGE - OFPT_HELLO])
+AT_SETUP([OFPT_BUNDLE_ADD_MESSAGE - verify xid])
 AT_KEYWORDS([ofp-print])
 AT_CHECK([ovs-ofctl ofp-print "\
-05 22 00 20 00 00 00 00 \
-00 00 00 01 00 01 00 01 02 00 00 08 00 00 00 00 \
-00 00 00 00 00 00 00 00 \
+05 22 00 20 00 00 00 00 00 00 00 01 00 00 00 01 \
+05 00 00 08 00 00 00 01 00 00 00 00 00 00 00 00 \
 "], [0], [dnl
-OFPT_BUNDLE_ADD_MESSAGE (OF1.4) (xid=0x0):
+OFPT_BUNDLE_ADD_MESSAGE (OF1.4) (xid=0x0): ***decode error: OFPBFC_MSG_BAD_XID***
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_BUNDLE_ADD_MESSAGE - reject OFPT_HELLO])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl '-vPATTERN:console:%c|%p|%m' ofp-print "\
+05 22 00 20 00 00 00 00 00 00 00 01 00 00 00 01 \
+05 00 00 10 00 00 00 00 00 00 00 00 00 00 00 00 \
+"], [0], [dnl
+OFPT_BUNDLE_ADD_MESSAGE (OF1.4) (xid=0x0): ***decode error: OFPBFC_MSG_UNSUP***
+], [dnl
+ofp_util|WARN|OFPT_HELLO message not allowed inside OFPT14_BUNDLE_ADD_MESSAGE
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_BUNDLE_ADD_MESSAGE - FLOW_MOD])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 22 00 a0 00 00 00 02 00 00 00 01 00 00 00 01 \
+05 0e 00 90 00 00 00 02 00 00 00 00 00 00 00 00 \
+00 00 00 00 00 00 00 00 01 00 00 00 00 00 ff ff \
+ff ff ff ff ff ff ff ff ff ff ff ff 00 00 00 00 \
+00 01 00 42 80 00 00 04 00 00 00 01 80 00 08 06 \
+50 54 00 00 00 06 80 00 06 06 50 54 00 00 00 05 \
+80 00 0a 02 08 06 80 00 0c 02 00 00 80 00 2a 02 \
+00 02 80 00 2c 04 c0 a8 00 02 80 00 2e 04 c0 a8 \
+00 01 00 00 00 00 00 00 00 04 00 18 00 00 00 00 \
+00 00 00 10 00 00 00 03 00 00 00 00 00 00 00 00 \
+"], [0], [dnl
+OFPT_BUNDLE_ADD_MESSAGE (OF1.4) (xid=0x2):
  bundle_id=0x1 flags=atomic
-OFPT_HELLO (OF1.1) (xid=0x0):
- version bitmap: 0x01, 0x02
+OFPT_FLOW_MOD (OF1.4) (xid=0x2): ADD table:1 priority=65535,arp,in_port=1,vlan_tci=0x0000/0x1fff,dl_src=50:54:00:00:00:06,dl_dst=50:54:00:00:00:05,arp_spa=192.168.0.2,arp_tpa=192.168.0.1,arp_op=2 actions=output:3
+])
+AT_CLEANUP
+
+AT_SETUP([OFPT_BUNDLE_ADD_MESSAGE - PORT_MOD])
+AT_KEYWORDS([ofp-print])
+AT_CHECK([ovs-ofctl ofp-print "\
+05 22 00 38 00 00 00 03 00 00 00 01 00 00 00 01 \
+05 10 00 28 00 00 00 03 00 00 00 03 00 00 00 00 \
+50 54 00 00 00 01 00 00 00 00 00 01 00 00 00 01 \
+00 00 00 08 00 00 00 01
+"], [0], [dnl
+OFPT_BUNDLE_ADD_MESSAGE (OF1.4) (xid=0x3):
+ bundle_id=0x1 flags=atomic
+OFPT_PORT_MOD (OF1.4) (xid=0x3):port: 3: addr:50:54:00:00:00:01
+     config: PORT_DOWN
+     mask:   PORT_DOWN
+     advertise: 10MB-HD
 ])
 AT_CLEANUP

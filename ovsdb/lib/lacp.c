@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2012, 2013, 2014 Nicira, Inc.
+/* Copyright (c) 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,8 @@
 #include "dynamic-string.h"
 #include "hash.h"
 #include "hmap.h"
-#include "ofpbuf.h"
+#include "dp-packet.h"
+#include "ovs-atomic.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "seq.h"
@@ -30,7 +31,7 @@
 #include "timer.h"
 #include "timeval.h"
 #include "unixctl.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(lacp);
 
@@ -52,7 +53,7 @@ VLOG_DEFINE_THIS_MODULE(lacp);
 OVS_PACKED(
 struct lacp_info {
     ovs_be16 sys_priority;            /* System priority. */
-    uint8_t sys_id[ETH_ADDR_LEN];     /* System ID. */
+    struct eth_addr sys_id;           /* System ID. */
     ovs_be16 key;                     /* Operational key. */
     ovs_be16 port_priority;           /* Port priority. */
     ovs_be16 port_id;                 /* Port ID. */
@@ -61,7 +62,6 @@ struct lacp_info {
 BUILD_ASSERT_DECL(LACP_INFO_LEN == sizeof(struct lacp_info));
 
 #define LACP_PDU_LEN 110
-OVS_PACKED(
 struct lacp_pdu {
     uint8_t subtype;          /* Always 1. */
     uint8_t version;          /* Always 1. */
@@ -80,7 +80,7 @@ struct lacp_pdu {
     uint8_t collector_len;    /* Always 16. */
     ovs_be16 collector_delay; /* Maximum collector delay. Set to UINT16_MAX. */
     uint8_t z3[64];           /* Combination of several fields.  Always 0. */
-});
+};
 BUILD_ASSERT_DECL(LACP_PDU_LEN == sizeof(struct lacp_pdu));
 
 /* Implementation. */
@@ -92,9 +92,9 @@ enum slave_status {
 };
 
 struct lacp {
-    struct list node;             /* Node in all_lacps list. */
+    struct ovs_list node;         /* Node in all_lacps list. */
     char *name;                   /* Name of this lacp object. */
-    uint8_t sys_id[ETH_ADDR_LEN]; /* System ID. */
+    struct eth_addr sys_id;       /* System ID. */
     uint16_t sys_priority;        /* System Priority. */
     bool active;                  /* Active or Passive. */
 
@@ -125,11 +125,15 @@ struct slave {
     struct lacp_info ntt_actor;   /* Used to decide if we Need To Transmit. */
     struct timer tx;              /* Next message transmission timer. */
     struct timer rx;              /* Expected message receive timer. */
+
+    uint32_t count_rx_pdus;       /* dot3adAggPortStatsLACPDUsRx */
+    uint32_t count_rx_pdus_bad;   /* dot3adAggPortStatsIllegalRx */
+    uint32_t count_tx_pdus;       /* dot3adAggPortStatsLACPDUsTx */
 };
 
 static struct ovs_mutex mutex;
-static struct list all_lacps__ = LIST_INITIALIZER(&all_lacps__);
-static struct list *const all_lacps OVS_GUARDED_BY(mutex) = &all_lacps__;
+static struct ovs_list all_lacps__ = OVS_LIST_INITIALIZER(&all_lacps__);
+static struct ovs_list *const all_lacps OVS_GUARDED_BY(mutex) = &all_lacps__;
 
 static void lacp_update_attached(struct lacp *) OVS_REQUIRES(mutex);
 
@@ -177,11 +181,11 @@ compose_lacp_pdu(const struct lacp_info *actor,
  * supported by OVS.  Otherwise, it returns a pointer to the lacp_pdu contained
  * within 'b'. */
 static const struct lacp_pdu *
-parse_lacp_packet(const struct ofpbuf *b)
+parse_lacp_packet(const struct dp_packet *p)
 {
     const struct lacp_pdu *pdu;
 
-    pdu = ofpbuf_at(b, (uint8_t *)ofpbuf_l3(b) - (uint8_t *)ofpbuf_data(b),
+    pdu = dp_packet_at(p, (uint8_t *)dp_packet_l3(p) - (uint8_t *)dp_packet_data(p),
                     LACP_PDU_LEN);
 
     if (pdu && pdu->subtype == 1
@@ -251,7 +255,7 @@ lacp_ref(const struct lacp *lacp_)
 void
 lacp_unref(struct lacp *lacp) OVS_EXCLUDED(mutex)
 {
-    if (lacp && ovs_refcount_unref(&lacp->ref_cnt) == 1) {
+    if (lacp && ovs_refcount_unref_relaxed(&lacp->ref_cnt) == 1) {
         struct slave *slave, *next;
 
         lacp_lock();
@@ -282,7 +286,7 @@ lacp_configure(struct lacp *lacp, const struct lacp_settings *s)
 
     if (!eth_addr_equals(lacp->sys_id, s->id)
         || lacp->sys_priority != s->priority) {
-        memcpy(lacp->sys_id, s->id, ETH_ADDR_LEN);
+        lacp->sys_id = s->id;
         lacp->sys_priority = s->priority;
         lacp->update = true;
     }
@@ -315,7 +319,7 @@ lacp_is_active(const struct lacp *lacp) OVS_EXCLUDED(mutex)
  */
 void
 lacp_process_packet(struct lacp *lacp, const void *slave_,
-                    const struct ofpbuf *packet)
+                    const struct dp_packet *packet)
     OVS_EXCLUDED(mutex)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
@@ -328,9 +332,11 @@ lacp_process_packet(struct lacp *lacp, const void *slave_,
     if (!slave) {
         goto out;
     }
+    slave->count_rx_pdus++;
 
     pdu = parse_lacp_packet(packet);
     if (!pdu) {
+	slave->count_rx_pdus_bad++;
         VLOG_WARN_RL(&rl, "%s: received an unparsable LACP PDU.", lacp->name);
         goto out;
     }
@@ -548,6 +554,7 @@ lacp_run(struct lacp *lacp, lacp_send_pdu *send_pdu) OVS_EXCLUDED(mutex)
             slave->ntt_actor = actor;
             compose_lacp_pdu(&actor, &slave->partner, &pdu);
             send_pdu(slave->aux, &pdu, sizeof pdu);
+	    slave->count_tx_pdus++;
 
             duration = (slave->partner.state & LACP_STATE_TIME
                         ? LACP_FAST_TIME_TX
@@ -725,7 +732,7 @@ slave_get_actor(struct slave *slave, struct lacp_info *actor)
     actor->port_priority = htons(slave->port_priority);
     actor->port_id = htons(slave->port_id);
     actor->sys_priority = htons(lacp->sys_priority);
-    memcpy(&actor->sys_id, lacp->sys_id, ETH_ADDR_LEN);
+    actor->sys_id = lacp->sys_id;
 }
 
 /* Given 'slave', populates 'priority' with data representing its LACP link
@@ -977,4 +984,55 @@ lacp_unixctl_show(struct unixctl_conn *conn, int argc, const char *argv[],
 
 out:
     lacp_unlock();
+}
+
+/* Extract a snapshot of the current state and counters for a slave port.
+   Return false if the slave is not active. */
+bool
+lacp_get_slave_stats(const struct lacp *lacp, const void *slave_, struct lacp_slave_stats *stats)
+    OVS_EXCLUDED(mutex)
+{
+    struct slave *slave;
+    struct lacp_info actor;
+    bool ret;
+
+    ovs_mutex_lock(&mutex);
+
+    slave = slave_lookup(lacp, slave_);
+    if (slave) {
+	ret = true;
+	slave_get_actor(slave, &actor);
+	stats->dot3adAggPortActorSystemID = actor.sys_id;
+	stats->dot3adAggPortPartnerOperSystemID = slave->partner.sys_id;
+	stats->dot3adAggPortAttachedAggID = (lacp->key_slave->key ?
+					     lacp->key_slave->key :
+					     lacp->key_slave->port_id);
+
+	/* Construct my admin-state.  Assume aggregation is configured on. */
+	stats->dot3adAggPortActorAdminState = LACP_STATE_AGG;
+	if (lacp->active) {
+	    stats->dot3adAggPortActorAdminState |= LACP_STATE_ACT;
+	}
+	if (lacp->fast) {
+	    stats->dot3adAggPortActorAdminState |= LACP_STATE_TIME;
+	}
+	/* XXX Not sure how to know the partner admin state. It
+	 * might have to be captured and remembered during the
+	 * negotiation phase.
+	 */
+	stats->dot3adAggPortPartnerAdminState = 0;
+
+	stats->dot3adAggPortActorOperState = actor.state;
+	stats->dot3adAggPortPartnerOperState = slave->partner.state;
+
+	/* Read out the latest counters */
+	stats->dot3adAggPortStatsLACPDUsRx = slave->count_rx_pdus;
+	stats->dot3adAggPortStatsIllegalRx = slave->count_rx_pdus_bad;
+	stats->dot3adAggPortStatsLACPDUsTx = slave->count_tx_pdus;
+    } else {
+        ret = false;
+    }
+    ovs_mutex_unlock(&mutex);
+    return ret;
+
 }

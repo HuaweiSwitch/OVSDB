@@ -16,7 +16,6 @@ AT_BANNER([OVSDB -- ovsdb-tool])
 m4_define([OVSDB_CHECK_EXECUTION], 
   [AT_SETUP([$1])
    AT_KEYWORDS([ovsdb file positive $5])
-   OVS_RUNDIR=`pwd`; export OVS_RUNDIR
    $2 > schema
    touch .db.~lock~
    AT_CHECK([ovsdb-tool create db schema], [0], [stdout], [ignore])
@@ -49,7 +48,6 @@ AT_CLEANUP
 
 AT_SETUP([ovsdb-tool compact])
 AT_KEYWORDS([ovsdb file positive])
-OVS_RUNDIR=`pwd`; export OVS_RUNDIR
 ordinal_schema > schema
 dnl Make sure that "ovsdb-tool create" works with a dangling symlink,
 dnl creating the target of the symlink rather than replacing the symlink
@@ -157,7 +155,6 @@ AT_CLEANUP
 
 AT_SETUP([ovsdb-tool convert -- removing a column])
 AT_KEYWORDS([ovsdb file positive])
-OVS_RUNDIR=`pwd`; export OVS_RUNDIR
 ordinal_schema > schema
 AT_DATA([new-schema], 
   [[{"name": "ordinals",
@@ -182,8 +179,9 @@ AT_CHECK(
     done]],
   [0], [stdout], [ignore])
 dnl Dump out and check the actual database contents.
-AT_CHECK([[ovsdb-server --unixctl="`pwd`"/unixctl --remote=punix:socket --run "ovsdb-client dump unix:socket ordinals" db]],
-  [0], [stdout], [ignore])
+AT_CHECK([[ovsdb-server --detach --no-chdir --pidfile --remote=punix:socket db]],
+  [0])
+AT_CHECK([ovsdb-client dump unix:socket ordinals], [0], [stdout], [ignore])
 AT_CHECK([${PERL} $srcdir/uuidfilt.pl stdout], [0], [dnl
 ordinals table
 _uuid                                name  number
@@ -195,6 +193,7 @@ _uuid                                name  number
 <4> two   2     @&t@
 <5> zero  0     @&t@
 ])
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 dnl Now convert the database in-place.
 touch .db.tmp.~lock~
 AT_CHECK([[ovsdb-tool convert db new-schema]], [0], [], [ignore])
@@ -204,8 +203,9 @@ dnl in it now.
 AT_CAPTURE_FILE([db])
 AT_CHECK([test `wc -l < db` -eq 4])
 dnl And check that the dumped data is the same except for the removed column:
-AT_CHECK([[ovsdb-server --unixctl="`pwd`"/unixctl --remote=punix:socket --run "ovsdb-client dump unix:socket ordinals" db]],
-  [0], [stdout], [ignore])
+AT_CHECK([[ovsdb-server --detach --no-chdir --pidfile --remote=punix:socket db]],
+  [0])
+AT_CHECK([ovsdb-client dump unix:socket ordinals], [0], [stdout], [ignore])
 AT_CHECK([${PERL} $srcdir/uuidfilt.pl stdout], [0], [dnl
 ordinals table
 _uuid                                number
@@ -217,11 +217,11 @@ _uuid                                number
 <4> 4     @&t@
 <5> 5     @&t@
 ])
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 AT_CLEANUP
 
 AT_SETUP([ovsdb-tool convert -- adding a column])
 AT_KEYWORDS([ovsdb file positive])
-OVS_RUNDIR=`pwd`; export OVS_RUNDIR
 AT_DATA([schema], 
   [[{"name": "ordinals",
      "tables": {
@@ -245,8 +245,9 @@ AT_CHECK(
     done]],
   [0], [stdout], [ignore])
 dnl Dump out and check the actual database contents.
-AT_CHECK([[ovsdb-server --unixctl="`pwd`"/unixctl --remote=punix:socket --run "ovsdb-client dump unix:socket ordinals" db]],
-  [0], [stdout], [ignore])
+AT_CHECK([[ovsdb-server --detach --no-chdir --pidfile --remote=punix:socket db]],
+  [0])
+AT_CHECK([ovsdb-client dump unix:socket ordinals], [0], [stdout], [ignore])
 AT_CHECK([${PERL} $srcdir/uuidfilt.pl stdout], [0], [dnl
 ordinals table
 _uuid                                number
@@ -258,6 +259,7 @@ _uuid                                number
 <4> 4     @&t@
 <5> 5     @&t@
 ])
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 dnl Now convert the database in-place.
 touch .db.tmp.~lock~
 AT_CHECK([[ovsdb-tool convert db new-schema]], [0], [], [ignore])
@@ -267,8 +269,9 @@ dnl in it now.
 AT_CAPTURE_FILE([db])
 AT_CHECK([test `wc -l < db` -eq 4])
 dnl And check that the dumped data is the same except for the added column:
-AT_CHECK([[ovsdb-server --unixctl="`pwd`"/unixctl --remote=punix:socket --run "ovsdb-client dump unix:socket ordinals" db]],
-  [0], [stdout], [ignore])
+AT_CHECK([[ovsdb-server --detach --no-chdir --pidfile --remote=punix:socket db]],
+  [0])
+AT_CHECK([ovsdb-client dump unix:socket ordinals], [0], [stdout], [ignore])
 AT_CHECK([${PERL} $srcdir/uuidfilt.pl stdout], [0], [dnl
 ordinals table
 _uuid                                name number
@@ -280,6 +283,7 @@ _uuid                                name number
 <4> ""   4     @&t@
 <5> ""   5     @&t@
 ])
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 AT_CLEANUP
 
 AT_SETUP([ovsdb-tool schema-version])

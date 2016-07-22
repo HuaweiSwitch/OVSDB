@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+/* Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,8 +45,8 @@
 #include "timeval.h"
 #include "unixctl.h"
 #include "util.h"
-#include "vconn.h"
-#include "vlog.h"
+#include "openvswitch/vconn.h"
+#include "openvswitch/vlog.h"
 #include "lib/vswitch-idl.h"
 #include "lib/netdev-dpdk.h"
 
@@ -59,7 +59,7 @@ static bool want_mlockall;
 static unixctl_cb_func ovs_vswitchd_exit;
 
 static char *parse_options(int argc, char *argv[], char **unixctl_path);
-static void usage(void) NO_RETURN;
+OVS_NO_RETURN static void usage(void);
 
 int
 main(int argc, char *argv[])
@@ -72,16 +72,20 @@ main(int argc, char *argv[])
 
     set_program_name(argv[0]);
     retval = dpdk_init(argc,argv);
+    if (retval < 0) {
+        return retval;
+    }
+
     argc -= retval;
     argv += retval;
 
-    proctitle_init(argc, argv);
+    ovs_cmdl_proctitle_init(argc, argv);
     service_start(&argc, &argv);
     remote = parse_options(argc, argv, &unixctl_path);
     fatal_ignore_sigpipe();
     ovsrec_init();
 
-    daemonize_start();
+    daemonize_start(true);
 
     if (want_mlockall) {
 #ifdef HAVE_MLOCKALL
@@ -165,7 +169,7 @@ parse_options(int argc, char *argv[], char **unixctl_pathp)
         {"dpdk", required_argument, NULL, OPT_DPDK},
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
 
     for (;;) {
         int c;
@@ -180,7 +184,7 @@ parse_options(int argc, char *argv[], char **unixctl_pathp)
             usage();
 
         case 'V':
-            ovs_print_version(OFP10_VERSION, OFP10_VERSION);
+            ovs_print_version(0, 0);
             exit(EXIT_SUCCESS);
 
         case OPT_MLOCKALL:
@@ -204,7 +208,7 @@ parse_options(int argc, char *argv[], char **unixctl_pathp)
             break;
 
         case OPT_ENABLE_DUMMY:
-            dummy_enable(optarg && !strcmp(optarg, "override"));
+            dummy_enable(optarg);
             break;
 
         case OPT_DISABLE_SYSTEM:
@@ -215,6 +219,7 @@ parse_options(int argc, char *argv[], char **unixctl_pathp)
             exit(EXIT_FAILURE);
 
         case OPT_DPDK:
+            ovs_fatal(0, "--dpdk must be given at beginning of command line.");
             break;
 
         default:
@@ -250,10 +255,23 @@ usage(void)
     stream_usage("DATABASE", true, false, true);
     daemon_usage();
     vlog_usage();
+    printf("\nDPDK options:\n"
+           "  --dpdk [VHOST] [DPDK]     Initialize DPDK datapath.\n"
+           "  where DPDK are options for initializing DPDK lib and VHOST is\n"
+#ifdef VHOST_CUSE
+           "  option to override default character device name used for\n"
+           "  for use with userspace vHost\n"
+           "    -cuse_dev_name NAME\n"
+#else
+           "  option to override default directory where vhost-user\n"
+           "  sockets are created.\n"
+           "    -vhost_sock_dir DIR\n"
+#endif
+           );
     printf("\nOther options:\n"
-           "  --unixctl=SOCKET        override default control socket name\n"
-           "  -h, --help              display this help message\n"
-           "  -V, --version           display version information\n");
+           "  --unixctl=SOCKET          override default control socket name\n"
+           "  -h, --help                display this help message\n"
+           "  -V, --version             display version information\n");
     exit(EXIT_SUCCESS);
 }
 

@@ -2,12 +2,12 @@ AT_BANNER([library unit tests])
 
 AT_SETUP([test flow extractor])
 AT_CHECK([$PERL `which flowgen.pl` >/dev/null 3>flows 4>pcap])
-AT_CHECK([ovstest test-flows <flows 3<pcap], [0], [checked 247 packets, 0 errors
+AT_CHECK([ovstest test-flows flows pcap], [0], [checked 247 packets, 0 errors
 ])
 AT_CLEANUP
 
 AT_SETUP([test TCP/IP checksumming])
-AT_CHECK([ovstest test-csum], [0], [....#....#....###................................#................................#
+AT_CHECK([ovstest test-csum], [0], [....#....#....####................................#................................#
 ])
 AT_CLEANUP
 
@@ -16,12 +16,20 @@ AT_CHECK([ovstest test-hash])
 AT_CLEANUP
 
 AT_SETUP([test hash map])
+AT_KEYWORDS([hmap])
 AT_CHECK([ovstest test-hmap], [0], [.........
 ])
 AT_CLEANUP
 
 AT_SETUP([test hash index])
+AT_KEYWORDS([hindex])
 AT_CHECK([ovstest test-hindex], [0], [.....................
+])
+AT_CLEANUP
+
+AT_SETUP([test cuckoo hash])
+AT_KEYWORDS([cmap])
+AT_CHECK([ovstest test-cmap check 1], [0], [...
 ])
 AT_CLEANUP
 
@@ -30,7 +38,7 @@ AT_CHECK([ovstest test-atomic])
 AT_CLEANUP
 
 AT_SETUP([test linked lists])
-AT_CHECK([ovstest test-list], [0], [..
+AT_CHECK([ovstest test-list], [0], [...
 ])
 AT_CLEANUP
 
@@ -166,10 +174,14 @@ AT_CHECK([$PYTHON $abs_srcdir/test-unix-socket.py ../$longname/socket socket])
 AT_CLEANUP
 
 AT_SETUP([ovs_assert])
-OVS_LOGDIR=`pwd`; export OVS_LOGDIR
-AT_CHECK([ovstest test-util -voff -vfile:info '-vPATTERN:file:%c|%p|%m' --log-file assert || kill -l $?],
-  [0], [ABRT
-], [stderr])
+if test "$IS_WIN32" = "yes"; then
+  exit_status=9
+else
+  # SIGABRT + 128
+  exit_status=134
+fi
+AT_CHECK([ovstest test-util -voff -vfile:info '-vPATTERN:file:%c|%p|%m' --log-file assert],
+  [$exit_status], [], [stderr])
 
 AT_CHECK([sed 's/\(opened log file\) .*/\1/
 s/|[[^|]]*: /|/' test-util.log], [0], [dnl
@@ -186,4 +198,17 @@ AT_CLEANUP
 
 AT_SETUP([snprintf])
 AT_CHECK([ovstest test-util snprintf])
+AT_CLEANUP
+
+AT_SETUP([test bitmap functions])
+AT_CHECK([ovstest test-bitmap check], [0], [..
+])
+AT_CLEANUP
+
+AT_SETUP([use of public headers])
+AT_CHECK([test-lib], [0], [])
+AT_CLEANUP
+
+AT_SETUP([test ofpbuf module])
+AT_CHECK([ovstest test-ofpbuf], [0], [])
 AT_CLEANUP

@@ -17,22 +17,23 @@
 /* The mother of all test programs that links with libopevswitch.la */
 
 #include <config.h>
+#undef NDEBUG
 #include <inttypes.h>
 #include <limits.h>
 #include <stdlib.h>
 #include "command-line.h"
-#include "ovstest.h"
 #include "dynamic-string.h"
+#include "ovstest.h"
 #include "util.h"
 
-static struct command *commands = NULL;
+static struct ovs_cmdl_command *commands = NULL;
 static size_t n_commands = 0;
 static size_t allocated_commands = 0;
 
 static void
-add_command(struct command *cmd)
+add_command(struct ovs_cmdl_command *cmd)
 {
-    const struct command nil = {NULL, 0, 0, NULL};
+    const struct ovs_cmdl_command nil = {NULL, NULL, 0, 0, NULL};
 
     while (n_commands + 1 >= allocated_commands) {
         commands = x2nrealloc(commands, &allocated_commands,
@@ -59,9 +60,9 @@ flush_help_string(struct ds *ds)
 }
 
 static void
-help(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+help(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
-    const struct command *p;
+    const struct ovs_cmdl_command *p;
     struct ds test_names = DS_EMPTY_INITIALIZER;
     const int linesize = 70;
 
@@ -85,17 +86,18 @@ help(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 static void
 add_top_level_commands(void)
 {
-    struct command help_cmd = {"--help", 0, 0, help};
+    struct ovs_cmdl_command help_cmd = {"--help", NULL, 0, 0, help};
 
     add_command(&help_cmd);
 }
 
 void
-ovstest_register(const char *test_name, ovstest_func f)
+ovstest_register(const char *test_name, ovs_cmdl_handler f)
 {
-    struct command test_cmd;
+    struct ovs_cmdl_command test_cmd;
 
     test_cmd.name = test_name;
+    test_cmd.usage = NULL;
     test_cmd.min_args = 0;
     test_cmd.max_args = INT_MAX;
     test_cmd.handler = f;
@@ -123,7 +125,11 @@ main(int argc, char *argv[])
 
     add_top_level_commands();
     if (argc > 1) {
-        run_command(argc - 1, argv + 1, commands);
+        struct ovs_cmdl_context ctx = {
+            .argc = argc - 1,
+            .argv = argv + 1,
+        };
+        ovs_cmdl_run_command(&ctx, commands);
     }
     cleanup();
 

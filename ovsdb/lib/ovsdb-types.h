@@ -105,7 +105,7 @@ const struct ovsdb_type *ovsdb_base_type_get_enum_type(enum ovsdb_atomic_type);
 
 struct ovsdb_error *ovsdb_base_type_from_json(struct ovsdb_base_type *,
                                               const struct json *)
-    WARN_UNUSED_RESULT;
+    OVS_WARN_UNUSED_RESULT;
 struct json *ovsdb_base_type_to_json(const struct ovsdb_base_type *);
 
 static inline bool ovsdb_base_type_is_ref(const struct ovsdb_base_type *);
@@ -152,6 +152,8 @@ bool ovsdb_type_is_valid(const struct ovsdb_type *);
 
 static inline bool ovsdb_type_is_scalar(const struct ovsdb_type *);
 static inline bool ovsdb_type_is_optional(const struct ovsdb_type *);
+static inline bool ovsdb_type_is_optional_scalar(
+    const struct ovsdb_type *);
 static inline bool ovsdb_type_is_composite(const struct ovsdb_type *);
 static inline bool ovsdb_type_is_set(const struct ovsdb_type *);
 static inline bool ovsdb_type_is_map(const struct ovsdb_type *);
@@ -160,7 +162,7 @@ char *ovsdb_type_to_english(const struct ovsdb_type *);
 
 struct ovsdb_error *ovsdb_type_from_json(struct ovsdb_type *,
                                          const struct json *)
-    WARN_UNUSED_RESULT;
+    OVS_WARN_UNUSED_RESULT;
 struct json *ovsdb_type_to_json(const struct ovsdb_type *);
 
 /* Inline function implementations. */
@@ -200,6 +202,13 @@ static inline bool ovsdb_type_is_scalar(const struct ovsdb_type *type)
 static inline bool ovsdb_type_is_optional(const struct ovsdb_type *type)
 {
     return type->n_min == 0;
+}
+
+static inline bool ovsdb_type_is_optional_scalar(
+    const struct ovsdb_type *type)
+{
+    return (type->value.type == OVSDB_TYPE_VOID
+            && type->n_min == 0 && type->n_max == 1);
 }
 
 static inline bool ovsdb_type_is_composite(const struct ovsdb_type *type)

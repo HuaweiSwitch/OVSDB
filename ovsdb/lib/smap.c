@@ -1,4 +1,4 @@
-/* Copyright (c) 2012 Nicira, Inc.
+/* Copyright (c) 2012, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 
 #include "hash.h"
 #include "json.h"
+#include "packets.h"
+#include "uuid.h"
 
 static struct smap_node *smap_add__(struct smap *, char *, void *,
                                     size_t hash);
@@ -53,6 +55,15 @@ smap_add(struct smap *smap, const char *key, const char *value)
                       hash_bytes(key, key_len, 0));
 }
 
+/* Adds 'key' paired with 'value' to 'smap'.  Takes ownership of 'key' and
+ * 'value' (which will eventually be freed with free()).  It is the caller's
+ * responsibility to avoid duplicate keys if desirable. */
+struct smap_node *
+smap_add_nocopy(struct smap *smap, char *key, char *value)
+{
+    return smap_add__(smap, key, value, hash_bytes(key, strlen(key), 0));
+}
+
 /* Attempts to add 'key' to 'smap' associated with 'value'.  If 'key' already
  * exists in 'smap', does nothing and returns false.  Otherwise, performs the
  * addition and returns true. */
@@ -83,6 +94,16 @@ smap_add_format(struct smap *smap, const char *key, const char *format, ...)
     key_len = strlen(key);
     smap_add__(smap, xmemdup0(key, key_len), value,
                hash_bytes(key, key_len, 0));
+}
+
+/* Adds 'key' paired with a string representation of 'addr'. It is the
+ * caller's responsibility to avoid duplicate keys if desirable. */
+void
+smap_add_ipv6(struct smap *smap, const char *key, struct in6_addr *addr)
+{
+    char buf[INET6_ADDRSTRLEN];
+    ipv6_string_mapped(buf, addr);
+    smap_add(smap, key, buf);
 }
 
 /* Searches for 'key' in 'smap'.  If it does not already exists, adds it.
@@ -206,6 +227,16 @@ smap_get_int(const struct smap *smap, const char *key, int def)
     return value ? atoi(value) : def;
 }
 
+/* Gets the value associated with 'key' in 'smap' and converts it to a UUID
+ * using uuid_from_string().  Returns true if successful, false if 'key' is not
+ * in 'smap' or if 'key' does not have the correct syntax for a UUID. */
+bool
+smap_get_uuid(const struct smap *smap, const char *key, struct uuid *uuid)
+{
+    const char *value = smap_get(smap, key);
+    return value && uuid_from_string(uuid, value);
+}
+
 /* Returns true of there are no elements in 'smap'. */
 bool
 smap_is_empty(const struct smap *smap)
@@ -292,6 +323,26 @@ smap_to_json(const struct smap *smap)
         json_object_put_string(json, node->key, node->value);
     }
     return json;
+}
+
+/* Returns true if the two maps are equal, meaning that they have the same set
+ * of key-value pairs.
+ */
+bool
+smap_equal(const struct smap *smap1, const struct smap *smap2)
+{
+    if (smap_count(smap1) != smap_count(smap2)) {
+        return false;
+    }
+
+    const struct smap_node *node;
+    SMAP_FOR_EACH (node, smap1) {
+        const char *value2 = smap_get(smap2, node->key);
+        if (!value2 || strcmp(node->value, value2)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /* Private Helpers. */

@@ -1,6 +1,9 @@
 # libovsdb
 lib_LTLIBRARIES += ovsdb/libovsdb.la
-ovsdb_libovsdb_la_LDFLAGS = -release $(VERSION)
+ovsdb_libovsdb_la_LDFLAGS = \
+        -version-info $(LT_CURRENT):$(LT_REVISION):$(LT_AGE) \
+        -Wl,--version-script=$(top_builddir)/ovsdb/libovsdb.sym \
+        $(AM_LDFLAGS)
 ovsdb_libovsdb_la_SOURCES = \
 	ovsdb/column.c \
 	ovsdb/column.h \
@@ -17,6 +20,8 @@ ovsdb_libovsdb_la_SOURCES = \
 	ovsdb/mutation.h \
 	ovsdb/ovsdb.c \
 	ovsdb/ovsdb.h \
+	ovsdb/monitor.c \
+	ovsdb/monitor.h \
 	ovsdb/query.c \
 	ovsdb/query.h \
 	ovsdb/row.c \
@@ -31,6 +36,9 @@ ovsdb_libovsdb_la_SOURCES = \
 	ovsdb/transaction.h
 ovsdb_libovsdb_la_CFLAGS = $(AM_CFLAGS)
 ovsdb_libovsdb_la_CPPFLAGS = $(AM_CPPFLAGS)
+
+pkgconfig_DATA += \
+	$(srcdir)/ovsdb/libovsdb.pc
 
 MAN_FRAGMENTS += \
 	ovsdb/remote-active.man \
@@ -71,14 +79,12 @@ DISTCLEANFILES += ovsdb/ovsdb-idlc
 SUFFIXES += .ovsidl .ovsschema
 OVSDB_IDLC = $(run_python) $(srcdir)/ovsdb/ovsdb-idlc.in
 .ovsidl.c:
-	$(OVSDB_IDLC) c-idl-source $< > $@.tmp
-	mv $@.tmp $@
+	$(AM_V_GEN)$(OVSDB_IDLC) c-idl-source $< > $@.tmp && mv $@.tmp $@
 .ovsidl.h:
-	$(OVSDB_IDLC) c-idl-header $< > $@.tmp
-	mv $@.tmp $@
+	$(AM_V_GEN)$(OVSDB_IDLC) c-idl-header $< > $@.tmp && mv $@.tmp $@
 
-EXTRA_DIST += $(OVSIDL_BUILT)
 BUILT_SOURCES += $(OVSIDL_BUILT)
+CLEANFILES += $(OVSIDL_BUILT)
 
 # This must be done late: macros in targets are expanded when the
 # target line is read, so if this file were to be included before some

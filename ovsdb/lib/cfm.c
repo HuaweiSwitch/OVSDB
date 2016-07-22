@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,12 +23,13 @@
 
 #include "byte-order.h"
 #include "connectivity.h"
+#include "dp-packet.h"
 #include "dynamic-string.h"
 #include "flow.h"
 #include "hash.h"
 #include "hmap.h"
 #include "netdev.h"
-#include "ofpbuf.h"
+#include "ovs-atomic.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "random.h"
@@ -36,17 +37,17 @@
 #include "timer.h"
 #include "timeval.h"
 #include "unixctl.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(cfm);
 
 #define CFM_MAX_RMPS 256
 
 /* Ethernet destination address of CCM packets. */
-static const uint8_t eth_addr_ccm[6] = { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x30 };
-static const uint8_t eth_addr_ccm_x[6] = {
-    0x01, 0x23, 0x20, 0x00, 0x00, 0x30
-};
+static const struct eth_addr eth_addr_ccm = {
+    { { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x30 } } };
+static const struct eth_addr eth_addr_ccm_x = {
+    { { 0x01, 0x23, 0x20, 0x00, 0x00, 0x30 } } };
 
 #define ETH_TYPE_CFM 0x8902
 
@@ -128,6 +129,9 @@ struct cfm {
                                  recomputed. */
     long long int last_tx;    /* Last CCM transmission time. */
 
+    /* These bools are atomic to allow readers to check their values
+     * without taking 'mutex'.  Such readers do not assume the values they
+     * read are synchronized with any other members. */
     atomic_bool check_tnl_key; /* Verify the tunnel key of inbound packets? */
     atomic_bool extended;      /* Extended mode. */
     struct ovs_refcount ref_cnt;
@@ -180,11 +184,13 @@ cfm_rx_packets(const struct cfm *cfm) OVS_REQUIRES(mutex)
     }
 }
 
-static const uint8_t *
+static struct eth_addr
 cfm_ccm_addr(struct cfm *cfm)
 {
     bool extended;
-    atomic_read(&cfm->extended, &extended);
+
+    atomic_read_relaxed(&cfm->extended, &extended);
+
     return extended ? eth_addr_ccm_x : eth_addr_ccm;
 }
 
@@ -374,7 +380,7 @@ cfm_unref(struct cfm *cfm) OVS_EXCLUDED(mutex)
         return;
     }
 
-    if (ovs_refcount_unref(&cfm->ref_cnt) != 1) {
+    if (ovs_refcount_unref_relaxed(&cfm->ref_cnt) != 1) {
         return;
     }
 
@@ -557,8 +563,8 @@ cfm_should_send_ccm(struct cfm *cfm) OVS_EXCLUDED(mutex)
 /* Composes a CCM message into 'packet'.  Messages generated with this function
  * should be sent whenever cfm_should_send_ccm() indicates. */
 void
-cfm_compose_ccm(struct cfm *cfm, struct ofpbuf *packet,
-                uint8_t eth_src[ETH_ADDR_LEN]) OVS_EXCLUDED(mutex)
+cfm_compose_ccm(struct cfm *cfm, struct dp_packet *packet,
+                const struct eth_addr eth_src) OVS_EXCLUDED(mutex)
 {
     uint16_t ccm_vlan;
     struct ccm *ccm;
@@ -578,7 +584,9 @@ cfm_compose_ccm(struct cfm *cfm, struct ofpbuf *packet,
         eth_push_vlan(packet, htons(ETH_TYPE_VLAN), htons(tci));
     }
 
-    ccm = ofpbuf_l3(packet);
+    atomic_read_relaxed(&cfm->extended, &extended);
+
+    ccm = dp_packet_l3(packet);
     ccm->mdlevel_version = 0;
     ccm->opcode = CCM_OPCODE;
     ccm->tlv_offset = 70;
@@ -588,7 +596,6 @@ cfm_compose_ccm(struct cfm *cfm, struct ofpbuf *packet,
     memset(ccm->zero, 0, sizeof ccm->zero);
     ccm->end_tlv = 0;
 
-    atomic_read(&cfm->extended, &extended);
     if (extended) {
         ccm->mpid = htons(hash_mpid(cfm->mpid));
         ccm->mpid64 = htonll(cfm->mpid);
@@ -613,7 +620,7 @@ cfm_compose_ccm(struct cfm *cfm, struct ofpbuf *packet,
     if (cfm->last_tx) {
         long long int delay = time_msec() - cfm->last_tx;
         if (delay > (cfm->ccm_interval_ms * 3 / 2)) {
-            VLOG_WARN("%s: long delay of %lldms (expected %dms) sending CCM"
+            VLOG_INFO("%s: long delay of %lldms (expected %dms) sending CCM"
                       " seq %"PRIu32, cfm->name, delay, cfm->ccm_interval_ms,
                       cfm->seq);
         }
@@ -622,10 +629,12 @@ cfm_compose_ccm(struct cfm *cfm, struct ofpbuf *packet,
     ovs_mutex_unlock(&mutex);
 }
 
-void
+long long int
 cfm_wait(struct cfm *cfm) OVS_EXCLUDED(mutex)
 {
-    poll_timer_wait_until(cfm_wake_time(cfm));
+    long long int wake_time = cfm_wake_time(cfm);
+    poll_timer_wait_until(wake_time);
+    return wake_time;
 }
 
 
@@ -664,8 +673,8 @@ cfm_configure(struct cfm *cfm, const struct cfm_settings *s)
     interval = ms_to_ccm_interval(s->interval);
     interval_ms = ccm_interval_to_ms(interval);
 
-    atomic_store(&cfm->check_tnl_key, s->check_tnl_key);
-    atomic_store(&cfm->extended, s->extended);
+    atomic_store_relaxed(&cfm->check_tnl_key, s->check_tnl_key);
+    atomic_store_relaxed(&cfm->extended, s->extended);
 
     cfm->ccm_vlan = s->ccm_vlan;
     cfm->ccm_pcp = s->ccm_pcp & (VLAN_PCP_MASK >> VLAN_PCP_SHIFT);
@@ -717,30 +726,42 @@ cfm_should_process_flow(const struct cfm *cfm_, const struct flow *flow,
     struct cfm *cfm = CONST_CAST(struct cfm *, cfm_);
     bool check_tnl_key;
 
-    atomic_read(&cfm->check_tnl_key, &check_tnl_key);
+    /* Most packets are not CFM. */
+    if (OVS_LIKELY(flow->dl_type != htons(ETH_TYPE_CFM))) {
+        return false;
+    }
+
     memset(&wc->masks.dl_dst, 0xff, sizeof wc->masks.dl_dst);
+    if (OVS_UNLIKELY(!eth_addr_equals(flow->dl_dst, cfm_ccm_addr(cfm)))) {
+        return false;
+    }
+
+    atomic_read_relaxed(&cfm->check_tnl_key, &check_tnl_key);
+
     if (check_tnl_key) {
         memset(&wc->masks.tunnel.tun_id, 0xff, sizeof wc->masks.tunnel.tun_id);
+        return flow->tunnel.tun_id == htonll(0);
     }
-    return (ntohs(flow->dl_type) == ETH_TYPE_CFM
-            && eth_addr_equals(flow->dl_dst, cfm_ccm_addr(cfm))
-            && (!check_tnl_key || flow->tunnel.tun_id == htonll(0)));
+    return true;
 }
 
 /* Updates internal statistics relevant to packet 'p'.  Should be called on
  * every packet whose flow returned true when passed to
  * cfm_should_process_flow. */
 void
-cfm_process_heartbeat(struct cfm *cfm, const struct ofpbuf *p)
+cfm_process_heartbeat(struct cfm *cfm, const struct dp_packet *p)
     OVS_EXCLUDED(mutex)
 {
     struct ccm *ccm;
     struct eth_header *eth;
+    bool extended;
 
     ovs_mutex_lock(&mutex);
 
-    eth = ofpbuf_l2(p);
-    ccm = ofpbuf_at(p, (uint8_t *)ofpbuf_l3(p) - (uint8_t *)ofpbuf_data(p),
+    atomic_read_relaxed(&cfm->extended, &extended);
+
+    eth = dp_packet_l2(p);
+    ccm = dp_packet_at(p, (uint8_t *)dp_packet_l3(p) - (uint8_t *)dp_packet_data(p),
                     CCM_ACCEPT_LEN);
 
     if (!ccm) {
@@ -777,10 +798,8 @@ cfm_process_heartbeat(struct cfm *cfm, const struct ofpbuf *p)
         uint64_t ccm_mpid;
         uint32_t ccm_seq;
         bool ccm_opdown;
-        bool extended;
         enum cfm_fault_reason cfm_fault = 0;
 
-        atomic_read(&cfm->extended, &extended);
         if (extended) {
             ccm_mpid = ntohll(ccm->mpid64);
             ccm_opdown = ccm->opdown;
@@ -925,24 +944,40 @@ cfm_get_health(const struct cfm *cfm) OVS_EXCLUDED(mutex)
     return health;
 }
 
+static int
+cfm_get_opup__(const struct cfm *cfm_) OVS_REQUIRES(mutex)
+{
+    struct cfm *cfm = CONST_CAST(struct cfm *, cfm_);
+    bool extended;
+
+    atomic_read_relaxed(&cfm->extended, &extended);
+
+    return extended ? cfm->remote_opup : -1;
+}
+
 /* Gets the operational state of 'cfm'.  'cfm' is considered operationally down
  * if it has received a CCM with the operationally down bit set from any of its
  * remote maintenance points. Returns 1 if 'cfm' is operationally up, 0 if
  * 'cfm' is operationally down, or -1 if 'cfm' has no operational state
  * (because it isn't in extended mode). */
 int
-cfm_get_opup(const struct cfm *cfm_) OVS_EXCLUDED(mutex)
+cfm_get_opup(const struct cfm *cfm) OVS_EXCLUDED(mutex)
 {
-    struct cfm *cfm = CONST_CAST(struct cfm *, cfm_);
-    bool extended;
     int opup;
 
     ovs_mutex_lock(&mutex);
-    atomic_read(&cfm->extended, &extended);
-    opup = extended ? cfm->remote_opup : -1;
+    opup = cfm_get_opup__(cfm);
     ovs_mutex_unlock(&mutex);
 
     return opup;
+}
+
+static void
+cfm_get_remote_mpids__(const struct cfm *cfm, uint64_t **rmps, size_t *n_rmps)
+    OVS_REQUIRES(mutex)
+{
+    *rmps = xmemdup(cfm->rmps_array, cfm->rmps_array_len * sizeof **rmps);
+    *n_rmps = cfm->rmps_array_len;
 }
 
 /* Populates 'rmps' with an array of remote maintenance points reachable by
@@ -953,8 +988,20 @@ cfm_get_remote_mpids(const struct cfm *cfm, uint64_t **rmps, size_t *n_rmps)
     OVS_EXCLUDED(mutex)
 {
     ovs_mutex_lock(&mutex);
-    *rmps = xmemdup(cfm->rmps_array, cfm->rmps_array_len * sizeof **rmps);
-    *n_rmps = cfm->rmps_array_len;
+    cfm_get_remote_mpids__(cfm, rmps, n_rmps);
+    ovs_mutex_unlock(&mutex);
+}
+
+/* Extracts the status of 'cfm' and fills in the 's'. */
+void
+cfm_get_status(const struct cfm *cfm, struct cfm_status *s) OVS_EXCLUDED(mutex)
+{
+    ovs_mutex_lock(&mutex);
+    s->faults = cfm_get_fault__(cfm);
+    s->remote_opstate = cfm_get_opup__(cfm);
+    s->flap_count = cfm->flap_count;
+    s->health = cfm->health;
+    cfm_get_remote_mpids__(cfm, &s->rmps, &s->n_rmps);
     ovs_mutex_unlock(&mutex);
 }
 
@@ -978,7 +1025,7 @@ cfm_print_details(struct ds *ds, struct cfm *cfm) OVS_REQUIRES(mutex)
     bool extended;
     int fault;
 
-    atomic_read(&cfm->extended, &extended);
+    atomic_read_relaxed(&cfm->extended, &extended);
 
     ds_put_format(ds, "---- %s ----\n", cfm->name);
     ds_put_format(ds, "MPID %"PRIu64":%s%s\n", cfm->mpid,

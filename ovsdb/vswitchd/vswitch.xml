@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<database title="Open vSwitch Configuration Database">
+<database name="ovs-vswitchd.conf.db" title="Open vSwitch Configuration Database">
   <p>
     A database with this schema holds the configuration for one Open
     vSwitch daemon.  The top-level configuration for the daemon is the
@@ -145,10 +145,53 @@
           The maximum
           number of flows allowed in the datapath flow table.  Internally OVS
           will choose a flow limit which will likely be lower than this number,
-          based on real time network conditions.
+          based on real time network conditions. Tweaking this value is
+          discouraged unless you know exactly what you're doing.
         </p>
         <p>
           The default is 200000.
+        </p>
+      </column>
+
+      <column name="other_config" key="max-idle"
+              type='{"type": "integer", "minInteger": 500}'>
+        <p>
+          The maximum time (in ms) that idle flows will remain cached in the
+          datapath. Internally OVS will check the validity and activity for
+          datapath flows regularly and may expire flows quicker than this
+          number, based on real time network conditions. Tweaking this
+          value is discouraged unless you know exactly what you're doing.
+        </p>
+        <p>
+          The default is 10000.
+        </p>
+      </column>
+
+      <column name="other_config" key="n-dpdk-rxqs"
+              type='{"type": "integer", "minInteger": 1}'>
+        <p>
+          Specifies the maximum number of rx queues to be created for each dpdk
+          interface.  If not specified or specified to 0, one rx queue will
+          be created for each dpdk interface by default.
+        </p>
+      </column>
+
+      <column name="other_config" key="pmd-cpu-mask">
+        <p>
+          Specifies CPU mask for setting the cpu affinity of PMD (Poll
+          Mode Driver) threads.  Value should be in the form of hex string,
+          similar to the dpdk EAL '-c COREMASK' option input or the 'taskset'
+          mask input.
+        </p>
+        <p>
+          The lowest order bit corresponds to the first CPU core.  A set bit
+          means the corresponding core is available and a pmd thread will be
+          created and pinned to it.  If the input does not cover all cores,
+          those uncovered cores are considered not set.
+        </p>
+        <p>
+          If not specified, one pmd thread will be created for each numa node
+          and pinned to any available core on the numa node by default.
         </p>
       </column>
 
@@ -395,6 +438,28 @@
 
     </group>
 
+    <group title="Capabilities">
+      <p>
+        These columns report capabilities of the Open vSwitch instance.
+      </p>
+      <column name="datapath_types">
+        <p>
+          This column reports the different dpifs registered with the system.
+          These are the values that this instance supports in the <ref
+          column="datapath_type" table="Bridge"/> column of the <ref
+          table="Bridge"/> table.
+        </p>
+      </column>
+      <column name="iface_types">
+        <p>
+          This column reports the different netdevs registered with the system.
+          These are the values that this instance supports in the <ref
+          column="type" table="Interface"/> column of the <ref
+          table="Interface"/> table.
+        </p>
+      </column>
+    </group>
+
     <group title="Database Configuration">
       <p>
         These columns primarily configure the Open vSwitch database
@@ -478,6 +543,10 @@
           a different type of mirror instead.
         </p>
       </column>
+
+      <column name="auto_attach">
+        Auto Attach configuration.
+      </column>
     </group>
 
     <group title="OpenFlow Configuration">
@@ -554,6 +623,56 @@
         column="other-config" key="datapath-id"/> instead.)
       </column>
 
+      <column name="datapath_version">
+        <p>
+          Reports the version number of the Open vSwitch datapath in use.
+          This allows management software to detect and report discrepancies
+          between Open vSwitch userspace and datapath versions.  (The <ref
+          column="ovs_version" table="Open_vSwitch"/> column in the <ref
+          table="Open_vSwitch"/> reports the Open vSwitch userspace version.)
+          The version reported depends on the datapath in use:
+        </p>
+
+        <ul>
+          <li>
+            When the kernel module included in the Open vSwitch source tree is
+            used, this column reports the Open vSwitch version from which the
+            module was taken.
+          </li>
+
+          <li>
+            When the kernel module that is part of the upstream Linux kernel is
+            used, this column reports <code>&lt;unknown&gt;</code>.
+          </li>
+
+          <li>
+            When the datapath is built into the <code>ovs-vswitchd</code>
+            binary, this column reports <code>&lt;built-in&gt;</code>.  A
+            built-in datapath is by definition the same version as the rest of
+            the Open VSwitch userspace.
+          </li>
+
+          <li>
+            Other datapaths (such as the Hyper-V kernel datapath) currently
+            report <code>&lt;unknown&gt;</code>.
+          </li>
+        </ul>
+
+        <p>
+          A version discrepancy between <code>ovs-vswitchd</code> and the
+          datapath in use is not normally cause for alarm.  The Open vSwitch
+          kernel datapaths for Linux and Hyper-V, in particular, are designed
+          for maximum inter-version compatibility: any userspace version works
+          with with any kernel version.  Some reasons do exist to insist on
+          particular user/kernel pairings.  First, newer kernel versions add
+          new features, that can only be used by new-enough userspace, e.g.
+          VXLAN tunneling requires certain minimal userspace and kernel
+          versions.  Second, as an extension to the first reason, some newer
+          kernel versions add new features for enhancing performance that only
+          new-enough userspace versions can take advantage of.
+        </p>
+      </column>
+
       <column name="other_config" key="datapath-id">
         Exactly 16 hex digits to set the OpenFlow datapath ID to a specific
         value.  May not be all-zero.
@@ -581,16 +700,16 @@
       </column>
 
       <column name="protocols">
-	<p>
-	  List of OpenFlow protocols that may be used when negotiating
-	  a connection with a controller.  OpenFlow 1.0, 1.1, 1.2, and
-	  1.3 are enabled by default if this column is empty.
-	</p>
+        <p>
+          List of OpenFlow protocols that may be used when negotiating
+          a connection with a controller.  OpenFlow 1.0, 1.1, 1.2, and
+          1.3 are enabled by default if this column is empty.
+        </p>
 
-	<p>
-	  OpenFlow 1.4 is not enabled by default because its implementation is
-	  missing features.
-	</p>
+        <p>
+          OpenFlow 1.4 is not enabled by default because its implementation is
+          missing features.
+        </p>
 
         <p>
           OpenFlow 1.5 has the same risks as OpenFlow 1.4, but it is even more
@@ -603,59 +722,256 @@
     </group>
 
     <group title="Spanning Tree Configuration">
-      The IEEE 802.1D Spanning Tree Protocol (STP) is a network protocol
-      that ensures loop-free topologies.  It allows redundant links to
-      be included in the network to provide automatic backup paths if
-      the active links fails.
+      <p>
+        The IEEE 802.1D Spanning Tree Protocol (STP) is a network protocol
+        that ensures loop-free topologies.  It allows redundant links to
+        be included in the network to provide automatic backup paths if
+        the active links fails.
+      </p>
 
-      <column name="stp_enable">
-        Enable spanning tree on the bridge.  By default, STP is disabled
-        on bridges.  Bond, internal, and mirror ports are not supported
-        and will not participate in the spanning tree.
-      </column>
+      <p>
+        These settings configure the slower-to-converge but still widely
+        supported version of Spanning Tree Protocol, sometimes known as
+        802.1D-1998.  Open vSwitch also supports the newer Rapid Spanning Tree
+        Protocol (RSTP), documented later in the section titled <code>Rapid
+        Spanning Tree Configuration</code>.
+      </p>
 
-      <column name="other_config" key="stp-system-id">
-        The bridge's STP identifier (the lower 48 bits of the bridge-id)
-        in the form
-        <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>.
-        By default, the identifier is the MAC address of the bridge.
-      </column>
+      <group title="STP Configuration">
+        <column name="stp_enable" type='{"type": "boolean"}'>
+          <p>
+            Enable spanning tree on the bridge.  By default, STP is disabled
+            on bridges.  Bond, internal, and mirror ports are not supported
+            and will not participate in the spanning tree.
+          </p>
 
-      <column name="other_config" key="stp-priority"
-              type='{"type": "integer", "minInteger": 0, "maxInteger": 65535}'>
-        The bridge's relative priority value for determining the root
-        bridge (the upper 16 bits of the bridge-id).  A bridge with the
-        lowest bridge-id is elected the root.  By default, the priority
-        is 0x8000.
-      </column>
+          <p>
+            STP and RSTP are mutually exclusive.  If both are enabled, RSTP
+            will be used.
+          </p>
+        </column>
 
-      <column name="other_config" key="stp-hello-time"
-              type='{"type": "integer", "minInteger": 1, "maxInteger": 10}'>
-        The interval between transmissions of hello messages by
-        designated ports, in seconds.  By default the hello interval is
-        2 seconds.
-      </column>
+        <column name="other_config" key="stp-system-id">
+          The bridge's STP identifier (the lower 48 bits of the bridge-id)
+          in the form
+          <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>.
+          By default, the identifier is the MAC address of the bridge.
+        </column>
 
-      <column name="other_config" key="stp-max-age"
-              type='{"type": "integer", "minInteger": 6, "maxInteger": 40}'>
-        The maximum age of the information transmitted by the bridge
-        when it is the root bridge, in seconds.  By default, the maximum
-        age is 20 seconds.
-      </column>
+        <column name="other_config" key="stp-priority"
+                type='{"type": "integer", "minInteger": 0, "maxInteger": 65535}'>
+          The bridge's relative priority value for determining the root
+          bridge (the upper 16 bits of the bridge-id).  A bridge with the
+          lowest bridge-id is elected the root.  By default, the priority
+          is 0x8000.
+        </column>
 
-      <column name="other_config" key="stp-forward-delay"
-              type='{"type": "integer", "minInteger": 4, "maxInteger": 30}'>
-        The delay to wait between transitioning root and designated
-        ports to <code>forwarding</code>, in seconds.  By default, the
-        forwarding delay is 15 seconds.
+        <column name="other_config" key="stp-hello-time"
+                type='{"type": "integer", "minInteger": 1, "maxInteger": 10}'>
+          The interval between transmissions of hello messages by
+          designated ports, in seconds.  By default the hello interval is
+          2 seconds.
+        </column>
+
+        <column name="other_config" key="stp-max-age"
+                type='{"type": "integer", "minInteger": 6, "maxInteger": 40}'>
+          The maximum age of the information transmitted by the bridge
+          when it is the root bridge, in seconds.  By default, the maximum
+          age is 20 seconds.
+        </column>
+
+        <column name="other_config" key="stp-forward-delay"
+                type='{"type": "integer", "minInteger": 4, "maxInteger": 30}'>
+          The delay to wait between transitioning root and designated
+          ports to <code>forwarding</code>, in seconds.  By default, the
+          forwarding delay is 15 seconds.
+        </column>
+
+        <column name="other_config" key="mcast-snooping-aging-time"
+                type='{"type": "integer", "minInteger": 1}'>
+          <p>
+            The maximum number of seconds to retain a multicast snooping entry for
+            which no packets have been seen.  The default is currently 300
+            seconds (5 minutes).  The value, if specified, is forced into a
+            reasonable range, currently 15 to 3600 seconds.
+          </p>
+        </column>
+
+        <column name="other_config" key="mcast-snooping-table-size"
+                type='{"type": "integer", "minInteger": 1}'>
+          <p>
+            The maximum number of multicast snooping addresses to learn.  The
+            default is currently 2048.  The value, if specified, is forced into
+            a reasonable range, currently 10 to 1,000,000.
+          </p>
+        </column>
+        <column name="other_config" key="mcast-snooping-disable-flood-unregistered"
+                type='{"type": "boolean"}'>
+          <p>
+            If set to <code>false</code>, unregistered multicast packets are forwarded
+            to all ports.
+            If set to <code>true</code>, unregistered multicast packets are forwarded
+            to ports connected to multicast routers.
+          </p>
+        </column>
+      </group>
+
+      <group title="STP Status">
+        <p>
+          These key-value pairs report the status of 802.1D-1998.  They are
+          present only if STP is enabled (via the <ref column="stp_enable"/>
+          column).
+        </p>
+        <column name="status" key="stp_bridge_id">
+          The bridge ID used in spanning tree advertisements, in the form
+          <var>xxxx</var>.<var>yyyyyyyyyyyy</var> where the <var>x</var>s are
+          the STP priority, the <var>y</var>s are the STP system ID, and each
+          <var>x</var> and <var>y</var> is a hex digit.
+        </column>
+        <column name="status" key="stp_designated_root">
+          The designated root for this spanning tree, in the same form as <ref
+          column="status" key="stp_bridge_id"/>.  If this bridge is the root,
+          this will have the same value as <ref column="status"
+          key="stp_bridge_id"/>, otherwise it will differ.
+        </column>
+        <column name="status" key="stp_root_path_cost">
+          The path cost of reaching the designated bridge.  A lower number is
+          better.  The value is 0 if this bridge is the root, otherwise it is
+          higher.
+        </column>
+      </group>
+    </group>
+
+    <group title="Rapid Spanning Tree">
+      <p>
+        Rapid Spanning Tree Protocol (RSTP), like STP, is a network protocol
+        that ensures loop-free topologies.  RSTP superseded STP with the
+        publication of 802.1D-2004.  Compared to STP, RSTP converges more
+        quickly and recovers more quickly from failures.
+      </p>
+
+      <group title="RSTP Configuration">
+        <column name="rstp_enable" type='{"type": "boolean"}'>
+          <p>
+            Enable Rapid Spanning Tree on the bridge.  By default, RSTP is disabled
+            on bridges.  Bond, internal, and mirror ports are not supported
+            and will not participate in the spanning tree.
+          </p>
+
+          <p>
+            STP and RSTP are mutually exclusive.  If both are enabled, RSTP
+            will be used.
+          </p>
+        </column>
+
+        <column name="other_config" key="rstp-address">
+          The bridge's RSTP address (the lower 48 bits of the bridge-id)
+          in the form
+          <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>.
+          By default, the address is the MAC address of the bridge.
+        </column>
+
+        <column name="other_config" key="rstp-priority"
+                type='{"type": "integer", "minInteger": 0, "maxInteger": 61440}'>
+          The bridge's relative priority value for determining the root
+          bridge (the upper 16 bits of the bridge-id).  A bridge with the
+          lowest bridge-id is elected the root.  By default, the priority
+          is 0x8000 (32768).  This value needs to be a multiple of 4096,
+          otherwise it's rounded to the nearest inferior one.
+        </column>
+
+        <column name="other_config" key="rstp-ageing-time"
+                type='{"type": "integer", "minInteger": 10, "maxInteger": 1000000}'>
+          The Ageing Time parameter for the Bridge.  The default value
+          is 300 seconds.
+        </column>
+
+        <column name="other_config" key="rstp-force-protocol-version"
+                type='{"type": "integer"}'>
+          The Force Protocol Version parameter for the Bridge.  This
+          can take the value 0 (STP Compatibility mode) or 2
+          (the default, normal operation).
+        </column>
+
+        <column name="other_config" key="rstp-max-age"
+                type='{"type": "integer", "minInteger": 6, "maxInteger": 40}'>
+          The maximum age of the information transmitted by the Bridge
+          when it is the Root Bridge.  The default value is 20.
+        </column>
+
+        <column name="other_config" key="rstp-forward-delay"
+                type='{"type": "integer", "minInteger": 4, "maxInteger": 30}'>
+          The delay used by STP Bridges to transition Root and Designated
+          Ports to Forwarding.  The default value is 15.
+        </column>
+
+        <column name="other_config" key="rstp-transmit-hold-count"
+                type='{"type": "integer", "minInteger": 1, "maxInteger": 10}'>
+          The Transmit Hold Count used by the Port Transmit state machine
+          to limit transmission rate.  The default value is 6.
+        </column>
+      </group>
+
+      <group title="RSTP Status">
+        <p>
+          These key-value pairs report the status of 802.1D-2004.  They are
+          present only if RSTP is enabled (via the <ref column="rstp_enable"/>
+          column).
+        </p>
+        <column name="rstp_status" key="rstp_bridge_id">
+          The bridge ID used in rapid spanning tree advertisements, in the form
+          <var>x</var>.<var>yyy</var>.<var>zzzzzzzzzzzz</var> where
+          <var>x</var> is the RSTP priority, the <var>y</var>s are a locally
+          assigned system ID extension, the <var>z</var>s are the STP system
+          ID, and each <var>x</var>, <var>y</var>, or <var>z</var> is a hex
+          digit.
+        </column>
+        <column name="rstp_status" key="rstp_root_id">
+          The root of this spanning tree, in the same form as <ref
+          column="rstp_status" key="rstp_bridge_id"/>.  If this bridge is the
+          root, this will have the same value as <ref column="rstp_status"
+          key="rstp_bridge_id"/>, otherwise it will differ.
+        </column>
+        <column name="rstp_status" key="rstp_root_path_cost"
+                type='{"type": "integer", "minInteger": 0}'>
+          The path cost of reaching the root.  A lower number is better.  The
+          value is 0 if this bridge is the root, otherwise it is higher.
+        </column>
+        <column name="rstp_status" key="rstp_designated_id">
+          The RSTP designated ID, in the same form as <ref column="rstp_status"
+          key="rstp_bridge_id"/>.
+        </column>
+        <column name="rstp_status" key="rstp_designated_port_id">
+          The RSTP designated port ID, as a 4-digit hex number.
+        </column>
+        <column name="rstp_status" key="rstp_bridge_port_id">
+          The RSTP bridge port ID, as a 4-digit hex number.
+        </column>
+      </group>
+    </group>
+
+    <group title="Multicast Snooping Configuration">
+      Multicast snooping (RFC 4541) monitors the Internet Group Management
+      Protocol (IGMP) and Multicast Listener Discovery traffic between hosts
+      and multicast routers.  The switch uses what IGMP and MLD snooping
+      learns to forward multicast traffic only to interfaces that are connected
+      to interested receivers.  Currently it supports IGMPv1, IGMPv2, IGMPv3,
+      MLDv1 and MLDv2 protocols.
+
+      <column name="mcast_snooping_enable">
+        Enable multicast snooping on the bridge. For now, the default
+        is disabled.
       </column>
     </group>
 
     <group title="Other Features">
       <column name="datapath_type">
-        Name of datapath provider.  The kernel datapath has
-        type <code>system</code>.  The userspace datapath has
-        type <code>netdev</code>.
+        Name of datapath provider.  The kernel datapath has type
+        <code>system</code>.  The userspace datapath has type
+        <code>netdev</code>.  A manager may refer to the <ref
+        table="Open_vSwitch" column="datapath_types"/> column of the <ref
+        table="Open_vSwitch"/> table for a list of the types accepted by this
+        Open vSwitch instance.
       </column>
 
       <column name="external_ids" key="bridge-id">
@@ -680,18 +996,47 @@
 
       <column name="other_config" key="forward-bpdu"
               type='{"type": "boolean"}'>
-        Option to allow forwarding of BPDU frames when NORMAL action is
-        invoked.  Frames with reserved Ethernet addresses (e.g. STP
-        BPDU) will be forwarded when this option is enabled and the
-        switch is not providing that functionality.  If STP is enabled
-        on the port, STP BPDUs will never be forwarded.  If the Open
-        vSwitch bridge is used to connect different Ethernet networks,
-        and if Open vSwitch node does not run STP, then this option
-        should be enabled.  Default is disabled, set to
-        <code>true</code> to enable.
 
-        The following destination MAC addresss will not be forwarded when this
-        option is enabled.
+        <p>
+          Controls forwarding of BPDUs and other network control frames when
+          NORMAL action is invoked.  When this option is <code>false</code> or
+          unset, frames with reserved Ethernet addresses (see table below) will
+          not be forwarded.  When this option is <code>true</code>, such frames
+          will not be treated specially.
+        </p>
+
+        <p>
+          The above general rule has the following exceptions:
+        </p>
+
+        <ul>
+          <li>
+            If STP is enabled on the bridge (see the <ref column="stp_enable"
+            table="Bridge"/> column in the <ref table="Bridge"/> table), the
+            bridge processes all received STP packets and never passes them to
+            OpenFlow or forwards them.  This is true even if STP is disabled on
+            an individual port.
+          </li>
+
+          <li>
+            If LLDP is enabled on an interface (see the <ref column="lldp"
+            table="Interface"/> column in the <ref table="Interface"/> table),
+            the interface processes received LLDP packets and never passes them
+            to OpenFlow or forwards them.
+          </li>
+        </ul>
+
+        <p>
+          Set this option to <code>true</code> if the Open vSwitch bridge
+          connects different Ethernet networks and is not configured to
+          participate in STP.
+        </p>
+
+        <p>
+          This option affects packets with the following destination MAC
+          addresses:
+        </p>
+
         <dl>
           <dt><code>01:80:c2:00:00:00</code></dt>
           <dd>IEEE 802.1D Spanning Tree Protocol (STP).</dd>
@@ -706,8 +1051,8 @@
           <dd>Extreme Discovery Protocol (EDP).</dd>
 
           <dt>
-	    <code>00:e0:2b:00:00:04</code> and <code>00:e0:2b:00:00:06</code>
-	  </dt>
+            <code>00:e0:2b:00:00:04</code> and <code>00:e0:2b:00:00:06</code>
+          </dt>
           <dd>Ethernet Automatic Protection Switching (EAPS).</dd>
 
           <dt><code>01:00:0c:cc:cc:cc</code></dt>
@@ -761,34 +1106,6 @@
       </column>
     </group>
 
-    <group title="Bridge Status">
-      <p>
-        Status information about bridges.
-      </p>
-      <column name="status">
-        Key-value pairs that report bridge status.
-      </column>
-      <column name="status" key="stp_bridge_id">
-        <p>
-          The bridge-id (in hex) used in spanning tree advertisements.
-          Configuring the bridge-id is described in the
-          <code>stp-system-id</code> and <code>stp-priority</code> keys
-          of the <code>other_config</code> section earlier.
-        </p>
-      </column>
-      <column name="status" key="stp_designated_root">
-        <p>
-          The designated root (in hex) for this spanning tree.
-        </p>
-      </column>
-      <column name="status" key="stp_root_path_cost">
-        <p>
-          The path cost of reaching the designated bridge.  A lower
-          number is better.
-        </p>
-      </column>
-    </group>
-
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
       Columns</code> at the beginning of this document.
@@ -797,7 +1114,7 @@
       <column name="external_ids"/>
     </group>
   </table>
-
+  
   <table name="Port" table="Port or bond configuration.">
     <p>A port within a <ref table="Bridge"/>.</p>
     <p>Most commonly, a port has exactly one ``interface,'' pointed to by its
@@ -1080,7 +1397,7 @@
         </column>
 
         <column name="other_config" key="lacp-time"
-          type='{"type": "string", "enum": ["set", ["fast", "slow"]]}'>
+                type='{"type": "string", "enum": ["set", ["fast", "slow"]]}'>
           <p>
             The LACP timing which should be used on this <ref table="Port"/>.
             By default <code>slow</code> is used.  When configured to be
@@ -1092,7 +1409,7 @@
         </column>
 
         <column name="other_config" key="lacp-fallback-ab"
-          type='{"type": "boolean"}'>
+                type='{"type": "boolean"}'>
           <p>
             Determines the behavior of openvswitch bond in LACP mode. If
             the partner switch does not support LACP, setting this option
@@ -1128,37 +1445,208 @@
       </column>
     </group>
 
-    <group title="Spanning Tree Configuration">
-      <column name="other_config" key="stp-enable"
+    <group title="Spanning Tree Protocol">
+      <p>
+        The configuration here is only meaningful, and the status is only
+        populated, when 802.1D-1998 Spanning Tree Protocol is enabled on the
+        port's <ref column="Bridge"/> with its <ref column="stp_enable"/>
+        column.
+      </p>
+
+      <group title="STP Configuration">
+        <column name="other_config" key="stp-enable"
+                type='{"type": "boolean"}'>
+          When STP is enabled on a bridge, it is enabled by default on all of
+          the bridge's ports except bond, internal, and mirror ports (which do
+          not work with STP).  If this column's value is <code>false</code>,
+          STP is disabled on the port.
+        </column>
+
+        <column name="other_config" key="stp-port-num"
+                type='{"type": "integer", "minInteger": 1, "maxInteger": 255}'>
+          The port number used for the lower 8 bits of the port-id.  By
+          default, the numbers will be assigned automatically.  If any
+          port's number is manually configured on a bridge, then they
+          must all be.
+        </column>
+
+        <column name="other_config" key="stp-port-priority"
+                type='{"type": "integer", "minInteger": 0, "maxInteger": 255}'>
+          The port's relative priority value for determining the root
+          port (the upper 8 bits of the port-id).  A port with a lower
+          port-id will be chosen as the root port.  By default, the
+          priority is 0x80.
+        </column>
+
+        <column name="other_config" key="stp-path-cost"
+                type='{"type": "integer", "minInteger": 0, "maxInteger": 65535}'>
+          Spanning tree path cost for the port.  A lower number indicates
+          a faster link.  By default, the cost is based on the maximum
+          speed of the link.
+        </column>
+      </group>
+
+      <group title="STP Status">
+        <column name="status" key="stp_port_id">
+          The port ID used in spanning tree advertisements for this port, as 4
+          hex digits.  Configuring the port ID is described in the
+          <code>stp-port-num</code> and <code>stp-port-priority</code> keys of
+          the <code>other_config</code> section earlier.
+        </column>
+        <column name="status" key="stp_state"
+                type='{"type": "string", "enum": ["set",
+                      ["disabled", "listening", "learning",
+                      "forwarding", "blocking"]]}'>
+          STP state of the port.
+        </column>
+        <column name="status" key="stp_sec_in_state"
+                type='{"type": "integer", "minInteger": 0}'>
+          The amount of time this port has been in the current STP state, in
+          seconds.
+        </column>
+        <column name="status" key="stp_role"
+                type='{"type": "string", "enum": ["set",
+                      ["root", "designated", "alternate"]]}'>
+          STP role of the port.
+        </column>
+      </group>
+    </group>
+
+    <group title="Rapid Spanning Tree Protocol">
+      <p>
+        The configuration here is only meaningful, and the status and
+        statistics are only populated, when 802.1D-1998 Spanning Tree Protocol
+        is enabled on the port's <ref column="Bridge"/> with its <ref
+        column="stp_enable"/> column.
+      </p>
+
+      <group title="RSTP Configuration">
+        <column name="other_config" key="rstp-enable"
+                type='{"type": "boolean"}'>
+          When RSTP is enabled on a bridge, it is enabled by default on all of
+          the bridge's ports except bond, internal, and mirror ports (which do
+          not work with RSTP).  If this column's value is <code>false</code>,
+          RSTP is disabled on the port.
+        </column>
+
+        <column name="other_config" key="rstp-port-priority"
+                type='{"type": "integer", "minInteger": 0, "maxInteger": 240}'>
+          The port's relative priority value for determining the root port, in
+          multiples of 16.  By default, the port priority is 0x80 (128).  Any
+          value in the lower 4 bits is rounded off.  The significant upper 4
+          bits become the upper 4 bits of the port-id.  A port with the lowest
+          port-id is elected as the root.
+        </column>
+
+        <column name="other_config" key="rstp-port-num"
+                type='{"type": "integer", "minInteger": 1, "maxInteger": 4095}'>
+          The local RSTP port number, used as the lower 12 bits of the port-id.
+          By default the port numbers are assigned automatically, and typically
+          may not correspond to the OpenFlow port numbers.  A port with the
+          lowest port-id is elected as the root.
+        </column>
+
+        <column name="other_config" key="rstp-port-path-cost"
+                type='{"type": "integer"}'>
+          The port path cost.  The Port's contribution, when it is
+          the Root Port, to the Root Path Cost for the Bridge.  By default the
+          cost is automatically calculated from the port's speed.
+        </column>
+
+        <column name="other_config" key="rstp-port-admin-edge"
+                type='{"type": "boolean"}'>
+          The admin edge port parameter for the Port.  Default is
+          <code>false</code>.
+        </column>
+
+        <column name="other_config" key="rstp-port-auto-edge"
+                type='{"type": "boolean"}'>
+          The auto edge port parameter for the Port.  Default is
+          <code>true</code>.
+        </column>
+
+        <column name="other_config" key="rstp-port-mcheck"
+                type='{"type": "boolean"}'>
+          <p>
+            The mcheck port parameter for the Port.  Default is
+            <code>false</code>.  May be set to force the Port Protocol
+            Migration state machine to transmit RST BPDUs for a
+            MigrateTime period, to test whether all STP Bridges on the
+            attached LAN have been removed and the Port can continue to
+            transmit RSTP BPDUs.  Setting mcheck has no effect if the
+            Bridge is operating in STP Compatibility mode.
+          </p>
+          <p>
+            Changing the value from <code>true</code> to
+            <code>false</code> has no effect, but needs to be done if
+            this behavior is to be triggered again by subsequently
+            changing the value from <code>false</code> to
+            <code>true</code>.
+          </p>
+        </column>
+      </group>
+
+      <group title="RSTP Status">
+        <column name="rstp_status" key="rstp_port_id">
+          The port ID used in spanning tree advertisements for this port, as 4
+          hex digits.  Configuring the port ID is described in the
+          <code>rstp-port-num</code> and <code>rstp-port-priority</code> keys
+          of the <code>other_config</code> section earlier.
+        </column>
+        <column name="rstp_status" key="rstp_port_role"
+                type='{"type": "string", "enum": ["set",
+                      ["Root", "Designated", "Alternate", "Backup", "Disabled"]]}'>
+          RSTP role of the port.
+        </column>
+        <column name="rstp_status" key="rstp_port_state"
+                type='{"type": "string", "enum": ["set",
+                      ["Disabled", "Learning", "Forwarding", "Discarding"]]}'>
+          RSTP state of the port.
+        </column>
+        <column name="rstp_status" key="rstp_designated_bridge_id">
+          The port's RSTP designated bridge ID, in the same form as <ref
+          column="rstp_status" key="rstp_bridge_id"/> in the <ref
+          table="Bridge"/> table.
+        </column>
+        <column name="rstp_status" key="rstp_designated_port_id">
+          The port's RSTP designated port ID, as 4 hex digits.
+        </column>
+        <column name="rstp_status" key="rstp_designated_path_cost"
+                type='{"type": "integer"}'>
+          The port's RSTP designated path cost.  Lower is better.
+        </column>
+      </group>
+
+      <group title="RSTP Statistics">
+        <column name="rstp_statistics" key="rstp_tx_count">
+          Number of RSTP BPDUs transmitted through this port.
+        </column>
+        <column name="rstp_statistics" key="rstp_rx_count">
+          Number of valid RSTP BPDUs received by this port.
+        </column>
+        <column name="rstp_statistics" key="rstp_error_count">
+          Number of invalid RSTP BPDUs received by this port.
+        </column>
+        <column name="rstp_statistics" key="rstp_uptime">
+          The duration covered by the other RSTP statistics, in seconds.
+        </column>
+      </group>
+    </group>
+
+    <group title="Multicast Snooping">
+      <column name="other_config" key="mcast-snooping-flood"
               type='{"type": "boolean"}'>
-        If spanning tree is enabled on the bridge, member ports are
-        enabled by default (with the exception of bond, internal, and
-        mirror ports which do not work with STP).  If this column's
-        value is <code>false</code> spanning tree is disabled on the
-        port.
+        <p>
+          If set to <code>true</code>, multicast packets (except Reports) are
+          unconditionally forwarded to the specific port.
+        </p>
       </column>
-
-       <column name="other_config" key="stp-port-num"
-               type='{"type": "integer", "minInteger": 1, "maxInteger": 255}'>
-        The port number used for the lower 8 bits of the port-id.  By
-        default, the numbers will be assigned automatically.  If any
-        port's number is manually configured on a bridge, then they
-        must all be.
-      </column>
-
-       <column name="other_config" key="stp-port-priority"
-               type='{"type": "integer", "minInteger": 0, "maxInteger": 255}'>
-        The port's relative priority value for determining the root
-        port (the upper 8 bits of the port-id).  A port with a lower
-        port-id will be chosen as the root port.  By default, the
-        priority is 0x80.
-      </column>
-
-       <column name="other_config" key="stp-path-cost"
-               type='{"type": "integer", "minInteger": 0, "maxInteger": 65535}'>
-        Spanning tree path cost for the port.  A lower number indicates
-        a faster link.  By default, the cost is based on the maximum
-        speed of the link.
+      <column name="other_config" key="mcast-snooping-flood-reports"
+              type='{"type": "boolean"}'>
+        <p>
+          If set to <code>true</code>, multicast Reports are unconditionally
+          forwarded to the specific port.
+        </p>
       </column>
     </group>
 
@@ -1186,46 +1674,19 @@
         <code>fake-bridge-</code>,
         e.g. <code>fake-bridge-xs-network-uuids</code>.
       </column>
+
+      <column name="other_config" key="transient"
+              type='{"type": "boolean"}'>
+        <p>
+          If set to <code>true</code>, the port will be removed when
+          <code>ovs-ctl start --delete-transient-ports</code> is used.
+        </p>
+      </column>
     </group>
 
-    <group title="Port Status">
-      <p>
-        Status information about ports attached to bridges.
-      </p>
-      <column name="status">
-        Key-value pairs that report port status.
-      </column>
-      <column name="status" key="stp_port_id">
-        <p>
-          The port-id (in hex) used in spanning tree advertisements for
-          this port.  Configuring the port-id is described in the
-          <code>stp-port-num</code> and <code>stp-port-priority</code>
-          keys of the <code>other_config</code> section earlier.
-        </p>
-      </column>
-      <column name="status" key="stp_state"
-              type='{"type": "string", "enum": ["set",
-                            ["disabled", "listening", "learning",
-                             "forwarding", "blocking"]]}'>
-        <p>
-          STP state of the port.
-        </p>
-      </column>
-      <column name="status" key="stp_sec_in_state"
-              type='{"type": "integer", "minInteger": 0}'>
-        <p>
-          The amount of time (in seconds) port has been in the current
-          STP state.
-        </p>
-      </column>
-      <column name="status" key="stp_role"
-              type='{"type": "string", "enum": ["set",
-                            ["root", "designated", "alternate"]]}'>
-        <p>
-          STP role of the port.
-        </p>
-      </column>
-    </group>
+    <column name="bond_active_slave">
+      For a bonded port, record the mac address of the current active slave.
+    </column>
 
     <group title="Port Statistics">
       <p>
@@ -1299,65 +1760,75 @@
         address.</p>
       </column>
 
+      <column name="error">
+        If the configuration of the port failed, as indicated by -1 in <ref
+        column="ofport"/>, Open vSwitch sets this column to an error
+        description in human readable form.  Otherwise, Open vSwitch clears
+        this column.
+      </column>
+
       <group title="OpenFlow Port Number">
-	<p>
-	  When a client adds a new interface, Open vSwitch chooses an OpenFlow
-	  port number for the new port.  If the client that adds the port fills
-	  in <ref column="ofport_request"/>, then Open vSwitch tries to use its
-	  value as the OpenFlow port number.  Otherwise, or if the requested
-	  port number is already in use or cannot be used for another reason,
-	  Open vSwitch automatically assigns a free port number.  Regardless of
-	  how the port number was obtained, Open vSwitch then reports in <ref
-	  column="ofport"/> the port number actually assigned.
-	</p>
+        <p>
+          When a client adds a new interface, Open vSwitch chooses an OpenFlow
+          port number for the new port.  If the client that adds the port fills
+          in <ref column="ofport_request"/>, then Open vSwitch tries to use its
+          value as the OpenFlow port number.  Otherwise, or if the requested
+          port number is already in use or cannot be used for another reason,
+          Open vSwitch automatically assigns a free port number.  Regardless of
+          how the port number was obtained, Open vSwitch then reports in <ref
+          column="ofport"/> the port number actually assigned.
+        </p>
 
-	<p>
-	  Open vSwitch limits the port numbers that it automatically assigns to
-	  the range 1 through 32,767, inclusive.  Controllers therefore have
-	  free use of ports 32,768 and up.
-	</p>
+        <p>
+          Open vSwitch limits the port numbers that it automatically assigns to
+          the range 1 through 32,767, inclusive.  Controllers therefore have
+          free use of ports 32,768 and up.
+        </p>
 
-	<column name="ofport">
-	  <p>
-	    OpenFlow port number for this interface.  Open vSwitch sets this
-	    column's value, so other clients should treat it as read-only.
-	  </p>
-	  <p>
-	    The OpenFlow ``local'' port (<code>OFPP_LOCAL</code>) is 65,534.
-	    The other valid port numbers are in the range 1 to 65,279,
-	    inclusive.  Value -1 indicates an error adding the interface.
-	  </p>
-	</column>
+        <column name="ofport">
+          <p>
+            OpenFlow port number for this interface.  Open vSwitch sets this
+            column's value, so other clients should treat it as read-only.
+          </p>
+          <p>
+            The OpenFlow ``local'' port (<code>OFPP_LOCAL</code>) is 65,534.
+            The other valid port numbers are in the range 1 to 65,279,
+            inclusive.  Value -1 indicates an error adding the interface.
+          </p>
+        </column>
 
-	<column name="ofport_request"
-		type='{"type": "integer", "minInteger": 1, "maxInteger": 65279}'>
-	  <p>
-	    Requested OpenFlow port number for this interface.
-	  </p>
+        <column name="ofport_request"
+                type='{"type": "integer", "minInteger": 1, "maxInteger": 65279}'>
+          <p>
+            Requested OpenFlow port number for this interface.
+          </p>
 
-	  <p>
-	    A client should ideally set this column's value in the same
-	    database transaction that it uses to create the interface.  Open
-	    vSwitch version 2.1 and later will honor a later request for a
-	    specific port number, althuogh it might confuse some controllers:
-	    OpenFlow does not have a way to announce a port number change, so
-	    Open vSwitch represents it over OpenFlow as a port deletion
-	    followed immediately by a port addition.
-	  </p>
+          <p>
+            A client should ideally set this column's value in the same
+            database transaction that it uses to create the interface.  Open
+            vSwitch version 2.1 and later will honor a later request for a
+            specific port number, althuogh it might confuse some controllers:
+            OpenFlow does not have a way to announce a port number change, so
+            Open vSwitch represents it over OpenFlow as a port deletion
+            followed immediately by a port addition.
+          </p>
 
-	  <p>
-	    If <ref column="ofport_request"/> is set or changed to some other
-	    port's automatically assigned port number, Open vSwitch chooses a
-	    new port number for the latter port.
-	  </p>
-	</column>
+          <p>
+            If <ref column="ofport_request"/> is set or changed to some other
+            port's automatically assigned port number, Open vSwitch chooses a
+            new port number for the latter port.
+          </p>
+        </column>
       </group>
     </group>
 
     <group title="System-Specific Details">
       <column name="type">
         <p>
-          The interface type, one of:
+          The interface type.  The types supported by a particular instance of
+          Open vSwitch are listed in the <ref table="Open_vSwitch"
+          column="iface_types"/> column in the <ref table="Open_vSwitch"/>
+          table.  The following types are defined:
         </p>
 
         <dl>
@@ -1379,6 +1850,15 @@
           <dt><code>tap</code></dt>
           <dd>A TUN/TAP device managed by Open vSwitch.</dd>
 
+          <dt><code>geneve</code></dt>
+          <dd>
+            An Ethernet over Geneve (<code>http://tools.ietf.org/html/draft-ietf-nvo3-geneve-00</code>)
+            IPv4 tunnel.
+
+            A description of how to match and set Geneve options can be found
+            in the <code>ovs-ofctl</code> manual page.
+          </dd>
+
           <dt><code>gre</code></dt>
           <dd>
             An Ethernet over RFC 2890 Generic Routing Encapsulation over IPv4
@@ -1391,33 +1871,17 @@
             IPsec tunnel.
           </dd>
 
-          <dt><code>gre64</code></dt>
-          <dd>
-            It is same as GRE, but it allows 64 bit key. To store higher 32-bits
-            of key, it uses GRE protocol sequence number field. This is non
-            standard use of GRE protocol since OVS does not increment
-            sequence number for every packet at time of encap as expected by
-            standard GRE implementation. See <ref group="Tunnel Options"/>
-            for information on configuring GRE tunnels.
-          </dd>
-
-          <dt><code>ipsec_gre64</code></dt>
-          <dd>
-            Same as IPSEC_GRE except 64 bit key.
-          </dd>
-
           <dt><code>vxlan</code></dt>
           <dd>
-	    <p>
-	      An Ethernet tunnel over the experimental, UDP-based VXLAN
-	      protocol described at
-	      <code>http://tools.ietf.org/html/draft-mahalingam-dutt-dcops-vxlan-03</code>.
-	    </p>
-	    <p>
-	      Open vSwitch uses UDP destination port 4789.  The source port used for
-	      VXLAN traffic varies on a per-flow basis and is in the ephemeral port
-	      range.
-	    </p>
+            <p>
+              An Ethernet tunnel over the UDP-based VXLAN protocol described in
+              RFC 7348.
+            </p>
+            <p>
+              Open vSwitch uses UDP destination port 4789.  The source port used for
+              VXLAN traffic varies on a per-flow basis and is in the ephemeral port
+              range.
+            </p>
           </dd>
 
           <dt><code>lisp</code></dt>
@@ -1436,6 +1900,25 @@
             </p>
           </dd>
 
+          <dt><code>stt</code></dt>
+          <dd>
+            The Stateless TCP Tunnel (STT) is particularly useful when tunnel
+            endpoints are in end-systems, as it utilizes the capabilities of
+            standard network interface cards to improve performance.  STT utilizes
+            a TCP-like header inside the IP header. It is stateless, i.e., there is
+            no TCP connection state of any kind associated with the tunnel.  The
+            TCP-like header is used to leverage the capabilities of existing
+            network interface cards, but should not be interpreted as implying
+            any sort of connection state between endpoints.
+            Since the STT protocol does not engage in the usual TCP 3-way handshake,
+            so it will have difficulty traversing stateful firewalls.
+            The protocol is documented at
+            http://www.ietf.org/archive/id/draft-davie-stt-06.txt
+
+            All traffic uses a default destination port of 7471. STT is only
+            available in kernel datapath on kernel 3.5 or newer.
+          </dd>
+
           <dt><code>patch</code></dt>
           <dd>
             A pair of virtual devices that act as a patch cable.
@@ -1443,7 +1926,7 @@
 
           <dt><code>null</code></dt>
           <dd>An ignored interface. Deprecated and slated for removal in
-              February 2013.</dd>
+          February 2013.</dd>
         </dl>
       </column>
     </group>
@@ -1451,8 +1934,8 @@
     <group title="Tunnel Options">
       <p>
         These options apply to interfaces with <ref column="type"/> of
-        <code>gre</code>, <code>ipsec_gre</code>, <code>gre64</code>,
-        <code>ipsec_gre64</code>, <code>vxlan</code>, and <code>lisp</code>.
+        <code>geneve</code>, <code>gre</code>, <code>ipsec_gre</code>,
+        <code>vxlan</code>, <code>lisp</code> and <code>stt</code>.
       </p>
 
       <p>
@@ -1487,9 +1970,9 @@
         </ul>
 
         <p>
-         The remote tunnel endpoint for any packet received from a tunnel
-         is available in the <code>tun_src</code> field for matching in the
-         flow table.
+          The remote tunnel endpoint for any packet received from a tunnel
+          is available in the <code>tun_src</code> field for matching in the
+          flow table.
         </p>
       </column>
 
@@ -1540,9 +2023,9 @@
             key="in_key"/> at all.
           </li>
           <li>
-            A positive 24-bit (for VXLAN and LISP), 32-bit (for GRE) or 64-bit
-            (for GRE64) number.  The tunnel receives only packets with the
-            specified key.
+            A positive 24-bit (for Geneve, VXLAN, and LISP), 32-bit (for GRE)
+            or 64-bit (for STT) number.  The tunnel receives only
+            packets with the specified key.
           </li>
           <li>
             The word <code>flow</code>.  The tunnel accepts packets with any
@@ -1567,9 +2050,9 @@
             key="out_key"/> at all.
           </li>
           <li>
-            A positive 24-bit (for VXLAN and LISP), 32-bit (for GRE) or 64-bit
-            (for GRE64) number.  Packets sent through the tunnel will have the
-            specified key.
+            A positive 24-bit (for Geneve, VXLAN and LISP), 32-bit (for GRE) or
+            64-bit (for STT) number.  Packets sent through the tunnel
+            will have the specified key.
           </li>
           <li>
             The word <code>flow</code>.  Packets sent through the tunnel will
@@ -1609,30 +2092,54 @@
         to <code>false</code> to disable.
       </column>
 
-      <group title="Tunnel Options: gre and ipsec_gre only">
+      <group title="Tunnel Options: vxlan only">
+
+        <column name="options" key="exts">
+          <p>Optional.  Comma separated list of optional VXLAN extensions to
+          enable. The following extensions are supported:</p>
+
+          <ul>
+            <li>
+              <code>gbp</code>: VXLAN-GBP allows to transport the group policy
+              context of a packet across the VXLAN tunnel to other network
+              peers. See the field description of <code>tun_gbp_id</code> and
+              <code>tun_gbp_flags</code> in ovs-ofctl(8) for additional
+              information.
+              (<code>https://tools.ietf.org/html/draft-smith-vxlan-group-policy</code>)
+            </li>
+          </ul>
+        </column>
+
+      </group>
+
+      <group title="Tunnel Options: gre, ipsec_gre, geneve, and vxlan">
         <p>
-          Only <code>gre</code> and <code>ipsec_gre</code> interfaces support
-          these options.
+          <code>gre</code>, <code>ipsec_gre</code>, <code>geneve</code>, and
+          <code>vxlan</code> interfaces support these options.
         </p>
 
         <column name="options" key="csum" type='{"type": "boolean"}'>
           <p>
-            Optional.  Compute GRE checksums on outgoing packets.  Default is
-            disabled, set to <code>true</code> to enable.  Checksums present on
-            incoming packets will be validated regardless of this setting.
-	  </p>
-
-	  <p>
-	    GRE checksums impose a significant performance penalty because they
-	    cover the entire packet.  The encapsulated L3, L4, and L7 packet
-	    contents typically have their own checksums, so this additional
-	    checksum only adds value for the GRE and encapsulated L2 headers.
+            Optional.  Compute encapsulation header (either GRE or UDP) 
+            checksums on outgoing packets.  Default is disabled, set to
+            <code>true</code> to enable.  Checksums present on incoming
+            packets will be validated regardless of this setting.
           </p>
 
           <p>
-	    This option is supported for <code>ipsec_gre</code>, but not useful
-	    because GRE checksums are weaker than, and redundant with, IPsec
-	    payload authentication.
+            When using the upstream Linux kernel module, computation of
+            checksums for <code>geneve</code> and <code>vxlan</code> requires
+            Linux kernel version 4.0 or higher. <code>gre</code> supports
+            checksums for all versions of Open vSwitch that support GRE.
+            The out of tree kernel module distributed as part of OVS
+            can compute all tunnel checksums on any kernel version that it
+            is compatible with.
+          </p>
+
+          <p>
+            This option is supported for <code>ipsec_gre</code>, but not useful
+            because GRE checksums are weaker than, and redundant with, IPsec
+            payload authentication.
           </p>
         </column>
       </group>
@@ -1772,8 +2279,8 @@
       </column>
 
       <column name="status" key="tunnel_egress_iface">
-        Egress interface for tunnels.  Currently only relevant for GRE tunnels
-        On Linux systems, this column will show the name of the interface
+        Egress interface for tunnels.  Currently only relevant for tunnels
+        on Linux systems, this column will show the name of the interface
         which is responsible for routing traffic destined for the configured
         <ref column="options" key="remote_ip"/>.  This could be an internal
         interface such as a bridge port.
@@ -1927,69 +2434,70 @@
 
     <group title="Bidirectional Forwarding Detection (BFD)">
       <p>
-	BFD, defined in RFC 5880 and RFC 5881, allows point-to-point
-	detection of connectivity failures by occasional transmission of
-	BFD control messages.  Open vSwitch implements BFD to serve
-	as a more popular and standards compliant alternative to CFM.
+        BFD, defined in RFC 5880 and RFC 5881, allows point-to-point
+        detection of connectivity failures by occasional transmission of
+        BFD control messages.  Open vSwitch implements BFD to serve
+        as a more popular and standards compliant alternative to CFM.
       </p>
 
       <p>
-	BFD operates by regularly transmitting BFD control messages at a rate
-	negotiated independently in each direction.  Each endpoint specifies
-	the rate at which it expects to receive control messages, and the rate
-	at which it is willing to transmit them.  Open vSwitch uses a detection
-	multiplier of three, meaning that an endpoint signals a connectivity
-	fault if three consecutive BFD control messages fail to arrive.  In the
-	case of a unidirectional connectivity issue, the system not receiving
-	BFD control messages signals the problem to its peer in the messages it
-	transmits.
+        BFD operates by regularly transmitting BFD control messages at a rate
+        negotiated independently in each direction.  Each endpoint specifies
+        the rate at which it expects to receive control messages, and the rate
+        at which it is willing to transmit them.  Open vSwitch uses a detection
+        multiplier of three, meaning that an endpoint signals a connectivity
+        fault if three consecutive BFD control messages fail to arrive.  In the
+        case of a unidirectional connectivity issue, the system not receiving
+        BFD control messages signals the problem to its peer in the messages it
+        transmits.
       </p>
 
       <p>
-	The Open vSwitch implementation of BFD aims to comply faithfully
-	with RFC 5880 requirements.  Open vSwitch does not implement the
-	optional Authentication or ``Echo Mode'' features.
+        The Open vSwitch implementation of BFD aims to comply faithfully
+        with RFC 5880 requirements.  Open vSwitch does not implement the
+        optional Authentication or ``Echo Mode'' features.
       </p>
 
       <group title="BFD Configuration">
-	<p>
-	  A controller sets up key-value pairs in the <ref column="bfd"/>
-	  column to enable and configure BFD.
-	</p>
+        <p>
+          A controller sets up key-value pairs in the <ref column="bfd"/>
+          column to enable and configure BFD.
+        </p>
 
-	<column name="bfd" key="enable" type='{"type": "boolean"}'>
-          True to enable BFD on this <ref table="Interface"/>.
-	</column>
+        <column name="bfd" key="enable" type='{"type": "boolean"}'>
+          True to enable BFD on this <ref table="Interface"/>.  If not
+          specified, BFD will not be enabled by default.
+        </column>
 
-	<column name="bfd" key="min_rx"
-		type='{"type": "integer", "minInteger": 1}'>
+        <column name="bfd" key="min_rx"
+                type='{"type": "integer", "minInteger": 1}'>
           The shortest interval, in milliseconds, at which this BFD session
           offers to receive BFD control messages.  The remote endpoint may
           choose to send messages at a slower rate.  Defaults to
           <code>1000</code>.
-	</column>
+        </column>
 
-	<column name="bfd" key="min_tx"
-		type='{"type": "integer", "minInteger": 1}'>
+        <column name="bfd" key="min_tx"
+                type='{"type": "integer", "minInteger": 1}'>
           The shortest interval, in milliseconds, at which this BFD session is
           willing to transmit BFD control messages.  Messages will actually be
           transmitted at a slower rate if the remote endpoint is not willing to
           receive as quickly as specified.  Defaults to <code>100</code>.
-	</column>
+        </column>
 
-	<column name="bfd" key="decay_min_rx" type='{"type": "integer"}'>
-	  An alternate receive interval, in milliseconds, that must be greater
-	  than or equal to <ref column="bfd" key="min_rx"/>.  The
-	  implementation switches from <ref column="bfd" key="min_rx"/> to <ref
-	  column="bfd" key="decay_min_rx"/> when there is no obvious incoming
-	  data traffic at the interface, to reduce the CPU and bandwidth cost
-	  of monitoring an idle interface.  This feature may be disabled by
-	  setting a value of 0.  This feature is reset whenever <ref
-	  column="bfd" key="decay_min_rx"/> or <ref column="bfd" key="min_rx"/>
-	  changes.
-	</column>
+        <column name="bfd" key="decay_min_rx" type='{"type": "integer"}'>
+          An alternate receive interval, in milliseconds, that must be greater
+          than or equal to <ref column="bfd" key="min_rx"/>.  The
+          implementation switches from <ref column="bfd" key="min_rx"/> to <ref
+          column="bfd" key="decay_min_rx"/> when there is no obvious incoming
+          data traffic at the interface, to reduce the CPU and bandwidth cost
+          of monitoring an idle interface.  This feature may be disabled by
+          setting a value of 0.  This feature is reset whenever <ref
+          column="bfd" key="decay_min_rx"/> or <ref column="bfd" key="min_rx"/>
+          changes.
+        </column>
 
-	<column name="bfd" key="forwarding_if_rx" type='{"type": "boolean"}'>
+        <column name="bfd" key="forwarding_if_rx" type='{"type": "boolean"}'>
           When <code>true</code>, traffic received on the
           <ref table="Interface"/> is used to indicate the capability of packet
           I/O.  BFD control packets are still transmitted and received.  At
@@ -1997,96 +2505,98 @@
           column="bfd" key="min_rx"/> amount of time.  Otherwise, even if
           traffic are received, the <ref column="bfd" key="forwarding"/>
           will be <code>false</code>.
-	</column>
+        </column>
 
-	<column name="bfd" key="cpath_down" type='{"type": "boolean"}'>
-	  Set to true to notify the remote endpoint that traffic should not be
-	  forwarded to this system for some reason other than a connectivty
-	  failure on the interface being monitored.  The typical underlying
-	  reason is ``concatenated path down,'' that is, that connectivity
-	  beyond the local system is down.  Defaults to false.
-	</column>
+        <column name="bfd" key="cpath_down" type='{"type": "boolean"}'>
+          Set to true to notify the remote endpoint that traffic should not be
+          forwarded to this system for some reason other than a connectivty
+          failure on the interface being monitored.  The typical underlying
+          reason is ``concatenated path down,'' that is, that connectivity
+          beyond the local system is down.  Defaults to false.
+        </column>
 
-	<column name="bfd" key="check_tnl_key" type='{"type": "boolean"}'>
+        <column name="bfd" key="check_tnl_key" type='{"type": "boolean"}'>
           Set to true to make BFD accept only control messages with a tunnel
           key of zero.  By default, BFD accepts control messages with any
           tunnel key.
-	</column>
+        </column>
 
-	<column name="bfd" key="bfd_local_src_mac">
-	  Set to an Ethernet address in the form
-	  <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
-	  to set the MAC used as source for transmitted BFD packets.  The
-	  default is the mac address of the BFD enabled interface.
-	</column>
+        <column name="bfd" key="bfd_local_src_mac">
+          Set to an Ethernet address in the form
+          <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
+          to set the MAC used as source for transmitted BFD packets.  The
+          default is the mac address of the BFD enabled interface.
+        </column>
 
-	<column name="bfd" key="bfd_local_dst_mac">
-	  Set to an Ethernet address in the form
-	  <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
-	  to set the MAC used as destination for transmitted BFD packets.  The
-	  default is <code>00:23:20:00:00:01</code>.
-	</column>
+        <column name="bfd" key="bfd_local_dst_mac">
+          Set to an Ethernet address in the form
+          <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
+          to set the MAC used as destination for transmitted BFD packets.  The
+          default is <code>00:23:20:00:00:01</code>.
+        </column>
 
-	<column name="bfd" key="bfd_remoe_dst_mac">
-	  Set to an Ethernet address in the form
-	  <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
-	  to set the MAC used for checking the destination of received BFD packets.
-	  Packets with different destination MAC will not be considered as BFD packets.
-	  If not specified the destination MAC address of received BFD packets
-	  are not checked.
-	</column>
+        <column name="bfd" key="bfd_remote_dst_mac">
+          Set to an Ethernet address in the form
+          <var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>:<var>xx</var>
+          to set the MAC used for checking the destination of received BFD packets.
+          Packets with different destination MAC will not be considered as BFD packets.
+          If not specified the destination MAC address of received BFD packets
+          are not checked.
+        </column>
 
-	<column name="bfd" key="bfd_src_ip">
+        <column name="bfd" key="bfd_src_ip">
           Set to an IPv4 address to set the IP address used as source for
           transmitted BFD packets.  The default is <code>169.254.1.1</code>.
-	</column>
+        </column>
 
-	<column name="bfd" key="bfd_dst_ip">
+        <column name="bfd" key="bfd_dst_ip">
           Set to an IPv4 address to set the IP address used as destination
           for transmitted BFD packets.  The default is <code>169.254.1.0</code>.
-	</column>
+        </column>
       </group>
 
       <group title="BFD Status">
-	<p>
-	  The switch sets key-value pairs in the <ref column="bfd_status"/>
-	  column to report the status of BFD on this interface.  When BFD is
-	  not enabled, with <ref column="bfd" key="enable"/>, the switch clears
-	  all key-value pairs from <ref column="bfd_status"/>.
-	</p>
+        <p>
+          The switch sets key-value pairs in the <ref column="bfd_status"/>
+          column to report the status of BFD on this interface.  When BFD is
+          not enabled, with <ref column="bfd" key="enable"/>, the switch clears
+          all key-value pairs from <ref column="bfd_status"/>.
+        </p>
 
-	<column name="bfd_status" key="state"
-		type='{"type": "string",
-		      "enum": ["set", ["admin_down", "down", "init", "up"]]}'>
-	  Reports the state of the BFD session.  The BFD session is fully
-	  healthy and negotiated if <code>UP</code>.
-	</column>
+        <column name="bfd_status" key="state"
+                type='{"type": "string",
+                      "enum": ["set", ["admin_down", "down", "init", "up"]]}'>
+          Reports the state of the BFD session.  The BFD session is fully
+          healthy and negotiated if <code>UP</code>.
+        </column>
 
-	<column name="bfd_status" key="forwarding" type='{"type": "boolean"}'>
-	  Reports whether the BFD session believes this <ref
-	  table="Interface"/> may be used to forward traffic.  Typically this
-	  means the local session is signaling <code>UP</code>, and the remote
-	  system isn't signaling a problem such as concatenated path down.
-	</column>
+        <column name="bfd_status" key="forwarding" type='{"type": "boolean"}'>
+          Reports whether the BFD session believes this <ref
+          table="Interface"/> may be used to forward traffic.  Typically this
+          means the local session is signaling <code>UP</code>, and the remote
+          system isn't signaling a problem such as concatenated path down.
+        </column>
 
-	<column name="bfd_status" key="diagnostic">
-	  In case of a problem, set to a short message that reports what the
-	  local BFD session thinks is wrong.
-	</column>
+        <column name="bfd_status" key="diagnostic">
+          A diagnostic code specifying the local system's reason for the
+          last change in session state. The error messages are defined in
+          section 4.1 of [RFC 5880].
+        </column>
 
-	<column name="bfd_status" key="remote_state"
-		type='{"type": "string",
-		      "enum": ["set", ["admin_down", "down", "init", "up"]]}'>
-	  Reports the state of the remote endpoint's BFD session.
-	</column>
+        <column name="bfd_status" key="remote_state"
+                type='{"type": "string",
+                      "enum": ["set", ["admin_down", "down", "init", "up"]]}'>
+          Reports the state of the remote endpoint's BFD session.
+        </column>
 
-	<column name="bfd_status" key="remote_diagnostic">
-	  In case of a problem, set to a short message that reports what the
-	  remote endpoint's BFD session thinks is wrong.
-	</column>
+        <column name="bfd_status" key="remote_diagnostic">
+          A diagnostic code specifying the remote system's reason for the
+          last change in session state. The error messages are defined in
+          section 4.1 of [RFC 5880].
+        </column>
 
         <column name="bfd_status" key="flap_count"
-          type='{"type": "integer", "minInteger": 0}'>
+                type='{"type": "integer", "minInteger": 0}'>
           Counts the number of <ref column="bfd_status" key="forwarding" />
           flaps since start.  A flap is considered as a change of the
           <ref column="bfd_status" key="forwarding" /> value.
@@ -2114,9 +2624,9 @@
       </p>
 
       <p>
-          When operating over tunnels which have no <code>in_key</code>, or an
-          <code>in_key</code> of <code>flow</code>.  CFM will only accept CCMs
-          with a tunnel key of zero.
+        When operating over tunnels which have no <code>in_key</code>, or an
+        <code>in_key</code> of <code>flow</code>.  CFM will only accept CCMs
+        with a tunnel key of zero.
       </p>
 
       <column name="cfm_mpid">
@@ -2201,8 +2711,8 @@
 
       <column name="cfm_remote_opstate">
         <p>When in extended mode, indicates the operational state of the
-          remote endpoint as either <code>up</code> or <code>down</code>.  See
-          <ref column="other_config" key="cfm_opstate"/>.
+        remote endpoint as either <code>up</code> or <code>down</code>.  See
+        <ref column="other_config" key="cfm_opstate"/>.
         </p>
       </column>
 
@@ -2278,7 +2788,7 @@
         </p>
 
         <p>
-            Demand mode has a couple of caveats:
+          Demand mode has a couple of caveats:
           <ul>
             <li>
               To ensure that ovs-vswitchd has enough time to pull statistics
@@ -2316,14 +2826,14 @@
       </column>
 
       <column name="other_config" key="cfm_ccm_vlan"
-        type='{"type": "integer", "minInteger": 1, "maxInteger": 4095}'>
+              type='{"type": "integer", "minInteger": 1, "maxInteger": 4095}'>
         When set, the CFM module will apply a VLAN tag to all CCMs it generates
         with the given value.  May be the string <code>random</code> in which
         case each CCM will be tagged with a different randomly generated VLAN.
       </column>
 
       <column name="other_config" key="cfm_ccm_pcp"
-        type='{"type": "integer", "minInteger": 1, "maxInteger": 7}'>
+              type='{"type": "integer", "minInteger": 1, "maxInteger": 7}'>
         When set, the CFM module will apply a VLAN tag to all CCMs it generates
         with the given PCP value, the VLAN ID of the tag is governed by the
         value of <ref column="other_config" key="cfm_ccm_vlan"/>. If
@@ -2431,17 +2941,17 @@
 
     <group title="VLAN Splinters">
       <p>
-	The ``VLAN splinters'' feature increases Open vSwitch compatibility
-	with buggy network drivers in old versions of Linux that do not
-	properly support VLANs when VLAN devices are not used, at some cost
-	in memory and performance.
+        The ``VLAN splinters'' feature increases Open vSwitch compatibility
+        with buggy network drivers in old versions of Linux that do not
+        properly support VLANs when VLAN devices are not used, at some cost
+        in memory and performance.
       </p>
 
       <p>
-	When VLAN splinters are enabled on a particular interface, Open vSwitch
-	creates a VLAN device for each in-use VLAN.  For sending traffic tagged
-	with a VLAN on the interface, it substitutes the VLAN device.  Traffic
-	received on the VLAN device is treated as if it had been received on
+        When VLAN splinters are enabled on a particular interface, Open vSwitch
+        creates a VLAN device for each in-use VLAN.  For sending traffic tagged
+        with a VLAN on the interface, it substitutes the VLAN device.  Traffic
+        received on the VLAN device is treated as if it had been received on
         the interface on the particular VLAN.
       </p>
 
@@ -2483,8 +2993,8 @@
       </p>
 
       <p>
-	VLAN splinters are deprecated.  When broken device drivers are no
-	longer in widespread use, we will delete this feature.
+        VLAN splinters are deprecated.  When broken device drivers are no
+        longer in widespread use, we will delete this feature.
       </p>
 
       <column name="other_config" key="enable-vlan-splinters"
@@ -2507,6 +3017,17 @@
       </column>
     </group>
 
+    <group title="Auto Attach Configuration">
+      <p>
+        Auto Attach configuration for a particular interface.
+      </p>
+
+      <column name="lldp" key="enable" type='{"type": "boolean"}'>
+        True to enable LLDP on this <ref table="Interface"/>.  If not
+        specified, LLDP will be disabled by default.
+      </column>
+    </group>
+
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
       Columns</code> at the beginning of this document.
@@ -2525,58 +3046,42 @@
       dump-tables</code>.  The name does not affect switch behavior.
     </column>
 
-    <column name="flow_limit">
-      If set, limits the number of flows that may be added to the table.  Open
-      vSwitch may limit the number of flows in a table for other reasons,
-      e.g. due to hardware limitations or for resource availability or
-      performance reasons.
-    </column>
-
-    <column name="overflow_policy">
+    <group title="Eviction Policy">
       <p>
-        Controls the switch's behavior when an OpenFlow flow table modification
-        request would add flows in excess of <ref column="flow_limit"/>.  The
-        supported values are:
+        Open vSwitch supports limiting the number of flows that may be
+        installed in a flow table, via the <ref column="flow_limit"/> column.
+        When adding a flow would exceed this limit, by default Open vSwitch
+        reports an error, but there are two ways to configure Open vSwitch to
+        instead delete (``evict'') a flow to make room for the new one:
       </p>
 
-      <dl>
-        <dt><code>refuse</code></dt>
-        <dd>
-          Refuse to add the flow or flows.  This is also the default policy
-          when <ref column="overflow_policy"/> is unset.
-        </dd>
+      <ul>
+        <li>
+          Set the <ref column="overflow_policy"/> column to <code>evict</code>.
+        </li>
 
-        <dt><code>evict</code></dt>
-        <dd>
-          Delete the flow that will expire soonest.  See <ref column="groups"/>
-          for details.
-        </dd>
-      </dl>
-    </column>
-
-    <column name="groups">
-      <p>
-        When <ref column="overflow_policy"/> is <code>evict</code>, this
-        controls how flows are chosen for eviction when the flow table would
-        otherwise exceed <ref column="flow_limit"/> flows.  Its value is a set
-        of NXM fields or sub-fields, each of which takes one of the forms
-        <code><var>field</var>[]</code> or
-        <code><var>field</var>[<var>start</var>..<var>end</var>]</code>,
-        e.g. <code>NXM_OF_IN_PORT[]</code>.  Please see
-        <code>nicira-ext.h</code> for a complete list of NXM field names.
-      </p>
+        <li>
+          Send an OpenFlow 1.4+ ``table mod request'' to enable eviction for
+          the flow table (e.g. <code>ovs-ofctl -O OpenFlow14 mod-table br0 0
+          evict</code> to enable eviction on flow table 0 of bridge
+          <code>br0</code>).
+        </li>
+      </ul>
 
       <p>
         When a flow must be evicted due to overflow, the flow to evict is
-        chosen through an approximation of the following algorithm:
+        chosen through an approximation of the following algorithm.  This
+        algorithm is used regardless of how eviction was enabled:
       </p>
 
       <ol>
         <li>
           Divide the flows in the table into groups based on the values of the
-          specified fields or subfields, so that all of the flows in a given
-          group have the same values for those fields.  If a flow does not
-          specify a given field, that field's value is treated as 0.
+          fields or subfields specified in the <ref column="groups"/> column,
+          so that all of the flows in a given group have the same values for
+          those fields.  If a flow does not specify a given field, that field's
+          value is treated as 0.  If <ref column="groups"/> is empty, then all
+          of the flows in the flow table are treated as a single group.
         </li>
 
         <li>
@@ -2587,88 +3092,152 @@
         </li>
 
         <li>
+          If the flows under consideration have different importance values,
+          eliminate from consideration any flows except those with the lowest
+          importance.  (``Importance,'' a 16-bit integer value attached to each
+          flow, was introduced in OpenFlow 1.4.  Flows inserted with older
+          versions of OpenFlow always have an importance of 0.)
+        </li>
+
+        <li>
           Among the flows under consideration, choose the flow that expires
           soonest for eviction.
         </li>
       </ol>
 
       <p>
-        The eviction process only considers flows that have an idle timeout or
-        a hard timeout.  That is, eviction never deletes permanent flows.
+        The eviction process only considers flows that have an idle timeout
+        or a hard timeout.  That is, eviction never deletes permanent flows.
         (Permanent flows do count against <ref column="flow_limit"/>.)
       </p>
 
-      <p>
-        Open vSwitch ignores any invalid or unknown field specifications.
-      </p>
+      <column name="flow_limit">
+        If set, limits the number of flows that may be added to the table.
+        Open vSwitch may limit the number of flows in a table for other
+        reasons, e.g. due to hardware limitations or for resource availability
+        or performance reasons.
+      </column>
 
-      <p>
-        When <ref column="overflow_policy"/> is not <code>evict</code>, this
-        column has no effect.
-      </p>
-    </column>
+      <column name="overflow_policy">
+        <p>
+          Controls the switch's behavior when an OpenFlow flow table
+          modification request would add flows in excess of <ref
+          column="flow_limit"/>.  The supported values are:
+        </p>
 
-    <column name="prefixes">
-      <p>
-        This string set specifies which fields should be used for
-        address prefix tracking.  Prefix tracking allows the
-        classifier to skip rules with longer than necessary prefixes,
-        resulting in better wildcarding for datapath flows.
-      </p>
-      <p>
-        Prefix tracking may be beneficial when a flow table contains
-        matches on IP address fields with different prefix lengths.
-        For example, when a flow table contains IP address matches on
-        both full addresses and proper prefixes, the full address
-        matches will typically cause the datapath flow to un-wildcard
-        the whole address field (depending on flow entry priorities).
-        In this case each packet with a different address gets handed
-        to the userspace for flow processing and generates its own
-        datapath flow.  With prefix tracking enabled for the address
-        field in question packets with addresses matching shorter
-        prefixes would generate datapath flows where the irrelevant
-        address bits are wildcarded, allowing the same datapath flow
-        to handle all the packets within the prefix in question.  In
-        this case many userspace upcalls can be avoided and the
-        overall performance can be better.
-      </p>
-      <p>
-        This is a performance optimization only, so packets will
-        receive the same treatment with or without prefix tracking.
-      </p>
-      <p>
-        The supported fields are: <code>tun_id</code>,
-        <code>tun_src</code>, <code>tun_dst</code>,
-        <code>nw_src</code>, <code>nw_dst</code> (or aliases
-        <code>ip_src</code> and <code>ip_dst</code>),
-        <code>ipv6_src</code>, and <code>ipv6_dst</code>.  (Using this
-        feature for <code>tun_id</code> would only make sense if the
-        tunnel IDs have prefix structure similar to IP addresses.)
-      </p>
-      <p>
-        For example, <code>prefixes=ip_dst,ip_src</code> instructs the
-        flow classifier to track the IP destination and source
-        addresses used by the rules in this specific flow table.  To
-        set the prefix fields, the flow table record needs to exist:
-      </p>
-      <dl>
-        <dt><code>ovs-vsctl set Bridge br0 flow_tables:0=@N1 -- --id=@N1 create Flow_Table name=table0</code></dt>
-        <dd>
-          Creates a flow table record for the OpenFlow table number 0.
-        </dd>
+        <dl>
+          <dt><code>refuse</code></dt>
+          <dd>
+            Refuse to add the flow or flows.  This is also the default policy
+            when <ref column="overflow_policy"/> is unset.
+          </dd>
 
-        <dt><code>ovs-vsctl set Flow_Table table0 prefixes=ip_dst,ip_src</code></dt>
-        <dd>
-          Enables prefix tracking for IP source and destination
-          address fields.
-        </dd>
-      </dl>
+          <dt><code>evict</code></dt>
+          <dd>
+            Delete a flow chosen according to the algorithm described above.
+          </dd>
+        </dl>
+      </column>
 
-      <p>
-        There is a maximum number of fields that can be enabled for any
-        one flow table.  Currently this limit is 3.
-      </p>
-    </column>
+      <column name="groups">
+        <p>
+          When <ref column="overflow_policy"/> is <code>evict</code>, this
+          controls how flows are chosen for eviction when the flow table would
+          otherwise exceed <ref column="flow_limit"/> flows.  Its value is a
+          set of NXM fields or sub-fields, each of which takes one of the forms
+          <code><var>field</var>[]</code> or
+          <code><var>field</var>[<var>start</var>..<var>end</var>]</code>,
+          e.g. <code>NXM_OF_IN_PORT[]</code>.  Please see
+          <code>nicira-ext.h</code> for a complete list of NXM field names.
+        </p>
+
+        <p>
+          Open vSwitch ignores any invalid or unknown field specifications.
+        </p>
+
+        <p>
+          When eviction is not enabled, via <ref column="overflow_policy"/> or
+          an OpenFlow 1.4+ ``table mod,'' this column has no effect.
+        </p>
+      </column>
+    </group>
+
+    <group title="Classifier Optimization">
+      <column name="prefixes">
+        <p>
+          This string set specifies which fields should be used for
+          address prefix tracking.  Prefix tracking allows the
+          classifier to skip rules with longer than necessary prefixes,
+          resulting in better wildcarding for datapath flows.
+        </p>
+        <p>
+          Prefix tracking may be beneficial when a flow table contains
+          matches on IP address fields with different prefix lengths.
+          For example, when a flow table contains IP address matches on
+          both full addresses and proper prefixes, the full address
+          matches will typically cause the datapath flow to un-wildcard
+          the whole address field (depending on flow entry priorities).
+          In this case each packet with a different address gets handed
+          to the userspace for flow processing and generates its own
+          datapath flow.  With prefix tracking enabled for the address
+          field in question packets with addresses matching shorter
+          prefixes would generate datapath flows where the irrelevant
+          address bits are wildcarded, allowing the same datapath flow
+          to handle all the packets within the prefix in question.  In
+          this case many userspace upcalls can be avoided and the
+          overall performance can be better.
+        </p>
+        <p>
+          This is a performance optimization only, so packets will
+          receive the same treatment with or without prefix tracking.
+        </p>
+        <p>
+          The supported fields are: <code>tun_id</code>,
+          <code>tun_src</code>, <code>tun_dst</code>,
+          <code>nw_src</code>, <code>nw_dst</code> (or aliases
+          <code>ip_src</code> and <code>ip_dst</code>),
+          <code>ipv6_src</code>, and <code>ipv6_dst</code>.  (Using this
+          feature for <code>tun_id</code> would only make sense if the
+          tunnel IDs have prefix structure similar to IP addresses.)
+        </p>
+
+        <p>
+          By default, the <code>prefixes=ip_dst,ip_src</code> are used
+          on each flow table.  This instructs the flow classifier to
+          track the IP destination and source addresses used by the
+          rules in this specific flow table.
+        </p>
+
+        <p>
+          The keyword <code>none</code> is recognized as an explicit
+          override of the default values, causing no prefix fields to be
+          tracked.
+        </p>
+
+        <p>
+          To set the prefix fields, the flow table record needs to
+          exist:
+        </p>
+
+        <dl>
+          <dt><code>ovs-vsctl set Bridge br0 flow_tables:0=@N1 -- --id=@N1 create Flow_Table name=table0</code></dt>
+          <dd>
+            Creates a flow table record for the OpenFlow table number 0.
+          </dd>
+
+          <dt><code>ovs-vsctl set Flow_Table table0 prefixes=ip_dst,ip_src</code></dt>
+          <dd>
+            Enables prefix tracking for IP source and destination
+            address fields.
+          </dd>
+        </dl>
+
+        <p>
+          There is a maximum number of fields that can be enabled for any
+          one flow table.  Currently this limit is 3.
+        </p>
+      </column>
+    </group>
 
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
@@ -2700,6 +3269,33 @@
           Linux "Hierarchical Fair Service Curve" classifier.
           See <code>http://linux-ip.net/articles/hfsc.en/</code> for
           information on how this classifier works.
+        </dd>
+      </dl>
+      <dl>
+        <dt><code>linux-sfq</code></dt>
+        <dd>
+          Linux ``Stochastic Fairness Queueing'' classifier. See
+          <code>tc-sfq</code>(8) (also at
+          <code>http://linux.die.net/man/8/tc-sfq</code>) for information on
+          how this classifier works.
+        </dd>
+      </dl>
+      <dl>
+        <dt><code>linux-codel</code></dt>
+        <dd>
+          Linux ``Controlled Delay'' classifier. See <code>tc-codel</code>(8)
+          (also at
+          <code>http://man7.org/linux/man-pages/man8/tc-codel.8.html</code>)
+          for information on how this classifier works.
+        </dd>
+      </dl>
+      <dl>
+        <dt><code>linux-fq_codel</code></dt>
+        <dd>
+          Linux ``Fair Queuing with Controlled Delay'' classifier. See
+          <code>tc-fq_codel</code>(8) (also at
+          <code>http://man7.org/linux/man-pages/man8/tc-fq_codel.8.html</code>)
+          for information on how this classifier works.
         </dd>
       </dl>
     </column>
@@ -2834,6 +3430,32 @@
     ``mirrored'' ports, in addition to their normal destinations.  Mirroring
     traffic may also be referred to as SPAN or RSPAN, depending on how
     the mirrored traffic is sent.</p>
+
+    <p>
+      When a packet enters an Open vSwitch bridge, it becomes eligible for
+      mirroring based on its ingress port and VLAN.  As the packet travels
+      through the flow tables, each time it is output to a port, it becomes
+      eligible for mirroring based on the egress port and VLAN.  In Open
+      vSwitch 2.5 and later, mirroring occurs just after a packet first becomes
+      eligible, using the packet as it exists at that point; in Open vSwitch
+      2.4 and earlier, mirroring occurs only after a packet has traversed all
+      the flow tables, using the original packet as it entered the bridge.
+      This makes a difference only when the flow table modifies the packet: in
+      Open vSwitch 2.4, the modifications are never visible to mirrors, whereas
+      in Open vSwitch 2.5 and later modifications made before the first output
+      that makes it eligible for mirroring to a particular destination are
+      visible.
+    </p>
+
+    <p>
+      A packet that enters an Open vSwitch bridge is mirrored to a particular
+      destination only once, even if it is eligible for multiple reasons.  For
+      example, a packet would be mirrored to a particular <ref
+      column="output_port"/> only once, even if it is selected for mirroring to
+      that port by <ref column="select_dst_port"/> and <ref
+      column="select_src_port"/> in the same or different <ref table="Mirror"/>
+      records.
+    </p>
 
     <column name="name">
       Arbitrary identifier for the <ref table="Mirror"/>.
@@ -3033,9 +3655,7 @@
             column="ssl"/> column in the <ref table="Open_vSwitch"/>
             table must point to a valid SSL configuration when this form
             is used.</p>
-            <p>If <var>port</var> is not specified, it currently
-            defaults to 6633.  In the future, the default will change to
-            6653, which is the IANA-defined value.</p>
+            <p>If <var>port</var> is not specified, it defaults to 6653.</p>
             <p>SSL support is an optional feature that is not always built as
             part of Open vSwitch.</p>
           </dd>
@@ -3046,12 +3666,10 @@
               <var>ip</var>, which must be expressed as an IP address (not a
               DNS name), where <var>ip</var> can be IPv4 or IPv6 address.  If
               <var>ip</var> is an IPv6 address, wrap it in square brackets,
-              e.g. <code>tcp:[::1]:6632</code>.
+              e.g. <code>tcp:[::1]:6653</code>.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults to
-              6633.  In the future, the default will change to 6653, which is
-              the IANA-defined value.
+              If <var>port</var> is not specified, it defaults to 6653.
             </p>
           </dd>
         </dl>
@@ -3068,20 +3686,18 @@
               DNS name), is specified, then connections are restricted to the
               specified local IP address (either IPv4 or IPv6).  If
               <var>ip</var> is an IPv6 address, wrap it in square brackets,
-              e.g. <code>pssl:6632:[::1]</code>.
+              e.g. <code>pssl:6653:[::1]</code>.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults to
-              6633.  If <var>ip</var> is not specified then it listens only on
+              If <var>port</var> is not specified, it defaults to
+              6653.  If <var>ip</var> is not specified then it listens only on
               IPv4 (but not IPv6) addresses.  The
               <ref table="Open_vSwitch" column="ssl"/>
               column in the <ref table="Open_vSwitch"/> table must point to a
               valid SSL configuration when this form is used.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults to
-              6633.  In the future, the default will change to 6653, which is
-              the IANA-defined value.
+              If <var>port</var> is not specified, it currently to 6653.
             </p>
             <p>
               SSL support is an optional feature that is not always built as
@@ -3096,13 +3712,11 @@
               DNS name), is specified, then connections are restricted to the
               specified local IP address (either IPv4 or IPv6).  If
               <var>ip</var> is an IPv6 address, wrap it in square brackets,
-              e.g. <code>ptcp:6632:[::1]</code>. If <var>ip</var> is not
+              e.g. <code>ptcp:6653:[::1]</code>. If <var>ip</var> is not
               specified then it listens only on IPv4 addresses.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults to
-              6633.  In the future, the default will change to 6653, which is
-              the IANA-defined value.
+              If <var>port</var> is not specified, it defaults to 6653.
             </p>
           </dd>
         </dl>
@@ -3157,7 +3771,7 @@
       </column>
     </group>
 
-    <group title="Asynchronous Message Configuration">
+    <group title="Asynchronous Messages">
       <p>
         OpenFlow switches send certain messages to controllers spontanenously,
         that is, not in response to any request from the controller.  These
@@ -3177,38 +3791,102 @@
         on any messages that it does want to receive, if any.
       </column>
 
-      <column name="controller_rate_limit">
+      <group title="Controller Rate Limiting">
         <p>
-          The maximum rate at which the switch will forward packets to the
-          OpenFlow controller, in packets per second.  This feature prevents a
-          single bridge from overwhelming the controller.  If not specified,
-          the default is implementation-specific.
+          A switch can forward packets to a controller over the OpenFlow
+          protocol.  Forwarding packets this way at too high a rate can
+          overwhelm a controller, frustrate use of the OpenFlow connection for
+          other purposes, increase the latency of flow setup, and use an
+          unreasonable amount of bandwidth.  Therefore, Open vSwitch supports
+          limiting the rate of packet forwarding to a controller.
         </p>
 
         <p>
-          In addition, when a high rate triggers rate-limiting, Open vSwitch
-          queues controller packets for each port and transmits them to the
-          controller at the configured rate.  The <ref
-          column="controller_burst_limit"/> value limits the number of queued
-          packets.  Ports on a bridge share the packet queue fairly.
+          There are two main reasons in OpenFlow for a packet to be sent to a
+          controller: either the packet ``misses'' in the flow table, that is,
+          there is no matching flow, or a flow table action says to send the
+          packet to the controller.  Open vSwitch limits the rate of each kind
+          of packet separately at the configured rate.  Therefore, the actual
+          rate that packets are sent to the controller can be up to twice the
+          configured rate, when packets are sent for both reasons.
         </p>
 
         <p>
-          Open vSwitch maintains two such packet rate-limiters per bridge: one
-          for packets sent up to the controller because they do not correspond
-          to any flow, and the other for packets sent up to the controller by
-          request through flow actions. When both rate-limiters are filled with
-          packets, the actual rate that packets are sent to the controller is
-          up to twice the specified rate.
+          This feature is specific to forwarding packets over an OpenFlow
+          connection.  It is not general-purpose QoS.  See the <ref
+          table="QoS"/> table for quality of service configuration, and <ref
+          column="ingress_policing_rate" table="Interface"/> in the <ref
+          table="Interface"/> table for ingress policing configuration.
         </p>
-      </column>
 
-      <column name="controller_burst_limit">
-        In conjunction with <ref column="controller_rate_limit"/>,
-        the maximum number of unused packet credits that the bridge will
-        allow to accumulate, in packets.  If not specified, the default
-        is implementation-specific.
-      </column>
+        <column name="controller_rate_limit">
+          <p>
+            The maximum rate at which the switch will forward packets to the
+            OpenFlow controller, in packets per second.  If no value is
+            specified, rate limiting is disabled.
+          </p>
+        </column>
+
+        <column name="controller_burst_limit">
+          <p>
+            When a high rate triggers rate-limiting, Open vSwitch queues
+            packets to the controller for each port and transmits them to the
+            controller at the configured rate.  This value limits the number of
+            queued packets.  Ports on a bridge share the packet queue fairly.
+          </p>
+
+          <p>
+            This value has no effect unless <ref
+            column="controller_rate_limit"/> is configured.  The current
+            default when this value is not specified is one-quarter of <ref
+            column="controller_rate_limit"/>, meaning that queuing can delay
+            forwarding a packet to the controller by up to 250 ms.
+          </p>
+        </column>
+
+        <group title="Controller Rate Limiting Statistics">
+          <p>
+            These values report the effects of rate limiting.  Their values are
+            relative to establishment of the most recent OpenFlow connection,
+            or since rate limiting was enabled, whichever happened more
+            recently.  Each consists of two values, one with <code>TYPE</code>
+            replaced by <code>miss</code> for rate limiting flow table misses,
+            and the other with <code>TYPE</code> replaced by
+            <code>action</code> for rate limiting packets sent by OpenFlow
+            actions.
+          </p>
+
+          <p>
+            These statistics are reported only when controller rate limiting is
+            enabled.
+          </p>
+
+          <column name="status" key="packet-in-TYPE-bypassed"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets sent directly to the controller, without queuing,
+            because the rate did not exceed the configured maximum.
+          </column>
+
+          <column name="status" key="packet-in-TYPE-queued"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets added to the queue to send later.
+          </column>
+
+          <column name="status" key="packet-in-TYPE-dropped"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets added to the queue that were later dropped due to
+            overflow.  This value is less than or equal to <ref column="status"
+            key="packet-in-TYPE-queued"/>.
+          </column>
+
+          <column name="status" key="packet-in-TYPE-backlog"
+                  type='{"type": "integer", "minInteger": 0}'>
+            Number of packets currently queued.  The other statistics increase
+            monotonically, but this one fluctuates between 0 and the <ref
+            column="controller_burst_limit"/> as conditions change.
+          </column>
+        </group>
+      </group>
     </group>
 
     <group title="Additional In-Band Configuration">
@@ -3258,7 +3936,7 @@
           <dd>Equivalent to <code>other</code>, except that there may be at
           most one master controller at a time.  When a controller configures
           itself as <code>master</code>, any existing master is demoted to
-          the <code>slave</code>role.</dd>
+          the <code>slave</code> role.</dd>
           <dt><code>slave</code></dt>
           <dd>Allows the controller read-only access to OpenFlow features.
           Attempts to modify the flow table will be rejected with an
@@ -3323,7 +4001,7 @@
       </p>
 
       <column name="other_config" key="dscp"
-                type='{"type": "integer"}'>
+              type='{"type": "integer"}'>
         The Differentiated Service Code Point (DSCP) is specified using 6 bits
         in the Type of Service (TOS) field in the IP header. DSCP provides a
         mechanism to classify the network traffic and provide Quality of
@@ -3383,9 +4061,7 @@
               form is used.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults
-              to 6632.  In the future, the default will change to 6640,
-              which is the IANA-defined value.
+              If <var>port</var> is not specified, it defaults to 6640.
             </p>
             <p>
               SSL support is an optional feature that is not always
@@ -3400,12 +4076,10 @@
               <var>ip</var>, which must be expressed as an IP address (not a
               DNS name), where <var>ip</var> can be IPv4 or IPv6 address.  If
               <var>ip</var> is an IPv6 address, wrap it in square brackets,
-              e.g. <code>tcp:[::1]:6632</code>.
+              e.g. <code>tcp:[::1]:6640</code>.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults
-              to 6632.  In the future, the default will change to 6640,
-              which is the IANA-defined value.
+              If <var>port</var> is not specified, it defaults to 6640.
             </p>
           </dd>
           <dt><code>pssl:</code>[<var>port</var>][<code>:<var>ip</var></code>]</dt>
@@ -3418,16 +4092,14 @@
               connections are restricted to the specified local IP address
               (either IPv4 or IPv6 address).  If <var>ip</var> is an IPv6
               address, wrap in square brackets,
-              e.g. <code>pssl:6632:[::1]</code>.  If <var>ip</var> is not
+              e.g. <code>pssl:6640:[::1]</code>.  If <var>ip</var> is not
               specified then it listens only on IPv4 (but not IPv6) addresses.
               The <ref table="Open_vSwitch" column="ssl"/> column in the <ref
               table="Open_vSwitch"/> table must point to a valid SSL
               configuration when this form is used.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults
-              to 6632.  In the future, the default will change to 6640,
-              which is the IANA-defined value.
+              If <var>port</var> is not specified, it defaults to 6640.
             </p>
             <p>
               SSL support is an optional feature that is not always built as
@@ -3444,13 +4116,11 @@
               connections are restricted to the specified local IP address
               (either IPv4 or IPv6 address).  If <var>ip</var> is an IPv6
               address, wrap it in square brackets,
-              e.g. <code>ptcp:6632:[::1]</code>.  If <var>ip</var> is not
+              e.g. <code>ptcp:6640:[::1]</code>.  If <var>ip</var> is not
               specified then it listens only on IPv4 addresses.
             </p>
             <p>
-              If <var>port</var> is not specified, it currently defaults
-              to 6632.  In the future, the default will change to 6640,
-              which is the IANA-defined value.
+              If <var>port</var> is not specified, it defaults to 6640.
             </p>
           </dd>
         </dl>
@@ -3597,11 +4267,11 @@
       </column>
 
       <column name="status" key="bound_port" type='{"type": "integer"}'>
-          When <ref column="target"/> is <code>ptcp:</code> or
-          <code>pssl:</code>, this is the TCP port on which the OVSDB server is
-          listening.  (This is is particularly useful when <ref
-          column="target"/> specifies a port of 0, allowing the kernel to
-          choose any available port.)
+        When <ref column="target"/> is <code>ptcp:</code> or
+        <code>pssl:</code>, this is the TCP port on which the OVSDB server is
+        listening.  (This is is particularly useful when <ref
+        column="target"/> specifies a port of 0, allowing the kernel to
+        choose any available port.)
       </column>
     </group>
 
@@ -3612,7 +4282,7 @@
       </p>
 
       <column name="other_config" key="dscp"
-                type='{"type": "integer"}'>
+              type='{"type": "integer"}'>
         The Differentiated Service Code Point (DSCP) is specified using 6 bits
         in the Type of Service (TOS) field in the IP header. DSCP provides a
         mechanism to classify the network traffic and provide Quality of
@@ -3656,10 +4326,20 @@
     </column>
 
     <column name="active_timeout">
-      The interval at which NetFlow records are sent for flows that are
-      still active, in seconds.  A value of <code>0</code> requests the
-      default timeout (currently 600 seconds); a value of <code>-1</code>
-      disables active timeouts.
+      <p>
+        The interval at which NetFlow records are sent for flows that
+        are still active, in seconds.  A value of <code>0</code>
+        requests the default timeout (currently 600 seconds); a value
+        of <code>-1</code> disables active timeouts.
+      </p>
+
+      <p>
+        The NetFlow passive timeout, for flows that become inactive,
+        is not configurable.  It will vary depending on the Open
+        vSwitch version, the forms and contents of the OpenFlow flow
+        tables, CPU and memory usage, and network activity.  A typical
+        passive timeout is about a second.
+      </p>
     </column>
 
     <column name="add_id_to_interface">
@@ -3765,38 +4445,53 @@
   </table>
 
   <table name="IPFIX">
-    <p>A set of IPFIX collectors.  IPFIX is a protocol that exports a
-    number of details about flows.</p>
+    <p>Configuration for sending packets to IPFIX collectors.</p>
+
+    <p>
+      IPFIX is a protocol that exports a number of details about flows.  The
+      IPFIX implementation in Open vSwitch samples packets at a configurable
+      rate, extracts flow information from those packets, optionally caches and
+      aggregates the flow information, and sends the result to one or more
+      collectors.
+    </p>
+
+    <p>
+      IPFIX in Open vSwitch can be configured two different ways:
+    </p>
+
+    <ul>
+      <li>
+        With <em>per-bridge sampling</em>, Open vSwitch performs IPFIX sampling
+        automatically on all packets that pass through a bridge.  To configure
+        per-bridge sampling, create an <ref table="IPFIX"/> record and point a
+        <ref table="Bridge"/> table's <ref table="Bridge" column="ipfix"/>
+        column to it.  The <ref table="Flow_Sample_Collector_Set"/> table is
+        not used for per-bridge sampling.
+      </li>
+
+      <li>
+        <p>
+          With <em>flow-based sampling</em>, <code>sample</code> actions in the
+          OpenFlow flow table drive IPFIX sampling.  See
+          <code>ovs-ofctl</code>(8) for a description of the
+          <code>sample</code> action.
+        </p>
+
+        <p>
+          Flow-based sampling also requires database configuration: create a
+          <ref table="IPFIX"/> record that describes the IPFIX configuration
+          and a <ref table="Flow_Sample_Collector_Set"/> record that points to
+          the <ref table="Bridge"/> whose flow table holds the
+          <code>sample</code> actions and to <ref table="IPFIX"/> record.  The
+          <ref table="Bridge" column="ipfix"/> in the <ref table="Bridge"/>
+          table is not used for flow-based sampling.
+        </p>
+      </li>
+    </ul>
 
     <column name="targets">
       IPFIX target collectors in the form
       <code><var>ip</var>:<var>port</var></code>.
-    </column>
-
-    <column name="sampling">
-      For per-bridge packet sampling, i.e. when this row is referenced
-      from a <ref table="Bridge"/>, the rate at which packets should
-      be sampled and sent to each target collector.  If not specified,
-      defaults to 400, which means one out of 400 packets, on average,
-      will be sent to each target collector.  Ignored for per-flow
-      sampling, i.e. when this row is referenced from a <ref
-      table="Flow_Sample_Collector_Set"/>.
-    </column>
-
-    <column name="obs_domain_id">
-      For per-bridge packet sampling, i.e. when this row is referenced
-      from a <ref table="Bridge"/>, the IPFIX Observation Domain ID
-      sent in each IPFIX packet.  If not specified, defaults to 0.
-      Ignored for per-flow sampling, i.e. when this row is referenced
-      from a <ref table="Flow_Sample_Collector_Set"/>.
-    </column>
-
-    <column name="obs_point_id">
-      For per-bridge packet sampling, i.e. when this row is referenced
-      from a <ref table="Bridge"/>, the IPFIX Observation Point ID
-      sent in each IPFIX flow record.  If not specified, defaults to
-      0.  Ignored for per-flow sampling, i.e. when this row is
-      referenced from a <ref table="Flow_Sample_Collector_Set"/>.
     </column>
 
     <column name="cache_active_timeout">
@@ -3811,6 +4506,124 @@
       disabled.
     </column>
 
+    <group title="Per-Bridge Sampling">
+      <p>
+        These values affect only per-bridge sampling.  See above for a
+        description of the differences between per-bridge and flow-based
+        sampling.
+      </p>
+
+      <column name="sampling">
+        The rate at which packets should be sampled and sent to each target
+        collector.  If not specified, defaults to 400, which means one out of
+        400 packets, on average, will be sent to each target collector.
+      </column>
+
+      <column name="obs_domain_id">
+        The IPFIX Observation Domain ID sent in each IPFIX packet.  If not
+        specified, defaults to 0.
+      </column>
+
+      <column name="obs_point_id">
+        The IPFIX Observation Point ID sent in each IPFIX flow record.  If not
+        specified, defaults to 0.
+      </column>
+
+      <column name="other_config" key="enable-tunnel-sampling"
+              type='{"type": "boolean"}'>
+        <p>
+          Set to <code>true</code> to enable sampling and reporting tunnel
+          header 7-tuples in IPFIX flow records.  Tunnel sampling is disabled
+          by default.
+        </p>
+
+        <p>
+          The following enterprise entities report the sampled tunnel info:
+        </p>
+
+        <dl>
+          <dt>tunnelType:</dt>
+          <dd>
+            <p>ID: 891, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 8-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: Identifier of the layer 2 network overlay network
+            encapsulation type: 0x01 VxLAN, 0x02 GRE, 0x03 LISP, 0x05 IPsec+GRE,
+            0x07 GENEVE.</p>
+          </dd>
+          <dt>tunnelKey:</dt>
+          <dd>
+            <p>ID: 892, and enterprise ID 6876 (VMware).</p>
+            <p>type: variable-length octetarray.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: Key which is used for identifying an individual
+            traffic flow within a VxLAN (24-bit VNI), GENEVE (24-bit VNI),
+            GRE (32-bit key), or LISP (24-bit instance ID) tunnel. The
+            key is encoded in this octetarray as a 3-, 4-, or 8-byte integer
+            ID in network byte order.</p>
+          </dd>
+          <dt>tunnelSourceIPv4Address:</dt>
+          <dd>
+            <p>ID: 893, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 32-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The IPv4 source address in the tunnel IP packet
+            header.</p>
+          </dd>
+          <dt>tunnelDestinationIPv4Address:</dt>
+          <dd>
+            <p>ID: 894, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 32-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The IPv4 destination address in the tunnel IP
+            packet header.</p>
+          </dd>
+          <dt>tunnelProtocolIdentifier:</dt>
+          <dd>
+            <p>ID: 895, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 8-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The value of the protocol number in the tunnel
+            IP packet header. The protocol number identifies the tunnel IP
+            packet payload type.</p>
+          </dd>
+          <dt>tunnelSourceTransportPort:</dt>
+          <dd>
+            <p>ID: 896, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 16-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The source port identifier in the tunnel transport
+            header. For the transport protocols UDP, TCP, and SCTP, this is
+            the source port number given in the respective header.</p>
+          </dd>
+          <dt>tunnelDestinationTransportPort:</dt>
+          <dd>
+            <p>ID: 897, and enterprise ID 6876 (VMware).</p>
+            <p>type: unsigned 16-bit integer.</p>
+            <p>data type semantics: identifier.</p>
+            <p>description: The destination port identifier in the tunnel
+            transport header. For the transport protocols UDP, TCP, and SCTP,
+            this is the destination port number given in the respective header.
+            </p>
+          </dd>
+        </dl>
+      </column>
+
+      <column name="other_config" key="enable-input-sampling"
+              type='{"type": "boolean"}'>
+        By default, Open vSwitch samples and reports flows at bridge port input
+        in IPFIX flow records.  Set this column to <code>false</code> to
+        disable input sampling.
+      </column>
+
+      <column name="other_config" key="enable-output-sampling"
+              type='{"type": "boolean"}'>
+        By default, Open vSwitch samples and reports flows at bridge port
+        output in IPFIX flow records.  Set this column to <code>false</code> to
+        disable output sampling.
+      </column>
+    </group>
+
     <group title="Common Columns">
       The overall purpose of these columns is described under <code>Common
       Columns</code> at the beginning of this document.
@@ -3820,8 +4633,12 @@
   </table>
 
   <table name="Flow_Sample_Collector_Set">
-    <p>A set of IPFIX collectors of packet samples generated by
-    OpenFlow <code>sample</code> actions.</p>
+    <p>
+      A set of IPFIX collectors of packet samples generated by OpenFlow
+      <code>sample</code> actions.  This table is used only for IPFIX
+      flow-based sampling, not for per-bridge sampling (see the <ref
+      table="IPFIX"/> table for a description of the two forms).
+    </p>
 
     <column name="id">
       The ID of this collector set, unique among the bridge's
@@ -3847,4 +4664,61 @@
     </group>
   </table>
 
+  <table name="AutoAttach">
+    <p>
+      Auto Attach configuration within a bridge.  The IETF Auto-Attach SPBM
+      draft standard describes a compact method of using IEEE 802.1AB Link
+      Layer Discovery Protocol (LLDP) together with a IEEE 802.1aq Shortest
+      Path Bridging (SPB) network to automatically attach network devices
+      to individual services in a SPB network.  The intent here is to allow
+      network applications and devices using OVS to be able to easily take
+      advantage of features offered by industry standard SPB networks.
+    </p>
+
+    <p>
+      Auto Attach (AA) uses LLDP to communicate between a directly connected
+      Auto Attach Client (AAC) and Auto Attach Server (AAS). The LLDP protocol
+      is extended to add two new Type-Length-Value tuples (TLVs). The first
+      new TLV supports the ongoing discovery of directly connected AA
+      correspondents. Auto Attach operates by regularly transmitting AA
+      discovery TLVs between the AA client and AA server. By exchanging these
+      discovery messages, both the AAC and AAS learn the system name and
+      system description of their peer. In the OVS context, OVS operates as
+      the AA client and the AA server resides on a switch at the edge of the
+      SPB network.
+    </p>
+
+    <p>
+      Once AA discovery has been completed the AAC then uses the second new TLV
+      to deliver identifier mappings from the AAC to the AAS. A primary feature
+      of Auto Attach is to facilitate the mapping of VLANs defined outside the
+      SPB network onto service ids (ISIDs) defined within the SPM network. By
+      doing so individual external VLANs can be mapped onto specific SPB
+      network services. These VLAN id to ISID mappings can be configured and
+      managed locally using new options added to the ovs-vsctl command.
+    </p>
+
+    <p>
+      The Auto Attach OVS feature does not provide a full implementation of
+      the LLDP protocol. Support for the mandatory TLVs as defined by the LLDP
+      standard and support for the AA TLV extensions is provided. LLDP
+      protocol support in OVS can be enabled or disabled on a port by port
+      basis. LLDP support is disabled by default.
+    </p>
+
+    <column name="system_name">
+      The system_name string is exported in LLDP messages.  It should uniquely
+      identify the bridge in the network.
+    </column>
+
+    <column name="system_description">
+      The system_description string is exported in LLDP messages.  It should
+      describe the type of software and hardware.
+    </column>
+
+    <column name="mappings">
+      A mapping from SPB network Individual Service Identifier (ISID) to VLAN
+      id.
+    </column>
+  </table>
 </database>

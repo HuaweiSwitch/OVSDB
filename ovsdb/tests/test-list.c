@@ -18,23 +18,22 @@
  * list.h. */
 
 #include <config.h>
+#undef NDEBUG
 #include "list.h"
+#include <assert.h>
 #include <string.h>
 #include "ovstest.h"
-
-#undef NDEBUG
-#include <assert.h>
 
 /* Sample list element. */
 struct element {
     int value;
-    struct list node;
+    struct ovs_list node;
 };
 
 /* Puts the 'n' values in 'values' into 'elements', and then puts those
  * elements in order into 'list'. */
 static void
-make_list(struct list *list, struct element elements[],
+make_list(struct ovs_list *list, struct element elements[],
           int values[], size_t n)
 {
     size_t i;
@@ -50,7 +49,7 @@ make_list(struct list *list, struct element elements[],
 /* Verifies that 'list' contains exactly the 'n' values in 'values', in the
  * specified order. */
 static void
-check_list(struct list *list, const int values[], size_t n)
+check_list(struct ovs_list *list, const int values[], size_t n)
 {
     struct element *e;
     size_t i;
@@ -82,7 +81,7 @@ check_list(struct list *list, const int values[], size_t n)
 #if 0
 /* Prints the values in 'list', plus 'name' as a title. */
 static void
-print_list(const char *name, struct list *list)
+print_list(const char *name, struct ovs_list *list)
 {
     struct element *e;
 
@@ -104,7 +103,7 @@ test_list_construction(void)
     for (n = 0; n <= MAX_ELEMS; n++) {
         struct element elements[MAX_ELEMS];
         int values[MAX_ELEMS];
-        struct list list;
+        struct ovs_list list;
 
         make_list(&list, elements, values, n);
         check_list(&list, values, n);
@@ -124,7 +123,7 @@ test_list_for_each_safe(void)
         for (pattern = 0; pattern < 1ul << n; pattern++) {
             struct element elements[MAX_ELEMS];
             int values[MAX_ELEMS];
-            struct list list;
+            struct ovs_list list;
             struct element *e, *next;
             size_t values_idx, n_remaining;
             int i;
@@ -160,6 +159,31 @@ test_list_for_each_safe(void)
     }
 }
 
+/* Tests that LIST_FOR_EACH_POP removes the elements of a list.  */
+static void
+test_list_for_each_pop(void)
+{
+    enum { MAX_ELEMS = 10 };
+    size_t n;
+
+    for (n = 0; n <= MAX_ELEMS; n++) {
+        struct element elements[MAX_ELEMS];
+        int values[MAX_ELEMS];
+        struct ovs_list list;
+        struct element *e;
+        size_t n_remaining;
+
+        make_list(&list, elements, values, n);
+
+        n_remaining = n;
+        LIST_FOR_EACH_POP (e, node, &list) {
+            n_remaining--;
+            memmove(values, values + 1, sizeof *values * n_remaining);
+            check_list(&list, values, n_remaining);
+        }
+    }
+}
+
 static void
 run_test(void (*function)(void))
 {
@@ -172,6 +196,7 @@ test_list_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 {
     run_test(test_list_construction);
     run_test(test_list_for_each_safe);
+    run_test(test_list_for_each_pop);
     printf("\n");
 }
 

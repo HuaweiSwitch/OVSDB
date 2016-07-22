@@ -63,7 +63,7 @@ atomic_thread_fence_if_seq_cst(memory_order order)
 }
 
 static inline void
-atomic_signal_fence(memory_order order OVS_UNUSED)
+atomic_signal_fence(memory_order order)
 {
     if (order != memory_order_relaxed) {
         asm volatile("" : : : "memory");
@@ -72,7 +72,7 @@ atomic_signal_fence(memory_order order OVS_UNUSED)
 
 #define atomic_is_lock_free(OBJ)                \
     ((void) *(OBJ),                             \
-     IF_LOCKLESS_ATOMIC(OBJ, true, false))
+     IS_LOCKLESS_ATOMIC(*(OBJ)) ? 2 : 0)
 
 #define atomic_store(DST, SRC) \
     atomic_store_explicit(DST, SRC, memory_order_seq_cst)
@@ -80,14 +80,13 @@ atomic_signal_fence(memory_order order OVS_UNUSED)
     ({                                                  \
         typeof(DST) dst__ = (DST);                      \
         typeof(SRC) src__ = (SRC);                      \
-        memory_order order__ = (ORDER);                 \
                                                         \
         if (IS_LOCKLESS_ATOMIC(*dst__)) {               \
-            atomic_thread_fence(order__);               \
-            *dst__ = src__;                             \
-            atomic_thread_fence_if_seq_cst(order__);    \
+            atomic_thread_fence(ORDER);                 \
+            *(typeof(*(DST)) volatile *)dst__ = src__;  \
+            atomic_thread_fence_if_seq_cst(ORDER);      \
         } else {                                        \
-            atomic_store_locked(DST, SRC);              \
+            atomic_store_locked(dst__, src__);          \
         }                                               \
         (void) 0;                                       \
     })
@@ -97,16 +96,37 @@ atomic_signal_fence(memory_order order OVS_UNUSED)
     ({                                                  \
         typeof(DST) dst__ = (DST);                      \
         typeof(SRC) src__ = (SRC);                      \
-        memory_order order__ = (ORDER);                 \
                                                         \
         if (IS_LOCKLESS_ATOMIC(*src__)) {               \
-            atomic_thread_fence_if_seq_cst(order__);    \
-            *dst__ = *src__;                            \
+            atomic_thread_fence_if_seq_cst(ORDER);      \
+            *dst__ = *(typeof(*(SRC)) volatile *)src__; \
         } else {                                        \
-            atomic_read_locked(SRC, DST);               \
+            atomic_read_locked(src__, dst__);           \
         }                                               \
         (void) 0;                                       \
     })
+
+#define atomic_compare_exchange_strong(DST, EXP, SRC)   \
+    ({                                                  \
+        typeof(DST) dst__ = (DST);                      \
+        typeof(EXP) expp__ = (EXP);                     \
+        typeof(SRC) src__ = (SRC);                      \
+        typeof(SRC) exp__ = *expp__;                    \
+        typeof(SRC) ret__;                              \
+                                                        \
+        ret__ = __sync_val_compare_and_swap(dst__, exp__, src__); \
+        if (ret__ != exp__) {                                     \
+            *expp__ = ret__;                                      \
+        }                                                         \
+        ret__ == exp__;                                           \
+    })
+#define atomic_compare_exchange_strong_explicit(DST, EXP, SRC, ORD1, ORD2) \
+    ((void) (ORD1), (void) (ORD2), \
+     atomic_compare_exchange_strong(DST, EXP, SRC))
+#define atomic_compare_exchange_weak            \
+    atomic_compare_exchange_strong
+#define atomic_compare_exchange_weak_explicit   \
+    atomic_compare_exchange_strong_explicit
 
 #define atomic_op__(RMW, OP, ARG, ORIG)                     \
     ({                                                      \
@@ -117,13 +137,14 @@ atomic_signal_fence(memory_order order OVS_UNUSED)
         if (IS_LOCKLESS_ATOMIC(*rmw__)) {                   \
             *orig__ = __sync_fetch_and_##OP(rmw__, arg__);  \
         } else {                                            \
-            atomic_op_locked(RMW, OP, ARG, ORIG);           \
+            atomic_op_locked(rmw__, OP, arg__, orig__);     \
         }                                                   \
+        (void) 0;                                           \
     })
 
 #define atomic_add(RMW, ARG, ORIG) atomic_op__(RMW, add, ARG, ORIG)
 #define atomic_sub(RMW, ARG, ORIG) atomic_op__(RMW, sub, ARG, ORIG)
-#define atomic_or( RMW, ARG, ORIG) atomic_op__(RMW, or,  ARG, ORIG)
+#define atomic_or(RMW, ARG, ORIG) atomic_op__(RMW, or,  ARG, ORIG)
 #define atomic_xor(RMW, ARG, ORIG) atomic_op__(RMW, xor, ARG, ORIG)
 #define atomic_and(RMW, ARG, ORIG) atomic_op__(RMW, and, ARG, ORIG)
 
@@ -146,27 +167,37 @@ typedef struct {
 #define ATOMIC_FLAG_INIT { false }
 
 static inline bool
-atomic_flag_test_and_set(volatile atomic_flag *object)
-{
-    return __sync_lock_test_and_set(&object->b, 1);
-}
-
-static inline bool
 atomic_flag_test_and_set_explicit(volatile atomic_flag *object,
-                                  memory_order order OVS_UNUSED)
+                                  memory_order order)
 {
-    return atomic_flag_test_and_set(object);
+    bool old;
+
+    /* __sync_lock_test_and_set() by itself is an acquire barrier.
+     * For anything higher additional barriers are needed. */
+    if (order > memory_order_acquire) {
+        atomic_thread_fence(order);
+    }
+    old = __sync_lock_test_and_set(&object->b, 1);
+    atomic_thread_fence_if_seq_cst(order);
+
+    return old;
 }
 
-static inline void
-atomic_flag_clear(volatile atomic_flag *object)
-{
-    __sync_lock_release(&object->b);
-}
+#define atomic_flag_test_and_set(FLAG)                                  \
+    atomic_flag_test_and_set_explicit(FLAG, memory_order_seq_cst)
 
 static inline void
 atomic_flag_clear_explicit(volatile atomic_flag *object,
-                           memory_order order OVS_UNUSED)
+                           memory_order order)
 {
-    atomic_flag_clear(object);
+    /* __sync_lock_release() by itself is a release barrier.  For
+     * anything else additional barrier may be needed. */
+    if (order != memory_order_release) {
+        atomic_thread_fence(order);
+    }
+    __sync_lock_release(&object->b);
+    atomic_thread_fence_if_seq_cst(order);
 }
+
+#define atomic_flag_clear(FLAG)                                 \
+    atomic_flag_clear_explicit(FLAG, memory_order_seq_cst)

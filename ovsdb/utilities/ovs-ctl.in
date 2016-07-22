@@ -1,5 +1,5 @@
 #! /bin/sh
-# Copyright (C) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+# Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,13 +30,33 @@ done
 ## start ##
 ## ----- ##
 
+# Keep track of removed vports so we can reload them if needed
+removed_vports=""
+
+insert_mods () {
+    # Try loading openvswitch again.
+    action "Inserting openvswitch module" modprobe openvswitch
+
+    for vport in $removed_vports; do
+        # Don't treat failures to load vports as fatal error
+        action "Inserting $vport module" modprobe $vport || true
+    done
+}
+
 insert_mod_if_required () {
+    # If this kernel has no module support, expect we're done.
+    if test ! -e /proc/modules
+    then
+        log_success_msg "Kernel has no loadable module support. Skipping modprobe"
+        return 0
+    fi
+
     # If openvswitch is already loaded then we're done.
     test -e /sys/module/openvswitch -o -e /sys/module/openvswitch_mod && \
      return 0
 
     # Load openvswitch.  If that's successful then we're done.
-    action "Inserting openvswitch module" modprobe openvswitch && return 0
+    insert_mods && return 0
 
     # If the bridge module is loaded, then that might be blocking
     # openvswitch.  Try to unload it, if there are no bridges.
@@ -49,58 +69,11 @@ insert_mod_if_required () {
     action "removing bridge module" rmmod bridge || return 1
 
     # Try loading openvswitch again.
-    action "Inserting openvswitch module" modprobe openvswitch
+    insert_mods
 }
 
 ovs_vsctl () {
     ovs-vsctl --no-wait "$@"
-}
-
-ovsdb_tool () {
-    ovsdb-tool -vconsole:off "$@"
-}
-
-create_db () {
-    action "Creating empty database $DB_FILE" ovsdb_tool create "$DB_FILE" "$DB_SCHEMA"
-}
-
-upgrade_db () {
-    schemaver=`ovsdb_tool schema-version "$DB_SCHEMA"`
-    if test ! -e "$DB_FILE"; then
-        log_warning_msg "$DB_FILE does not exist"
-        install -d -m 755 -o root -g root `dirname $DB_FILE`
-        create_db
-    elif test X"`ovsdb_tool needs-conversion "$DB_FILE" "$DB_SCHEMA"`" != Xno; then
-        # Back up the old version.
-        version=`ovsdb_tool db-version "$DB_FILE"`
-        cksum=`ovsdb_tool db-cksum "$DB_FILE" | awk '{print $1}'`
-        backup=$DB_FILE.backup$version-$cksum
-        action "Backing up database to $backup" cp "$DB_FILE" "$backup" || return 1
-
-        # Compact database.  This is important if the old schema did not enable
-        # garbage collection (i.e. if it did not have any tables with "isRoot":
-        # true) but the new schema does.  In that situation the old database
-        # may contain a transaction that creates a record followed by a
-        # transaction that creates the first use of the record.  Replaying that
-        # series of transactions against the new database schema (as "convert"
-        # does) would cause the record to be dropped by the first transaction,
-        # then the second transaction would cause a referential integrity
-        # failure (for a strong reference).
-        #
-        # Errors might occur on an Open vSwitch downgrade if ovsdb-tool doesn't
-        # understand some feature of the schema used in the OVSDB version that
-        # we're downgrading from, so we don't give up on error.
-        action "Compacting database" ovsdb_tool compact "$DB_FILE"
-
-        # Upgrade or downgrade schema.
-        if action "Converting database schema" ovsdb_tool convert "$DB_FILE" "$DB_SCHEMA"; then
-            :
-        else
-            log_warning_msg "Schema conversion failed, using empty database instead"
-            rm -f "$DB_FILE"
-            create_db
-        fi
-    fi
 }
 
 set_system_ids () {
@@ -157,6 +130,12 @@ check_force_cores () {
     fi
 }
 
+del_transient_ports () {
+    for port in `ovs-vsctl --bare -- --columns=name find port other_config:transient=true`; do
+        ovs_vsctl -- del-port "$port"
+    done
+}
+
 start_ovsdb () {
     check_force_cores
 
@@ -164,7 +143,7 @@ start_ovsdb () {
         log_success_msg "ovsdb-server is already running"
     else
         # Create initial database or upgrade database schema.
-        upgrade_db || return 1
+        upgrade_db $DB_FILE $DB_SCHEMA || return 1
 
         # Start ovsdb-server.
         set ovsdb-server "$DB_FILE"
@@ -196,8 +175,11 @@ start_ovsdb () {
         set_system_ids || return 1
         if test X"$DELETE_BRIDGES" = Xyes; then
             for bridge in `ovs_vsctl list-br`; do
-        ovs_vsctl del-br $bridge
+                ovs_vsctl del-br $bridge
             done
+        fi
+        if test X"$DELETE_TRANSIENT_PORTS" = Xyes; then
+            del_transient_ports
         fi
     fi
 }
@@ -290,13 +272,22 @@ ovs_save () {
 }
 
 save_ofports_if_required () {
-    # Save ofports if we are upgrading from a pre-1.10 branch.
+    # Save OpenFlow port numbers if we are upgrading from a pre-1.10 branch.
+    #
+    # (Versions 1.10 and later save OpenFlow port numbers without assistance,
+    # so we don't have to do anything for them.
     case `ovs-appctl version | sed 1q` in
         "ovs-vswitchd (Open vSwitch) 1."[0-9].*)
             action "Saving ofport values" ovs_save save-ofports \
                 "${script_ofports}"
             ;;
     esac
+}
+
+save_flows_if_required () {
+    if test X"$DELETE_BRIDGES" != Xyes; then
+        action "Saving flows" ovs_save save-flows "${script_flows}"
+    fi
 }
 
 save_interfaces () {
@@ -349,9 +340,7 @@ force_reload_kmod () {
     action "Detected internal interfaces: $ifaces" true
 
     init_restore_scripts
-
-    action "Saving flows" ovs_save save-flows "${script_flows}"
-
+    save_flows_if_required
     save_ofports_if_required
 
     # Restart the database first, since a large database may take a
@@ -376,6 +365,13 @@ force_reload_kmod () {
 
     for dp in `ovs-dpctl dump-dps`; do
         action "Removing datapath: $dp" ovs-dpctl del-dp "$dp"
+    done
+
+    for vport in `awk '/^vport_/ { print $1 }' /proc/modules`; do
+        action "Removing $vport module" rmmod $vport
+        if ! grep -q $vport /proc/modules; then
+            removed_vports="$removed_vports $vport"
+        fi
     done
 
     # try both old and new names in case this is post upgrade
@@ -420,7 +416,7 @@ restart () {
     if daemon_is_running ovsdb-server && daemon_is_running ovs-vswitchd; then
         init_restore_scripts
         save_interfaces_if_required
-        action "Saving flows" ovs_save save-flows "${script_flows}"
+        save_flows_if_required
         save_ofports_if_required
     fi
 
@@ -502,6 +498,7 @@ set_defaults () {
     SYSTEM_ID=
 
     DELETE_BRIDGES=no
+    DELETE_TRANSIENT_PORTS=no
 
     DAEMON_CWD=/
     FORCE_COREFILES=yes
@@ -687,7 +684,7 @@ do
 done
 case $command in
     start)
-        start_ovsdb
+        start_ovsdb || exit 1
         start_forwarding
         add_managers
         ;;

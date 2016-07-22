@@ -26,7 +26,6 @@
 #include "command-line.h"
 #include "daemon.h"
 #include "dirs.h"
-#include "dummy.h"
 #include "dynamic-string.h"
 #include "fatal-signal.h"
 #include "file.h"
@@ -54,7 +53,8 @@
 #include "trigger.h"
 #include "util.h"
 #include "unixctl.h"
-#include "vlog.h"
+#include "perf-counter.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(ovsdb_server);
 
@@ -77,6 +77,8 @@ static bool bootstrap_ca_cert;
 static unixctl_cb_func ovsdb_server_exit;
 static unixctl_cb_func ovsdb_server_compact;
 static unixctl_cb_func ovsdb_server_reconnect;
+static unixctl_cb_func ovsdb_server_perf_counters_clear;
+static unixctl_cb_func ovsdb_server_perf_counters_show;
 
 struct server_config {
     struct sset *remotes;
@@ -93,11 +95,12 @@ static unixctl_cb_func ovsdb_server_remove_database;
 static unixctl_cb_func ovsdb_server_list_databases;
 
 static char *open_db(struct server_config *config, const char *filename);
+static void close_db(struct db *db);
 
 static void parse_options(int *argc, char **argvp[],
                           struct sset *remotes, char **unixctl_pathp,
                           char **run_command);
-static void usage(void) NO_RETURN;
+OVS_NO_RETURN static void usage(void);
 
 static char *reconfigure_remotes(struct ovsdb_jsonrpc_server *,
                                  const struct shash *all_dbs,
@@ -115,6 +118,83 @@ static void save_config(struct server_config *);
 static void load_config(FILE *config_file, struct sset *remotes,
                         struct sset *db_filenames);
 
+static void
+main_loop(struct ovsdb_jsonrpc_server *jsonrpc, struct shash *all_dbs,
+          struct unixctl_server *unixctl, struct sset *remotes,
+          struct process *run_process, bool *exiting)
+{
+    char *remotes_error, *ssl_error;
+    struct shash_node *node;
+    long long int status_timer = LLONG_MIN;
+
+    *exiting = false;
+    ssl_error = NULL;
+    remotes_error = NULL;
+    while (!*exiting) {
+        memory_run();
+        if (memory_should_report()) {
+            struct simap usage;
+
+            simap_init(&usage);
+            ovsdb_jsonrpc_server_get_memory_usage(jsonrpc, &usage);
+            SHASH_FOR_EACH(node, all_dbs) {
+                struct db *db = node->data;
+                ovsdb_get_memory_usage(db->db, &usage);
+            }
+            memory_report(&usage);
+            simap_destroy(&usage);
+        }
+
+        /* Run unixctl_server_run() before reconfigure_remotes() because
+         * ovsdb-server/add-remote and ovsdb-server/remove-remote can change
+         * the set of remotes that reconfigure_remotes() uses. */
+        unixctl_server_run(unixctl);
+
+        report_error_if_changed(
+            reconfigure_remotes(jsonrpc, all_dbs, remotes),
+            &remotes_error);
+        report_error_if_changed(reconfigure_ssl(all_dbs), &ssl_error);
+        ovsdb_jsonrpc_server_run(jsonrpc);
+
+        SHASH_FOR_EACH(node, all_dbs) {
+            struct db *db = node->data;
+            ovsdb_trigger_run(db->db, time_msec());
+        }
+        if (run_process) {
+            process_run();
+            if (process_exited(run_process)) {
+                *exiting = true;
+            }
+        }
+
+        /* update Manager status(es) every 5 seconds */
+        if (time_msec() >= status_timer) {
+            status_timer = time_msec() + 5000;
+            update_remote_status(jsonrpc, remotes, all_dbs);
+        }
+
+        memory_wait();
+        ovsdb_jsonrpc_server_wait(jsonrpc);
+        unixctl_server_wait(unixctl);
+        SHASH_FOR_EACH(node, all_dbs) {
+            struct db *db = node->data;
+            ovsdb_trigger_wait(db->db, time_msec());
+        }
+        if (run_process) {
+            process_wait(run_process);
+        }
+        if (*exiting) {
+            poll_immediate_wake();
+        }
+        poll_timer_wait_until(status_timer);
+        poll_block();
+        if (should_service_stop()) {
+            *exiting = true;
+        }
+    }
+
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -127,22 +207,21 @@ main(int argc, char *argv[])
     struct process *run_process;
     bool exiting;
     int retval;
-    long long int status_timer = LLONG_MIN;
     FILE *config_tmpfile;
     struct server_config server_config;
     struct shash all_dbs;
-    struct shash_node *node;
-    char *remotes_error, *ssl_error;
+    struct shash_node *node, *next;
     char *error;
     int i;
 
-    proctitle_init(argc, argv);
+    ovs_cmdl_proctitle_init(argc, argv);
     set_program_name(argv[0]);
     service_start(&argc, &argv);
     fatal_ignore_sigpipe();
     process_init();
 
     parse_options(&argc, &argv, &remotes, &unixctl_path, &run_command);
+    daemon_become_new_user(false);
 
     /* Create and initialize 'config_tmpfile' as a temporary file to hold
      * ovsdb-server's most basic configuration, and then save our initial
@@ -170,7 +249,7 @@ main(int argc, char *argv[])
 
     save_config__(config_tmpfile, &remotes, &db_filenames);
 
-    daemonize_start();
+    daemonize_start(false);
 
     /* Load the saved config. */
     load_config(config_tmpfile, &remotes, &db_filenames);
@@ -179,6 +258,9 @@ main(int argc, char *argv[])
     shash_init(&all_dbs);
     server_config.all_dbs = &all_dbs;
     server_config.jsonrpc = jsonrpc;
+
+    perf_counters_init();
+
     SSET_FOR_EACH (db_filename, &db_filenames) {
         error = open_db(&server_config, db_filename);
         if (error) {
@@ -243,78 +325,22 @@ main(int argc, char *argv[])
                              ovsdb_server_remove_database, &server_config);
     unixctl_command_register("ovsdb-server/list-dbs", "", 0, 0,
                              ovsdb_server_list_databases, &all_dbs);
+    unixctl_command_register("ovsdb-server/perf-counters-show", "", 0, 0,
+                             ovsdb_server_perf_counters_show, NULL);
+    unixctl_command_register("ovsdb-server/perf-counters-clear", "", 0, 0,
+                             ovsdb_server_perf_counters_clear, NULL);
 
-    exiting = false;
-    ssl_error = NULL;
-    remotes_error = NULL;
-    while (!exiting) {
-        memory_run();
-        if (memory_should_report()) {
-            struct simap usage;
+    main_loop(jsonrpc, &all_dbs, unixctl, &remotes, run_process, &exiting);
 
-            simap_init(&usage);
-            ovsdb_jsonrpc_server_get_memory_usage(jsonrpc, &usage);
-            SHASH_FOR_EACH(node, &all_dbs) {
-                struct db *db = node->data;
-                ovsdb_get_memory_usage(db->db, &usage);
-            }
-            memory_report(&usage);
-            simap_destroy(&usage);
-        }
-
-        /* Run unixctl_server_run() before reconfigure_remotes() because
-         * ovsdb-server/add-remote and ovsdb-server/remove-remote can change
-         * the set of remotes that reconfigure_remotes() uses. */
-        unixctl_server_run(unixctl);
-
-        report_error_if_changed(
-            reconfigure_remotes(jsonrpc, &all_dbs, &remotes),
-            &remotes_error);
-        report_error_if_changed(reconfigure_ssl(&all_dbs), &ssl_error);
-        ovsdb_jsonrpc_server_run(jsonrpc);
-
-        SHASH_FOR_EACH(node, &all_dbs) {
-            struct db *db = node->data;
-            ovsdb_trigger_run(db->db, time_msec());
-        }
-        if (run_process) {
-            process_run();
-            if (process_exited(run_process)) {
-                exiting = true;
-            }
-        }
-
-        /* update Manager status(es) every 5 seconds */
-        if (time_msec() >= status_timer) {
-            status_timer = time_msec() + 5000;
-            update_remote_status(jsonrpc, &remotes, &all_dbs);
-        }
-
-        memory_wait();
-        ovsdb_jsonrpc_server_wait(jsonrpc);
-        unixctl_server_wait(unixctl);
-        SHASH_FOR_EACH(node, &all_dbs) {
-            struct db *db = node->data;
-            ovsdb_trigger_wait(db->db, time_msec());
-        }
-        if (run_process) {
-            process_wait(run_process);
-        }
-        if (exiting) {
-            poll_immediate_wake();
-        }
-        poll_timer_wait_until(status_timer);
-        poll_block();
-        if (should_service_stop()) {
-            exiting = true;
-        }
-    }
     ovsdb_jsonrpc_server_destroy(jsonrpc);
-    SHASH_FOR_EACH(node, &all_dbs) {
+    SHASH_FOR_EACH_SAFE(node, next, &all_dbs) {
         struct db *db = node->data;
-        ovsdb_destroy(db->db);
+        close_db(db);
+        shash_delete(&all_dbs, node);
     }
+    shash_destroy(&all_dbs);
     sset_destroy(&remotes);
+    sset_destroy(&db_filenames);
     unixctl_server_destroy(unixctl);
 
     if (run_process && process_exited(run_process)) {
@@ -324,7 +350,7 @@ main(int argc, char *argv[])
                       run_command, process_status_msg(status));
         }
     }
-
+    perf_counters_destroy();
     service_stop();
     return 0;
 }
@@ -359,6 +385,14 @@ is_already_open(struct server_config *config OVS_UNUSED,
     return false;
 }
 
+static void
+close_db(struct db *db)
+{
+    ovsdb_destroy(db->db);
+    free(db->filename);
+    free(db);
+}
+
 static char *
 open_db(struct server_config *config, const char *filename)
 {
@@ -387,9 +421,7 @@ open_db(struct server_config *config, const char *filename)
     }
 
     ovsdb_error_destroy(db_error);
-    ovsdb_destroy(db->db);
-    free(db->filename);
-    free(db);
+    close_db(db);
     return error;
 }
 
@@ -408,7 +440,7 @@ find_db(const struct shash *all_dbs, const char *db_name)
     return NULL;
 }
 
-static char * WARN_UNUSED_RESULT
+static char * OVS_WARN_UNUSED_RESULT
 parse_db_column__(const struct shash *all_dbs,
                   const char *name_, char *name,
                   const struct db **dbp,
@@ -462,7 +494,7 @@ parse_db_column__(const struct shash *all_dbs,
 
 /* Returns NULL if successful, otherwise a malloc()'d string describing the
  * error. */
-static char * WARN_UNUSED_RESULT
+static char * OVS_WARN_UNUSED_RESULT
 parse_db_column(const struct shash *all_dbs,
                 const char *name_,
                 const struct db **dbp,
@@ -478,7 +510,7 @@ parse_db_column(const struct shash *all_dbs,
 
 /* Returns NULL if successful, otherwise a malloc()'d string describing the
  * error. */
-static char * WARN_UNUSED_RESULT
+static char * OVS_WARN_UNUSED_RESULT
 parse_db_string_column(const struct shash *all_dbs,
                        const char *name,
                        const struct db **dbp,
@@ -1002,6 +1034,26 @@ ovsdb_server_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
 }
 
 static void
+ovsdb_server_perf_counters_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                                const char *argv[] OVS_UNUSED,
+                                void *arg_ OVS_UNUSED)
+{
+    char *s = perf_counters_to_string();
+
+    unixctl_command_reply(conn, s);
+    free(s);
+}
+
+static void
+ovsdb_server_perf_counters_clear(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                                 const char *argv[] OVS_UNUSED,
+                                 void *arg_ OVS_UNUSED)
+{
+    perf_counters_clear();
+    unixctl_command_reply(conn, NULL);
+}
+
+static void
 ovsdb_server_compact(struct unixctl_conn *conn, int argc,
                      const char *argv[], void *dbs_)
 {
@@ -1165,10 +1217,8 @@ ovsdb_server_remove_database(struct unixctl_conn *conn, int argc OVS_UNUSED,
     ok = ovsdb_jsonrpc_server_remove_db(config->jsonrpc, db->db);
     ovs_assert(ok);
 
-    ovsdb_destroy(db->db);
+    close_db(db);
     shash_delete(config->all_dbs, node);
-    free(db->filename);
-    free(db);
 
     save_config(config);
     unixctl_command_reply(conn, NULL);
@@ -1205,7 +1255,7 @@ parse_options(int *argcp, char **argvp[],
         OPT_UNIXCTL,
         OPT_RUN,
         OPT_BOOTSTRAP_CA_CERT,
-        OPT_ENABLE_DUMMY,
+        OPT_PEER_CA_CERT,
         VLOG_OPTION_ENUMS,
         DAEMON_OPTION_ENUMS
     };
@@ -1220,13 +1270,13 @@ parse_options(int *argcp, char **argvp[],
         DAEMON_LONG_OPTIONS,
         VLOG_LONG_OPTIONS,
         {"bootstrap-ca-cert", required_argument, NULL, OPT_BOOTSTRAP_CA_CERT},
+        {"peer-ca-cert", required_argument, NULL, OPT_PEER_CA_CERT},
         {"private-key", required_argument, NULL, 'p'},
         {"certificate", required_argument, NULL, 'c'},
         {"ca-cert",     required_argument, NULL, 'C'},
-        {"enable-dummy", optional_argument, NULL, OPT_ENABLE_DUMMY},
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
     int argc = *argcp;
     char **argv = *argvp;
 
@@ -1280,8 +1330,8 @@ parse_options(int *argcp, char **argvp[],
             bootstrap_ca_cert = true;
             break;
 
-        case OPT_ENABLE_DUMMY:
-            dummy_enable(optarg && !strcmp(optarg, "override"));
+        case OPT_PEER_CA_CERT:
+            stream_ssl_set_peer_ca_cert_file(optarg);
             break;
 
         case '?':

@@ -15,20 +15,18 @@
  */
 
 #include <config.h>
-
+#undef NDEBUG
 #include "reconnect.h"
-
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include "command-line.h"
 #include "compiler.h"
+#include "ovstest.h"
 #include "svec.h"
 #include "util.h"
-#include "vlog.h"
-#include "ovstest.h"
+#include "openvswitch/vlog.h"
 
 static struct reconnect *reconnect;
 static int now;
@@ -36,7 +34,7 @@ static int now;
 static void diff_stats(const struct reconnect_stats *old,
                        const struct reconnect_stats *new,
                        int delta);
-static const struct command *get_all_commands(void);
+static const struct ovs_cmdl_command *get_all_commands(void);
 
 static void
 test_reconnect_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
@@ -47,7 +45,7 @@ test_reconnect_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
     int old_time;
     char line[128];
 
-    vlog_set_levels(&VLM_reconnect, VLF_ANY_FACILITY, VLL_OFF);
+    vlog_set_levels(&VLM_reconnect, VLF_ANY_DESTINATION, VLL_OFF);
 
     now = 1000;
     reconnect = reconnect_create(now);
@@ -69,7 +67,11 @@ test_reconnect_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
         svec_parse_words(&args, line);
         svec_terminate(&args);
         if (!svec_is_empty(&args)) {
-            run_command(args.n, args.names, get_all_commands());
+            struct ovs_cmdl_context ctx = {
+                .argc = args.n,
+                .argv = args.names,
+            };
+            ovs_cmdl_run_command(&ctx, get_all_commands());
         }
         svec_destroy(&args);
 
@@ -90,19 +92,19 @@ test_reconnect_main(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-do_enable(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_enable(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_enable(reconnect, now);
 }
 
 static void
-do_disable(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_disable(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_disable(reconnect, now);
 }
 
 static void
-do_force_reconnect(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_force_reconnect(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_force_reconnect(reconnect, now);
 }
@@ -122,42 +124,42 @@ error_from_string(const char *s)
 }
 
 static void
-do_disconnected(int argc OVS_UNUSED, char *argv[])
+do_disconnected(struct ovs_cmdl_context *ctx)
 {
-    reconnect_disconnected(reconnect, now, error_from_string(argv[1]));
+    reconnect_disconnected(reconnect, now, error_from_string(ctx->argv[1]));
 }
 
 static void
-do_connecting(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_connecting(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_connecting(reconnect, now);
 }
 
 static void
-do_connect_failed(int argc OVS_UNUSED, char *argv[])
+do_connect_failed(struct ovs_cmdl_context *ctx)
 {
-    reconnect_connect_failed(reconnect, now, error_from_string(argv[1]));
+    reconnect_connect_failed(reconnect, now, error_from_string(ctx->argv[1]));
 }
 
 static void
-do_connected(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_connected(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_connected(reconnect, now);
 }
 
 static void
-do_activity(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_activity(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_activity(reconnect, now);
 }
 
 static void
-do_run(int argc, char *argv[])
+do_run(struct ovs_cmdl_context *ctx)
 {
     enum reconnect_action action;
 
-    if (argc > 1) {
-        now += atoi(argv[1]);
+    if (ctx->argc > 1) {
+        now += atoi(ctx->argv[1]);
     }
 
     action = reconnect_run(reconnect, now);
@@ -183,13 +185,13 @@ do_run(int argc, char *argv[])
 }
 
 static void
-do_advance(int argc OVS_UNUSED, char *argv[])
+do_advance(struct ovs_cmdl_context *ctx)
 {
-    now += atoi(argv[1]);
+    now += atoi(ctx->argv[1]);
 }
 
 static void
-do_timeout(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_timeout(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     int timeout = reconnect_timeout(reconnect, now);
     if (timeout >= 0) {
@@ -201,9 +203,9 @@ do_timeout(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
 }
 
 static void
-do_set_max_tries(int argc OVS_UNUSED, char *argv[])
+do_set_max_tries(struct ovs_cmdl_context *ctx)
 {
-    reconnect_set_max_tries(reconnect, atoi(argv[1]));
+    reconnect_set_max_tries(reconnect, atoi(ctx->argv[1]));
 }
 
 static void
@@ -253,43 +255,43 @@ diff_stats(const struct reconnect_stats *old,
 }
 
 static void
-do_set_passive(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_set_passive(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_set_passive(reconnect, true, now);
 }
 
 static void
-do_listening(int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+do_listening(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     reconnect_listening(reconnect, now);
 }
 
 static void
-do_listen_error(int argc OVS_UNUSED, char *argv[])
+do_listen_error(struct ovs_cmdl_context *ctx)
 {
-    reconnect_listen_error(reconnect, now, atoi(argv[1]));
+    reconnect_listen_error(reconnect, now, atoi(ctx->argv[1]));
 }
 
-static const struct command all_commands[] = {
-    { "enable", 0, 0, do_enable },
-    { "disable", 0, 0, do_disable },
-    { "force-reconnect", 0, 0, do_force_reconnect },
-    { "disconnected", 0, 1, do_disconnected },
-    { "connecting", 0, 0, do_connecting },
-    { "connect-failed", 0, 1, do_connect_failed },
-    { "connected", 0, 0, do_connected },
-    { "activity", 0, 0, do_activity },
-    { "run", 0, 1, do_run },
-    { "advance", 1, 1, do_advance },
-    { "timeout", 0, 0, do_timeout },
-    { "set-max-tries", 1, 1, do_set_max_tries },
-    { "passive", 0, 0, do_set_passive },
-    { "listening", 0, 0, do_listening },
-    { "listen-error", 1, 1, do_listen_error },
-    { NULL, 0, 0, NULL },
+static const struct ovs_cmdl_command all_commands[] = {
+    { "enable", NULL, 0, 0, do_enable },
+    { "disable", NULL, 0, 0, do_disable },
+    { "force-reconnect", NULL, 0, 0, do_force_reconnect },
+    { "disconnected", NULL, 0, 1, do_disconnected },
+    { "connecting", NULL, 0, 0, do_connecting },
+    { "connect-failed", NULL, 0, 1, do_connect_failed },
+    { "connected", NULL, 0, 0, do_connected },
+    { "activity", NULL, 0, 0, do_activity },
+    { "run", NULL, 0, 1, do_run },
+    { "advance", NULL, 1, 1, do_advance },
+    { "timeout", NULL, 0, 0, do_timeout },
+    { "set-max-tries", NULL, 1, 1, do_set_max_tries },
+    { "passive", NULL, 0, 0, do_set_passive },
+    { "listening", NULL, 0, 0, do_listening },
+    { "listen-error", NULL, 1, 1, do_listen_error },
+    { NULL, NULL, 0, 0, NULL },
 };
 
-static const struct command *
+static const struct ovs_cmdl_command *
 get_all_commands(void)
 {
     return all_commands;

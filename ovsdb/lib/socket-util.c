@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,24 +21,23 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include "dynamic-string.h"
-#include "fatal-signal.h"
 #include "ovs-thread.h"
 #include "packets.h"
 #include "poll-loop.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 #ifdef __linux__
 #include <linux/if_packet.h>
 #endif
@@ -48,23 +47,6 @@
 #endif
 
 VLOG_DEFINE_THIS_MODULE(socket_util);
-
-/* #ifdefs make it a pain to maintain code: you have to try to build both ways.
- * Thus, this file compiles all of the code regardless of the target, by
- * writing "if (LINUX)" instead of "#ifdef __linux__". */
-#ifdef __linux__
-#define LINUX 1
-#else
-#define LINUX 0
-#endif
-
-#ifndef O_DIRECTORY
-#define O_DIRECTORY 0
-#endif
-
-/* Maximum length of the sun_path member in a struct sockaddr_un, excluding
- * space for a null terminator. */
-#define MAX_UN_LEN (sizeof(((struct sockaddr_un *) 0)->sun_path) - 1)
 
 static int getsockopt_int(int fd, int level, int option, const char *optname,
                           int *valuep);
@@ -106,46 +88,61 @@ xset_nonblocking(int fd)
     }
 }
 
-int
-set_dscp(int fd, uint8_t dscp)
+void
+setsockopt_tcp_nodelay(int fd)
 {
+    int on = 1;
+    int retval;
+
+    retval = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+    if (retval) {
+        retval = sock_errno();
+        VLOG_ERR("setsockopt(TCP_NODELAY): %s", sock_strerror(retval));
+    }
+}
+
+/* Sets the DSCP value of socket 'fd' to 'dscp', which must be 63 or less.
+ * 'family' must indicate the socket's address family (AF_INET or AF_INET6, to
+ * do anything useful). */
+int
+set_dscp(int fd, int family, uint8_t dscp)
+{
+    int retval;
     int val;
-    bool success;
+
+#ifdef _WIN32
+    /* XXX: Consider using QoS2 APIs for Windows to set dscp. */
+    return 0;
+#endif
 
     if (dscp > 63) {
         return EINVAL;
     }
-
-    /* Note: this function is used for both of IPv4 and IPv6 sockets */
-    success = false;
     val = dscp << 2;
-    if (setsockopt(fd, IPPROTO_IP, IP_TOS, &val, sizeof val)) {
-#ifndef _WIN32
-        if (sock_errno() != ENOPROTOOPT) {
-#else
-        if (sock_errno() != WSAENOPROTOOPT) {
-#endif
-            return sock_errno();
-        }
-    } else {
-        success = true;
-    }
-    if (setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &val, sizeof val)) {
-#ifndef _WIN32
-        if (sock_errno() != ENOPROTOOPT) {
-#else
-        if (sock_errno() != WSAENOPROTOOPT) {
-#endif
-            return sock_errno();
-        }
-    } else {
-        success = true;
-    }
-    if (!success) {
+
+    switch (family) {
+    case AF_INET:
+        retval = setsockopt(fd, IPPROTO_IP, IP_TOS, &val, sizeof val);
+        break;
+
+    case AF_INET6:
+        retval = setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &val, sizeof val);
+        break;
+
+    default:
         return ENOPROTOOPT;
     }
 
-    return 0;
+    return retval ? sock_errno() : 0;
+}
+
+/* Checks whether 'host_name' is an IPv4 or IPv6 address.  It is assumed
+ * that 'host_name' is valid.  Returns false if it is IPv4 address, true if
+ * it is IPv6 address. */
+bool
+addr_is_ipv6(const char *host_name)
+{
+    return strchr(host_name, ':') != NULL;
 }
 
 /* Translates 'host_name', which must be a string representation of an IP
@@ -277,43 +274,6 @@ check_connection_completion(int fd)
     }
 }
 
-#ifndef _WIN32
-/* Drain all the data currently in the receive queue of a datagram socket (and
- * possibly additional data).  There is no way to know how many packets are in
- * the receive queue, but we do know that the total number of bytes queued does
- * not exceed the receive buffer size, so we pull packets until none are left
- * or we've read that many bytes. */
-int
-drain_rcvbuf(int fd)
-{
-    int rcvbuf;
-
-    rcvbuf = get_socket_rcvbuf(fd);
-    if (rcvbuf < 0) {
-        return -rcvbuf;
-    }
-
-    while (rcvbuf > 0) {
-        /* In Linux, specifying MSG_TRUNC in the flags argument causes the
-         * datagram length to be returned, even if that is longer than the
-         * buffer provided.  Thus, we can use a 1-byte buffer to discard the
-         * incoming datagram and still be able to account how many bytes were
-         * removed from the receive buffer.
-         *
-         * On other Unix-like OSes, MSG_TRUNC has no effect in the flags
-         * argument. */
-        char buffer[LINUX ? 1 : 2048];
-        ssize_t n_bytes = recv(fd, buffer, sizeof buffer,
-                               MSG_TRUNC | MSG_DONTWAIT);
-        if (n_bytes <= 0 || n_bytes >= rcvbuf) {
-            break;
-        }
-        rcvbuf -= n_bytes;
-    }
-    return 0;
-}
-#endif
-
 /* Returns the size of socket 'sock''s receive buffer (SO_RCVBUF), or a
  * negative errno value if an error occurs. */
 int
@@ -343,269 +303,6 @@ drain_fd(int fd, size_t n_packets)
         }
     }
 }
-
-#ifndef _WIN32
-/* Attempts to shorten 'name' by opening a file descriptor for the directory
- * part of the name and indirecting through /proc/self/fd/<dirfd>/<basename>.
- * On systems with Linux-like /proc, this works as long as <basename> isn't too
- * long.
- *
- * On success, returns 0 and stores the short name in 'short_name' and a
- * directory file descriptor to eventually be closed in '*dirfpd'. */
-static int
-shorten_name_via_proc(const char *name, char short_name[MAX_UN_LEN + 1],
-                      int *dirfdp)
-{
-    char *dir, *base;
-    int dirfd;
-    int len;
-
-    if (!LINUX) {
-        return ENAMETOOLONG;
-    }
-
-    dir = dir_name(name);
-    dirfd = open(dir, O_DIRECTORY | O_RDONLY);
-    if (dirfd < 0) {
-        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-        int error = errno;
-
-        VLOG_WARN_RL(&rl, "%s: open failed (%s)", dir, ovs_strerror(error));
-        free(dir);
-
-        return error;
-    }
-    free(dir);
-
-    base = base_name(name);
-    len = snprintf(short_name, MAX_UN_LEN + 1,
-                   "/proc/self/fd/%d/%s", dirfd, base);
-    free(base);
-
-    if (len >= 0 && len <= MAX_UN_LEN) {
-        *dirfdp = dirfd;
-        return 0;
-    } else {
-        close(dirfd);
-        return ENAMETOOLONG;
-    }
-}
-
-/* Attempts to shorten 'name' by creating a symlink for the directory part of
- * the name and indirecting through <symlink>/<basename>.  This works on
- * systems that support symlinks, as long as <basename> isn't too long.
- *
- * On success, returns 0 and stores the short name in 'short_name' and the
- * symbolic link to eventually delete in 'linkname'. */
-static int
-shorten_name_via_symlink(const char *name, char short_name[MAX_UN_LEN + 1],
-                         char linkname[MAX_UN_LEN + 1])
-{
-    char *abs, *dir, *base;
-    const char *tmpdir;
-    int error;
-    int i;
-
-    abs = abs_file_name(NULL, name);
-    dir = dir_name(abs);
-    base = base_name(abs);
-    free(abs);
-
-    tmpdir = getenv("TMPDIR");
-    if (tmpdir == NULL) {
-        tmpdir = "/tmp";
-    }
-
-    for (i = 0; i < 1000; i++) {
-        int len;
-
-        len = snprintf(linkname, MAX_UN_LEN + 1,
-                       "%s/ovs-un-c-%"PRIu32, tmpdir, random_uint32());
-        error = (len < 0 || len > MAX_UN_LEN ? ENAMETOOLONG
-                 : symlink(dir, linkname) ? errno
-                 : 0);
-        if (error != EEXIST) {
-            break;
-        }
-    }
-
-    if (!error) {
-        int len;
-
-        fatal_signal_add_file_to_unlink(linkname);
-
-        len = snprintf(short_name, MAX_UN_LEN + 1, "%s/%s", linkname, base);
-        if (len < 0 || len > MAX_UN_LEN) {
-            fatal_signal_unlink_file_now(linkname);
-            error = ENAMETOOLONG;
-        }
-    }
-
-    if (error) {
-        linkname[0] = '\0';
-    }
-    free(dir);
-    free(base);
-
-    return error;
-}
-
-/* Stores in '*un' a sockaddr_un that refers to file 'name'.  Stores in
- * '*un_len' the size of the sockaddr_un.
- *
- * Returns 0 on success, otherwise a positive errno value.
- *
- * Uses '*dirfdp' and 'linkname' to store references to data when the caller no
- * longer needs to use 'un'.  On success, freeing these references with
- * free_sockaddr_un() is mandatory to avoid a leak; on failure, freeing them is
- * unnecessary but harmless. */
-static int
-make_sockaddr_un(const char *name, struct sockaddr_un *un, socklen_t *un_len,
-                 int *dirfdp, char linkname[MAX_UN_LEN + 1])
-{
-    char short_name[MAX_UN_LEN + 1];
-
-    *dirfdp = -1;
-    linkname[0] = '\0';
-    if (strlen(name) > MAX_UN_LEN) {
-        /* 'name' is too long to fit in a sockaddr_un.  Try a workaround. */
-        int error = shorten_name_via_proc(name, short_name, dirfdp);
-        if (error == ENAMETOOLONG) {
-            error = shorten_name_via_symlink(name, short_name, linkname);
-        }
-        if (error) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-
-            VLOG_WARN_RL(&rl, "Unix socket name %s is longer than maximum "
-                         "%"PRIuSIZE" bytes", name, MAX_UN_LEN);
-            return error;
-        }
-
-        name = short_name;
-    }
-
-    un->sun_family = AF_UNIX;
-    ovs_strzcpy(un->sun_path, name, sizeof un->sun_path);
-    *un_len = (offsetof(struct sockaddr_un, sun_path)
-                + strlen (un->sun_path) + 1);
-    return 0;
-}
-
-/* Clean up after make_sockaddr_un(). */
-static void
-free_sockaddr_un(int dirfd, const char *linkname)
-{
-    if (dirfd >= 0) {
-        close(dirfd);
-    }
-    if (linkname[0]) {
-        fatal_signal_unlink_file_now(linkname);
-    }
-}
-
-/* Binds Unix domain socket 'fd' to a file with permissions 0700. */
-static int
-bind_unix_socket(int fd, struct sockaddr *sun, socklen_t sun_len)
-{
-    /* According to _Unix Network Programming_, umask should affect bind(). */
-    mode_t old_umask = umask(0077);
-    int error = bind(fd, sun, sun_len) ? errno : 0;
-    umask(old_umask);
-    return error;
-}
-
-/* Creates a Unix domain socket in the given 'style' (either SOCK_DGRAM or
- * SOCK_STREAM) that is bound to '*bind_path' (if 'bind_path' is non-null) and
- * connected to '*connect_path' (if 'connect_path' is non-null).  If 'nonblock'
- * is true, the socket is made non-blocking.
- *
- * Returns the socket's fd if successful, otherwise a negative errno value. */
-int
-make_unix_socket(int style, bool nonblock,
-                 const char *bind_path, const char *connect_path)
-{
-    int error;
-    int fd;
-
-    fd = socket(PF_UNIX, style, 0);
-    if (fd < 0) {
-        return -errno;
-    }
-
-    /* Set nonblocking mode right away, if we want it.  This prevents blocking
-     * in connect(), if connect_path != NULL.  (In turn, that's a corner case:
-     * it will only happen if style is SOCK_STREAM or SOCK_SEQPACKET, and only
-     * if a backlog of un-accepted connections has built up in the kernel.)  */
-    if (nonblock) {
-        error = set_nonblocking(fd);
-        if (error) {
-            goto error;
-        }
-    }
-
-    if (bind_path) {
-        char linkname[MAX_UN_LEN + 1];
-        struct sockaddr_un un;
-        socklen_t un_len;
-        int dirfd;
-
-        if (unlink(bind_path) && errno != ENOENT) {
-            VLOG_WARN("unlinking \"%s\": %s\n",
-                      bind_path, ovs_strerror(errno));
-        }
-        fatal_signal_add_file_to_unlink(bind_path);
-
-        error = make_sockaddr_un(bind_path, &un, &un_len, &dirfd, linkname);
-        if (!error) {
-            error = bind_unix_socket(fd, (struct sockaddr *) &un, un_len);
-        }
-        free_sockaddr_un(dirfd, linkname);
-
-        if (error) {
-            goto error;
-        }
-    }
-
-    if (connect_path) {
-        char linkname[MAX_UN_LEN + 1];
-        struct sockaddr_un un;
-        socklen_t un_len;
-        int dirfd;
-
-        error = make_sockaddr_un(connect_path, &un, &un_len, &dirfd, linkname);
-        if (!error
-            && connect(fd, (struct sockaddr*) &un, un_len)
-            && errno != EINPROGRESS) {
-            error = errno;
-        }
-        free_sockaddr_un(dirfd, linkname);
-
-        if (error) {
-            goto error;
-        }
-    }
-
-    return fd;
-
-error:
-    if (error == EAGAIN) {
-        error = EPROTO;
-    }
-    if (bind_path) {
-        fatal_signal_unlink_file_now(bind_path);
-    }
-    close(fd);
-    return -error;
-}
-
-int
-get_unix_name_len(socklen_t sun_len)
-{
-    return (sun_len >= offsetof(struct sockaddr_un, sun_path)
-            ? sun_len - offsetof(struct sockaddr_un, sun_path)
-            : 0);
-}
-#endif /* _WIN32 */
 
 ovs_be32
 guess_netmask(ovs_be32 ip_)
@@ -778,7 +475,7 @@ inet_open_active(int style, const char *target, uint16_t default_port,
     /* The dscp bits must be configured before connect() to ensure that the
      * TOS field is set during the connection establishment.  If set after
      * connect(), the handshake SYN frames will be sent with a TOS of 0. */
-    error = set_dscp(fd, dscp);
+    error = set_dscp(fd, ss.ss_family, dscp);
     if (error) {
         VLOG_ERR("%s: set_dscp: %s", target, sock_strerror(error));
         goto exit;
@@ -871,10 +568,14 @@ inet_parse_passive(const char *target_, int default_port,
  *
  * 'dscp' becomes the DSCP bits in the IP headers for the new connection.  It
  * should be in the range [0, 63] and will automatically be shifted to the
- * appropriately place in the IP tos field. */
+ * appropriately place in the IP tos field.
+ *
+ * If 'kernel_print_port' is true and the port is dynamically assigned by
+ * the kernel, print the chosen port. */
 int
 inet_open_passive(int style, const char *target, int default_port,
-                  struct sockaddr_storage *ssp, uint8_t dscp)
+                  struct sockaddr_storage *ssp, uint8_t dscp,
+                  bool kernel_print_port)
 {
     bool kernel_chooses_port;
     struct sockaddr_storage ss;
@@ -915,7 +616,7 @@ inet_open_passive(int style, const char *target, int default_port,
     /* The dscp bits must be configured before connect() to ensure that the TOS
      * field is set during the connection establishment.  If set after
      * connect(), the handshake SYN frames will be sent with a TOS of 0. */
-    error = set_dscp(fd, dscp);
+    error = set_dscp(fd, ss.ss_family, dscp);
     if (error) {
         VLOG_ERR("%s: set_dscp: %s", target, sock_strerror(error));
         goto error;
@@ -935,7 +636,7 @@ inet_open_passive(int style, const char *target, int default_port,
             VLOG_ERR("%s: getsockname: %s", target, sock_strerror(error));
             goto error;
         }
-        if (kernel_chooses_port) {
+        if (kernel_chooses_port && kernel_print_port) {
             VLOG_INFO("%s: listening on port %"PRIu16,
                       target, ss_get_port(&ss));
         }
@@ -1056,24 +757,6 @@ get_mtime(const char *file_name, struct timespec *mtime)
         return errno;
     }
 }
-
-#ifndef _WIN32
-void
-xpipe(int fds[2])
-{
-    if (pipe(fds)) {
-        VLOG_FATAL("failed to create pipe (%s)", ovs_strerror(errno));
-    }
-}
-
-void
-xpipe_nonblocking(int fds[2])
-{
-    xpipe(fds);
-    xset_nonblocking(fds[0]);
-    xset_nonblocking(fds[1]);
-}
-#endif
 
 static int
 getsockopt_int(int fd, int level, int option, const char *optname, int *valuep)
@@ -1241,46 +924,6 @@ describe_fd(int fd)
     return ds_steal_cstr(&string);
 }
 
-#ifndef _WIN32
-/* Calls ioctl() on an AF_INET sock, passing the specified 'command' and
- * 'arg'.  Returns 0 if successful, otherwise a positive errno value. */
-int
-af_inet_ioctl(unsigned long int command, const void *arg)
-{
-    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
-    static int sock;
-
-    if (ovsthread_once_start(&once)) {
-        sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock < 0) {
-            int error = sock_errno();
-            VLOG_ERR("failed to create inet socket: %s", sock_strerror(error));
-            sock = -error;
-        }
-        ovsthread_once_done(&once);
-    }
-
-    return (sock < 0 ? -sock
-            : ioctl(sock, command, arg) == -1 ? errno
-            : 0);
-}
-
-int
-af_inet_ifreq_ioctl(const char *name, struct ifreq *ifr, unsigned long int cmd,
-                    const char *cmd_name)
-{
-    int error;
-
-    ovs_strzcpy(ifr->ifr_name, name, sizeof ifr->ifr_name);
-    error = af_inet_ioctl(cmd, ifr);
-    if (error) {
-        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
-        VLOG_DBG_RL(&rl, "%s: ioctl(%s) failed: %s", name, cmd_name,
-                    ovs_strerror(error));
-    }
-    return error;
-}
-#endif
 
 /* sockaddr_storage helpers. */
 

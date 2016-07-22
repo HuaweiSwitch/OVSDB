@@ -19,7 +19,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include "vlog.h"
+#include "util.h"
+#include "ovs-thread.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(daemon);
 
@@ -39,7 +41,7 @@ get_detach(void)
 void
 daemonize(void)
 {
-    daemonize_start();
+    daemonize_start(false);
     daemonize_complete();
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,13 +31,13 @@
 #include "rconn.h"
 #include "sat-math.h"
 #include "timeval.h"
-#include "token-bucket.h"
-#include "vconn.h"
+#include "openvswitch/token-bucket.h"
+#include "openvswitch/vconn.h"
 
 struct pinqueue {
     struct hmap_node node;      /* In struct pinsched's 'queues' hmap. */
-    ofp_port_t port_no;           /* Port number. */
-    struct list packets;        /* Contains "struct ofpbuf"s. */
+    ofp_port_t port_no;         /* Port number. */
+    struct ovs_list packets;    /* Contains "struct ofpbuf"s. */
     int n;                      /* Number of packets in 'packets'. */
 };
 
@@ -46,11 +46,8 @@ struct pinsched {
 
     /* One queue per physical port. */
     struct hmap queues;         /* Contains "struct pinqueue"s. */
-    int n_queued;               /* Sum over queues[*].n. */
+    unsigned int n_queued;      /* Sum over queues[*].n. */
     struct pinqueue *next_txq;  /* Next pinqueue check in round-robin. */
-
-    /* Transmission queue. */
-    int n_txq;                  /* No. of packets waiting in rconn for tx. */
 
     /* Statistics reporting. */
     unsigned long long n_normal;        /* # txed w/o rate limit queuing. */
@@ -186,7 +183,7 @@ get_token(struct pinsched *ps)
 
 void
 pinsched_send(struct pinsched *ps, ofp_port_t port_no,
-              struct ofpbuf *packet, struct list *txq)
+              struct ofpbuf *packet, struct ovs_list *txq)
 {
     list_init(txq);
     if (!ps) {
@@ -218,7 +215,7 @@ pinsched_send(struct pinsched *ps, ofp_port_t port_no,
 }
 
 void
-pinsched_run(struct pinsched *ps, struct list *txq)
+pinsched_run(struct pinsched *ps, struct ovs_list *txq)
 {
     list_init(txq);
     if (ps) {
@@ -256,7 +253,6 @@ pinsched_create(int rate_limit, int burst_limit)
     hmap_init(&ps->queues);
     ps->n_queued = 0;
     ps->next_txq = NULL;
-    ps->n_txq = 0;
     ps->n_normal = 0;
     ps->n_limited = 0;
     ps->n_queue_dropped = 0;
@@ -299,10 +295,17 @@ pinsched_set_limits(struct pinsched *ps, int rate_limit, int burst_limit)
     }
 }
 
-/* Returns the number of packets scheduled to be sent eventually by 'ps'.
- * Returns 0 if 'ps' is null. */
-unsigned int
-pinsched_count_txqlen(const struct pinsched *ps)
+/* Retrieves statistics for 'ps'.  The statistics will be all zero if 'ps' is
+ * null. */
+void
+pinsched_get_stats(const struct pinsched *ps, struct pinsched_stats *stats)
 {
-    return ps ? ps->n_txq : 0;
+    if (ps) {
+        stats->n_queued = ps->n_queued;
+        stats->n_normal = ps->n_normal;
+        stats->n_limited = ps->n_limited;
+        stats->n_queue_dropped = ps->n_queue_dropped;
+    } else {
+        memset(stats, 0, sizeof *stats);
+    }
 }

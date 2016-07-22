@@ -15,6 +15,7 @@ VERSION = {"1.0": 0x01,
            "1.5": 0x06}
 
 NX_VENDOR_ID = 0x00002320
+ONF_VENDOR_ID = 0x4f4e4600
 
 OFPT_VENDOR = 4
 OFPT10_STATS_REQUEST = 16
@@ -103,7 +104,7 @@ def extract_ofp_msgs(output_file_name):
         while not comment.endswith('*/'):
             get_line()
             if line.startswith('/*') or not line or line.isspace():
-                fatal("unexpected syntax within error")
+                fatal("unexpected syntax within message")
             comment += ' %s' % line.lstrip('* \t').rstrip(' \t\r\n')
         comment = comment[:-2].rstrip()
 
@@ -160,6 +161,22 @@ def extract_ofp_msgs(output_file_name):
                     hdrs = (version, OFPT10_STATS_REPLY, number, 0, 0)
                 else:
                     hdrs = (version, OFPT11_STATS_REPLY, number, 0, 0)
+            elif type_ == 'ONF':
+                hdrs = (version, OFPT_VENDOR, 0, ONF_VENDOR_ID, number)
+            elif type_ == 'ONFST' and name.endswith('_REQUEST'):
+                if version == VERSION["1.0"]:
+                    hdrs = (version, OFPT10_STATS_REQUEST, OFPST_VENDOR,
+                            ONF_VENDOR_ID, number)
+                else:
+                    hdrs = (version, OFPT11_STATS_REQUEST, OFPST_VENDOR,
+                            ONF_VENDOR_ID, number)
+            elif type_ == 'ONFST' and name.endswith('_REPLY'):
+                if version == VERSION["1.0"]:
+                    hdrs = (version, OFPT10_STATS_REPLY, OFPST_VENDOR,
+                            ONF_VENDOR_ID, number)
+                else:
+                    hdrs = (version, OFPT11_STATS_REPLY, OFPST_VENDOR,
+                            ONF_VENDOR_ID, number)
             elif type_ == 'NXT':
                 hdrs = (version, OFPT_VENDOR, 0, NX_VENDOR_ID, number)
             elif type_ == 'NXST' and name.endswith('_REQUEST'):
@@ -229,6 +246,7 @@ def extract_ofp_msgs(output_file_name):
         if re.match('enum ofptype', line):
             break
 
+    all_types = []
     while True:
         get_line()
         if re.match(r'\s*/?\*', line) or line.isspace():
@@ -262,6 +280,8 @@ def extract_ofp_msgs(output_file_name):
                 fatal("%s: already part of %s"
                       % (raw, all_raws[raw]["ofptype"]))
             all_raws[raw]["ofptype"] = ofptype
+
+        all_types.append(all_raws[raws[0]]["human_name"])
 
     input_file.close()
 
@@ -329,6 +349,12 @@ def extract_ofp_msgs(output_file_name):
                               % r["human_name"])
     output.append("};")
 
+    output.append("");
+    output.append("static const char *type_names[] = {");
+    for t in all_types:
+        output.append("    \"%s\"," % t)
+    output.append("};")
+
     if n_errors:
         sys.exit(1)
 
@@ -339,7 +365,7 @@ if __name__ == '__main__':
     if '--help' in sys.argv:
         usage()
     elif len(sys.argv) != 3:
-        sys.stderr.write("exactly one non-option arguments required; "
+        sys.stderr.write("exactly two non-option arguments required; "
                          "use --help for help\n")
         sys.exit(1)
     else:

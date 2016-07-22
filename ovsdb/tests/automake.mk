@@ -1,12 +1,25 @@
 EXTRA_DIST += \
+	$(COMMON_MACROS_AT) \
 	$(TESTSUITE_AT) \
+	$(SYSTEM_TESTSUITE_AT) \
+	$(SYSTEM_KMOD_TESTSUITE_AT) \
+	$(SYSTEM_USERSPACE_TESTSUITE_AT) \
 	$(TESTSUITE) \
+	$(SYSTEM_KMOD_TESTSUITE) \
+	$(SYSTEM_USERSPACE_TESTSUITE) \
 	tests/atlocal.in \
 	$(srcdir)/package.m4 \
-	$(srcdir)/tests/testsuite
+	$(srcdir)/tests/testsuite \
+	$(srcdir)/tests/testsuite.patch
+
+COMMON_MACROS_AT = \
+	tests/ovsdb-macros.at \
+	tests/ovs-macros.at \
+	tests/ofproto-macros.at
+
 TESTSUITE_AT = \
 	tests/testsuite.at \
-	tests/ovsdb-macros.at \
+	tests/completion.at \
 	tests/library.at \
 	tests/heap.at \
 	tests/bundle.at \
@@ -20,10 +33,12 @@ TESTSUITE_AT = \
 	tests/ofp-errors.at \
 	tests/ovs-ofctl.at \
 	tests/odp.at \
+	tests/mpls-xlate.at \
 	tests/multipath.at \
 	tests/bfd.at \
 	tests/cfm.at \
 	tests/lacp.at \
+	tests/lib.at \
 	tests/learn.at \
 	tests/vconn.at \
 	tests/file_name.at \
@@ -34,12 +49,16 @@ TESTSUITE_AT = \
 	tests/jsonrpc.at \
 	tests/jsonrpc-py.at \
 	tests/tunnel.at \
+	tests/tunnel-push-pop.at \
+	tests/tunnel-push-pop-ipv6.at \
 	tests/lockfile.at \
 	tests/reconnect.at \
 	tests/ovs-vswitchd.at \
+	tests/dpif-netdev.at \
+	tests/dpctl.at \
 	tests/ofproto-dpif.at \
+	tests/bridge.at \
 	tests/vlan-splinters.at \
-	tests/ofproto-macros.at \
 	tests/ofproto.at \
 	tests/ovsdb.at \
 	tests/ovsdb-log.at \
@@ -63,13 +82,37 @@ TESTSUITE_AT = \
 	tests/ovs-monitor-ipsec.at \
 	tests/ovs-xapi-sync.at \
 	tests/stp.at \
+	tests/rstp.at \
 	tests/interface-reconfigure.at \
 	tests/vlog.at \
-	tests/vtep-ctl.at
+	tests/vtep-ctl.at \
+	tests/auto-attach.at \
+	tests/ovn.at \
+	tests/ovn-nbctl.at \
+	tests/ovn-sbctl.at \
+	tests/ovn-controller.at \
+	tests/ovn-controller-vtep.at
+
+SYSTEM_KMOD_TESTSUITE_AT = \
+	tests/system-common-macros.at \
+	tests/system-kmod-testsuite.at \
+	tests/system-kmod-macros.at
+
+SYSTEM_USERSPACE_TESTSUITE_AT = \
+	tests/system-userspace-testsuite.at \
+	tests/system-userspace-macros.at
+
+SYSTEM_TESTSUITE_AT = \
+	tests/system-common-macros.at \
+	tests/system-traffic.at
+
 TESTSUITE = $(srcdir)/tests/testsuite
+TESTSUITE_PATCH = $(srcdir)/tests/testsuite.patch
+SYSTEM_KMOD_TESTSUITE = $(srcdir)/tests/system-kmod-testsuite
+SYSTEM_USERSPACE_TESTSUITE = $(srcdir)/tests/system-userspace-testsuite
 DISTCLEANFILES += tests/atconfig tests/atlocal
 
-AUTOTEST_PATH = utilities:vswitchd:ovsdb:vtep:tests
+AUTOTEST_PATH = utilities:vswitchd:ovsdb:vtep:tests:$(PTHREAD_WIN32_DIR_DLL):ovn/controller-vtep:ovn/northd:ovn/utilities:ovn/controller
 
 check-local: tests/atconfig tests/atlocal $(TESTSUITE)
 	$(SHELL) '$(TESTSUITE)' -C tests AUTOTEST_PATH=$(AUTOTEST_PATH) $(TESTSUITEFLAGS)
@@ -105,8 +148,8 @@ valgrind_wrappers = \
 	tests/valgrind/test-bundle \
 	tests/valgrind/test-byte-order \
 	tests/valgrind/test-classifier \
+	tests/valgrind/test-cmap \
 	tests/valgrind/test-csum \
-	tests/valgrind/test-file_name \
 	tests/valgrind/test-flows \
 	tests/valgrind/test-hash \
 	tests/valgrind/test-hindex \
@@ -117,10 +160,12 @@ valgrind_wrappers = \
 	tests/valgrind/test-lockfile \
 	tests/valgrind/test-multipath \
 	tests/valgrind/test-odp \
+	tests/valgrind/test-ofpbuf \
 	tests/valgrind/test-ovsdb \
 	tests/valgrind/test-packets \
 	tests/valgrind/test-random \
 	tests/valgrind/test-reconnect \
+	tests/valgrind/test-rstp \
 	tests/valgrind/test-sha1 \
 	tests/valgrind/test-stp \
 	tests/valgrind/test-type-props \
@@ -130,9 +175,9 @@ valgrind_wrappers = \
 
 $(valgrind_wrappers): tests/valgrind-wrapper.in
 	@test -d tests/valgrind || mkdir tests/valgrind
-	sed -e 's,[@]wrap_program[@],$@,' \
-		$(top_srcdir)/tests/valgrind-wrapper.in > $@.tmp
-	chmod +x $@.tmp
+	$(AM_V_GEN) sed -e 's,[@]wrap_program[@],$@,' \
+		$(top_srcdir)/tests/valgrind-wrapper.in > $@.tmp && \
+	chmod +x $@.tmp && \
 	mv $@.tmp $@
 CLEANFILES += $(valgrind_wrappers)
 EXTRA_DIST += tests/valgrind-wrapper.in
@@ -152,25 +197,54 @@ check-valgrind: all tests/atconfig tests/atlocal $(TESTSUITE) \
 # OFTest support.
 
 check-oftest: all
-	srcdir='$(srcdir)' $(SHELL) $(srcdir)/tests/run-oftest
+	$(AM_V_at)srcdir='$(srcdir)' $(SHELL) $(srcdir)/tests/run-oftest
 EXTRA_DIST += tests/run-oftest
 
 # Ryu support.
 check-ryu: all
-	srcdir='$(srcdir)' $(SHELL) $(srcdir)/tests/run-ryu
+	$(AM_V_at)srcdir='$(srcdir)' $(SHELL) $(srcdir)/tests/run-ryu
 EXTRA_DIST += tests/run-ryu
 
+# Run kmod tests. Assume kernel modules has been installed or linked into the kernel
+check-kernel: all tests/atconfig tests/atlocal $(SYSTEM_KMOD_TESTSUITE)
+	$(SHELL) '$(SYSTEM_KMOD_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' -d $(TESTSUITEFLAGS)
+
+# Testing the out of tree Kernel module
+check-kmod: all tests/atconfig tests/atlocal $(SYSTEM_KMOD_TESTSUITE)
+	$(MAKE) modules_install
+	modprobe -r openvswitch
+	$(MAKE) check-kernel
+
+check-system-userspace: all tests/atconfig tests/atlocal $(SYSTEM_USERSPACE_TESTSUITE)
+	$(SHELL) '$(SYSTEM_USERSPACE_TESTSUITE)' -C tests  AUTOTEST_PATH='$(AUTOTEST_PATH)' $(TESTSUITEFLAGS)
+
 clean-local:
 	test ! -f '$(TESTSUITE)' || $(SHELL) '$(TESTSUITE)' -C tests --clean
 
 AUTOTEST = $(AUTOM4TE) --language=autotest
-$(TESTSUITE): package.m4 $(TESTSUITE_AT)
-	$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
-	mv $@.tmp $@
+
+if WIN32
+$(TESTSUITE): package.m4 $(TESTSUITE_AT) $(COMMON_MACROS_AT) $(TESTSUITE_PATCH)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o testsuite.tmp $@.at
+	patch -p0 testsuite.tmp $(TESTSUITE_PATCH)
+	$(AM_V_at)mv testsuite.tmp $@
+else
+$(TESTSUITE): package.m4 $(TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
+endif
+
+$(SYSTEM_KMOD_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_KMOD_TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
+
+$(SYSTEM_USERSPACE_TESTSUITE): package.m4 $(SYSTEM_TESTSUITE_AT) $(SYSTEM_USERSPACE_TESTSUITE_AT) $(COMMON_MACROS_AT)
+	$(AM_V_GEN)$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+	$(AM_V_at)mv $@.tmp $@
 
 # The `:;' works around a Bash 3.2 bug when the output is not writeable.
 $(srcdir)/package.m4: $(top_srcdir)/configure.ac
-	:;{ \
+	$(AM_V_GEN):;{ \
 	  echo '# Signature of the current package.' && \
 	  echo 'm4_define([AT_PACKAGE_NAME],      [$(PACKAGE_NAME)])' && \
 	  echo 'm4_define([AT_PACKAGE_TARNAME],   [$(PACKAGE_TARNAME)])' && \
@@ -179,30 +253,33 @@ $(srcdir)/package.m4: $(top_srcdir)/configure.ac
 	  echo 'm4_define([AT_PACKAGE_BUGREPORT], [$(PACKAGE_BUGREPORT)])'; \
 	} >'$(srcdir)/package.m4'
 
-noinst_PROGRAMS += tests/test-controller
-MAN_ROOTS += tests/test-controller.8.in
-DISTCLEANFILES += tests/test-controller.8
-noinst_man_MANS += tests/test-controller.8
-tests_test_controller_SOURCES = tests/test-controller.c
-tests_test_controller_LDADD = lib/libopenvswitch.la
-
 noinst_PROGRAMS += tests/test-ovsdb
-tests_test_ovsdb_SOURCES = \
-	tests/test-ovsdb.c \
-	tests/idltest.c \
-	tests/idltest.h
+tests_test_ovsdb_SOURCES = tests/test-ovsdb.c
+nodist_tests_test_ovsdb_SOURCES = tests/idltest.c tests/idltest.h
 EXTRA_DIST += tests/uuidfilt.pl tests/ovsdb-monitor-sort.pl
 tests_test_ovsdb_LDADD = ovsdb/libovsdb.la lib/libopenvswitch.la
+
+noinst_PROGRAMS += tests/test-lib
+tests_test_lib_SOURCES = \
+	tests/test-lib.c
+tests_test_lib_LDADD = lib/libopenvswitch.la
 
 # idltest schema and IDL
 OVSIDL_BUILT += tests/idltest.c tests/idltest.h tests/idltest.ovsidl
 IDLTEST_IDL_FILES = tests/idltest.ovsschema tests/idltest.ann
-EXTRA_DIST += $(IDLTEST_IDL_FILES)
+EXTRA_DIST += $(IDLTEST_IDL_FILES) tests/idltest2.ovsschema
 tests/idltest.ovsidl: $(IDLTEST_IDL_FILES)
-	$(OVSDB_IDLC) -C $(srcdir) annotate $(IDLTEST_IDL_FILES) > $@.tmp
+	$(AM_V_GEN)$(OVSDB_IDLC) -C $(srcdir) annotate $(IDLTEST_IDL_FILES) > $@.tmp && \
 	mv $@.tmp $@
 
 tests/idltest.c: tests/idltest.h
+
+if DPDK_NETDEV
+noinst_PROGRAMS += tests/test-dpdkr
+tests_test_dpdkr_SOURCES = \
+	tests/dpdk/ring_client.c
+tests_test_dpdkr_LDADD = lib/libopenvswitch.la $(LIBS)
+endif
 
 noinst_PROGRAMS += tests/ovstest
 tests_ovstest_SOURCES = \
@@ -213,8 +290,8 @@ tests_ovstest_SOURCES = \
 	tests/test-bundle.c \
 	tests/test-byte-order.c \
 	tests/test-classifier.c \
+	tests/test-cmap.c \
 	tests/test-csum.c \
-	tests/test-file_name.c \
 	tests/test-flows.c \
 	tests/test-hash.c \
 	tests/test-heap.c \
@@ -227,22 +304,32 @@ tests_ovstest_SOURCES = \
 	tests/test-multipath.c \
 	tests/test-netflow.c \
 	tests/test-odp.c \
+	tests/test-ofpbuf.c \
+	tests/test-ovn.c \
 	tests/test-packets.c \
 	tests/test-random.c \
 	tests/test-reconnect.c \
+	tests/test-rstp.c \
 	tests/test-sflow.c \
 	tests/test-sha1.c \
 	tests/test-stp.c \
 	tests/test-util.c \
 	tests/test-uuid.c \
-	tests/test-vconn.c
+	tests/test-bitmap.c \
+	tests/test-vconn.c \
+	tests/test-aa.c
 
 if !WIN32
 tests_ovstest_SOURCES += \
 	tests/test-unix-socket.c
 endif
 
-tests_ovstest_LDADD = lib/libopenvswitch.la
+if LINUX
+tests_ovstest_SOURCES += \
+	tests/test-netlink-conntrack.c
+endif
+
+tests_ovstest_LDADD = lib/libopenvswitch.la ovn/lib/libovn.la
 dist_check_SCRIPTS = tests/flowgen.pl
 
 noinst_PROGRAMS += tests/test-strtok_r
@@ -257,6 +344,7 @@ CHECK_PYFILES = \
 	tests/test-daemon.py \
 	tests/test-json.py \
 	tests/test-jsonrpc.py \
+	tests/test-l7.py \
 	tests/test-ovsdb.py \
 	tests/test-reconnect.py \
 	tests/MockXenAPI.py \
@@ -278,21 +366,28 @@ TESTPKI_FILES = \
 check_DATA += $(TESTPKI_FILES)
 CLEANFILES += $(TESTPKI_FILES)
 
-tests/testpki-cacert.pem: tests/pki/stamp; cp tests/pki/switchca/cacert.pem $@
-tests/testpki-cert.pem: tests/pki/stamp; cp tests/pki/test-cert.pem $@
-tests/testpki-req.pem: tests/pki/stamp; cp tests/pki/test-req.pem $@
-tests/testpki-privkey.pem: tests/pki/stamp; cp tests/pki/test-privkey.pem $@
-tests/testpki-cert2.pem: tests/pki/stamp; cp tests/pki/test2-cert.pem $@
-tests/testpki-req2.pem: tests/pki/stamp; cp tests/pki/test2-req.pem $@
-tests/testpki-privkey2.pem: tests/pki/stamp; cp tests/pki/test2-privkey.pem $@
+tests/testpki-cacert.pem: tests/pki/stamp
+	$(AM_V_GEN)cp tests/pki/switchca/cacert.pem $@
+tests/testpki-cert.pem: tests/pki/stamp
+	$(AM_V_GEN)cp tests/pki/test-cert.pem $@
+tests/testpki-req.pem: tests/pki/stamp
+	$(AM_V_GEN)cp tests/pki/test-req.pem $@
+tests/testpki-privkey.pem: tests/pki/stamp
+	$(AM_V_GEN)cp tests/pki/test-privkey.pem $@
+tests/testpki-cert2.pem: tests/pki/stamp
+	$(AM_V_GEN)cp tests/pki/test2-cert.pem $@
+tests/testpki-req2.pem: tests/pki/stamp
+	$(AM_V_GEN)cp tests/pki/test2-req.pem $@
+tests/testpki-privkey2.pem: tests/pki/stamp
+	$(AM_V_GEN)cp tests/pki/test2-privkey.pem $@
 
 OVS_PKI = $(SHELL) $(srcdir)/utilities/ovs-pki.in --dir=tests/pki --log=tests/ovs-pki.log
 tests/pki/stamp:
-	rm -f tests/pki/stamp
-	rm -rf tests/pki
-	$(OVS_PKI) init
-	$(OVS_PKI) req+sign tests/pki/test
-	$(OVS_PKI) req+sign tests/pki/test2
+	$(AM_V_at)rm -f tests/pki/stamp
+	$(AM_V_at)rm -rf tests/pki
+	$(AM_V_GEN)$(OVS_PKI) init && \
+	$(OVS_PKI) req+sign tests/pki/test && \
+	$(OVS_PKI) req+sign tests/pki/test2 && \
 	: > tests/pki/stamp
 CLEANFILES += tests/ovs-pki.log
 

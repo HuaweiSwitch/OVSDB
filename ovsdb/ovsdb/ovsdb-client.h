@@ -5,7 +5,7 @@
 #include "uthash.h"
 
 #undef  OVSDB_DESC
-#define OVSDB_DESC()                  (1)
+#define OVSDB_DESC(name)              (1)
 
 /* ´íÎóÂë */
 #define OVSDB_OK                      (0)

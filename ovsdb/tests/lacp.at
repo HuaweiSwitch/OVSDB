@@ -5,6 +5,11 @@ m4_define([STRIP_RECIRC_ID], [[sed '
     s/Recirc-ID.*$/<del>/
 ' ]])
 
+# Strips out active slave mac address since it may change over time.
+m4_define([STRIP_ACTIVE_SLAVE_MAC], [[sed '
+    s/active slave mac.*$/<active slave mac del>/
+' ]])
+
 AT_SETUP([lacp - config])
 OVS_VSWITCHD_START([\
         add-port br0 p1 --\
@@ -12,9 +17,7 @@ OVS_VSWITCHD_START([\
         set Interface p1 type=dummy ])
 
 ovs-appctl time/stop
-ovs-appctl time/warp 100
-ovs-appctl time/warp 100
-ovs-appctl time/warp 100
+ovs-appctl time/warp 300 100
 
 AT_CHECK([ovs-appctl lacp/show], [0], [dnl
 ---- p1 ----
@@ -64,9 +67,7 @@ OVS_VSWITCHD_START([dnl
             other_config:lacp-aggregation-key=3333 ])
 
 ovs-appctl time/stop
-ovs-appctl time/warp 100
-ovs-appctl time/warp 100
-ovs-appctl time/warp 100
+ovs-appctl time/warp 300 100
 
 AT_CHECK([ovs-appctl lacp/show], [0], [stdout])
 AT_CHECK([sed -e 's/aggregation key:.*/aggregation key: <omitted>/' < stdout], [0], [dnl
@@ -123,6 +124,7 @@ bond-hash-basis: 0
 updelay: 0 ms
 downdelay: 0 ms
 lacp_status: negotiated
+active slave mac: 00:00:00:00:00:00(none)
 
 slave p1: disabled
 	may_enable: false
@@ -188,8 +190,8 @@ done
 AT_CHECK(
   [ovs-appctl lacp/show bond0
 ovs-appctl lacp/show bond1
-ovs-appctl bond/show bond0 | STRIP_RECIRC_ID
-ovs-appctl bond/show bond1 | STRIP_RECIRC_ID ], [0], [stdout])
+ovs-appctl bond/show bond0 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC
+ovs-appctl bond/show bond1 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC ], [0], [stdout])
 AT_CHECK([sed '/active slave/d' stdout], [0], [dnl
 ---- bond0 ----
 	status: active negotiated
@@ -308,7 +310,7 @@ slave p3: enabled
 	may_enable: true
 
 ])
-AT_CHECK([grep 'active slave' stdout], [0], [dnl
+AT_CHECK([grep 'active slave$' stdout], [0], [dnl
 	active slave
 	active slave
 ])
@@ -320,12 +322,12 @@ AT_CHECK([ovs-vsctl \
 -- add-port br0 null0 -- set int null0 type=patch options:peer=p2 -- set int p2 options:peer=null0 \
 -- add-port br1 null1 -- set int null1 type=patch options:peer=p0 -- set int p0 options:peer=null1])
 
-for i in `seq 0 40`; do ovs-appctl time/warp 100; done
+ovs-appctl time/warp 4100 100
 AT_CHECK(
   [ovs-appctl lacp/show bond0
 ovs-appctl lacp/show bond1
-ovs-appctl bond/show bond0 | STRIP_RECIRC_ID
-ovs-appctl bond/show bond1 | STRIP_RECIRC_ID ], [0], [dnl
+ovs-appctl bond/show bond0 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC
+ovs-appctl bond/show bond1 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC ], [0], [dnl
 ---- bond0 ----
 	status: active negotiated
 	sys_id: aa:55:aa:55:00:00
@@ -421,6 +423,7 @@ bond-hash-basis: 0
 updelay: 0 ms
 downdelay: 0 ms
 lacp_status: negotiated
+<active slave mac del>
 
 slave p0: disabled
 	may_enable: false
@@ -436,6 +439,7 @@ bond-hash-basis: 0
 updelay: 0 ms
 downdelay: 0 ms
 lacp_status: negotiated
+<active slave mac del>
 
 slave p2: disabled
 	may_enable: false
@@ -448,12 +452,12 @@ slave p3: enabled
 
 # Wait 4 more simulated seconds.  The LACP state should become
 # "defaulted" for p0 and p2.
-for i in `seq 0 40`; do ovs-appctl time/warp 100; done
+ovs-appctl time/warp 4100 100
 AT_CHECK(
   [ovs-appctl lacp/show bond0
 ovs-appctl lacp/show bond1
-ovs-appctl bond/show bond0 | STRIP_RECIRC_ID
-ovs-appctl bond/show bond1 | STRIP_RECIRC_ID ], [0], [dnl
+ovs-appctl bond/show bond0 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC
+ovs-appctl bond/show bond1 | STRIP_RECIRC_ID | STRIP_ACTIVE_SLAVE_MAC ], [0], [dnl
 ---- bond0 ----
 	status: active negotiated
 	sys_id: aa:55:aa:55:00:00
@@ -549,6 +553,7 @@ bond-hash-basis: 0
 updelay: 0 ms
 downdelay: 0 ms
 lacp_status: negotiated
+<active slave mac del>
 
 slave p0: disabled
 	may_enable: false
@@ -564,6 +569,7 @@ bond-hash-basis: 0
 updelay: 0 ms
 downdelay: 0 ms
 lacp_status: negotiated
+<active slave mac del>
 
 slave p2: disabled
 	may_enable: false

@@ -36,8 +36,8 @@ struct ovsdb_column_set;
  * ovsdb_weak_ref" structures are created for them.
  */
 struct ovsdb_weak_ref {
-    struct list src_node;       /* In src->src_refs list. */
-    struct list dst_node;       /* In destination row's dst_refs list. */
+    struct ovs_list src_node;   /* In src->src_refs list. */
+    struct ovs_list dst_node;   /* In destination row's dst_refs list. */
     struct ovsdb_row *src;      /* Source row. */
 };
 
@@ -48,8 +48,8 @@ struct ovsdb_row {
     struct ovsdb_txn_row *txn_row; /* Transaction that row is in, if any. */
 
     /* Weak references. */
-    struct list src_refs;       /* Weak references from this row. */
-    struct list dst_refs;       /* Weak references to this row. */
+    struct ovs_list src_refs;   /* Weak references from this row. */
+    struct ovs_list dst_refs;   /* Weak references to this row. */
 
     /* Number of strong refs to this row from other rows, in this table or
      * other tables, through 'uuid' columns that have a 'refTable' constraint
@@ -88,7 +88,7 @@ struct ovsdb_error *ovsdb_row_from_json(struct ovsdb_row *,
                                         const struct json *,
                                         struct ovsdb_symbol_table *,
                                         struct ovsdb_column_set *included)
-    WARN_UNUSED_RESULT;
+    OVS_WARN_UNUSED_RESULT;
 struct json *ovsdb_row_to_json(const struct ovsdb_row *,
                                const struct ovsdb_column_set *include);
 

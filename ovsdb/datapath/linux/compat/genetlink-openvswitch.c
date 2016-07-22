@@ -1,7 +1,7 @@
 #include <net/genetlink.h>
 #include <linux/version.h>
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,13,0)
+#ifndef HAVE_GENL_NOTIFY_TAKES_FAMILY
 
 #undef genl_notify
 
@@ -21,6 +21,7 @@ void rpl_genl_notify(struct rpl_genl_family *family, struct sk_buff *skb,
 	genl_notify(skb, net, portid, group, nlh, flags);
 #endif
 }
+EXPORT_SYMBOL_GPL(rpl_genl_notify);
 
 int rpl___genl_register_family(struct rpl_genl_family *f)
 {
@@ -52,4 +53,6 @@ error:
 	return err;
 
 }
+EXPORT_SYMBOL_GPL(rpl___genl_register_family);
+
 #endif /* kernel version < 3.13.0 */

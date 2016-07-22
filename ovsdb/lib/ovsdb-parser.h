@@ -1,4 +1,4 @@
-/* Copyright (c) 2009, 2010, 2011 Nicira, Inc.
+/* Copyright (c) 2009, 2010, 2011, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,18 +61,19 @@ enum ovsdb_parser_types {
 
 void ovsdb_parser_init(struct ovsdb_parser *, const struct json *,
                        const char *name, ...)
-    PRINTF_FORMAT(3, 4);
+    OVS_PRINTF_FORMAT(3, 4);
 const struct json *ovsdb_parser_member(struct ovsdb_parser *, const char *name,
                                        enum ovsdb_parser_types);
 
 void ovsdb_parser_raise_error(struct ovsdb_parser *parser,
                               const char *format, ...)
-    PRINTF_FORMAT(2, 3);
+    OVS_PRINTF_FORMAT(2, 3);
 bool ovsdb_parser_has_error(const struct ovsdb_parser *);
 struct ovsdb_error *ovsdb_parser_get_error(const struct ovsdb_parser *);
 struct ovsdb_error *ovsdb_parser_finish(struct ovsdb_parser *)
-    WARN_UNUSED_RESULT;
-void ovsdb_parser_destroy(struct ovsdb_parser *);
+    OVS_WARN_UNUSED_RESULT;
+struct ovsdb_error *ovsdb_parser_destroy(struct ovsdb_parser *)
+    OVS_WARN_UNUSED_RESULT;
 
 bool ovsdb_parser_is_id(const char *string);
 

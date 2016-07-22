@@ -12,6 +12,8 @@
 #include "windefs.h"
 #endif
 
+#include "openvswitch/types.h"
+
 typedef enum {
     SFL_DSCLASS_IFINDEX = 0,
     SFL_DSCLASS_VLAN = 1,
@@ -81,8 +83,10 @@ typedef struct _SFLSampled_header {
 typedef struct _SFLSampled_ethernet {
     u_int32_t eth_len;       /* The length of the MAC packet excluding
 				lower layer encapsulations */
-    u_int8_t src_mac[8];    /* 6 bytes + 2 pad */
-    u_int8_t dst_mac[8];
+    struct eth_addr src_mac;    /* 6 bytes */
+    u_int8_t pad1[2];           /* 2 pad */
+    struct eth_addr dst_mac;
+    u_int8_t pad2[2];
     u_int32_t eth_type;
 } SFLSampled_ethernet;
 
@@ -271,6 +275,10 @@ typedef struct _SFLExtended_vlan_tunnel {
 			    innermost. */
 } SFLExtended_vlan_tunnel;
 
+typedef struct _SFLExtended_vni {
+    uint32_t vni;            /* virtual network identifier */
+} SFLExtended_vni;
+
 enum SFLFlow_type_tag {
     /* enterprise = 0, format = ... */
     SFLFLOW_HEADER    = 1,      /* Packet headers are sampled */
@@ -289,6 +297,10 @@ enum SFLFlow_type_tag {
     SFLFLOW_EX_MPLS_FTN     = 1010,
     SFLFLOW_EX_MPLS_LDP_FEC = 1011,
     SFLFLOW_EX_VLAN_TUNNEL  = 1012,   /* VLAN stack */
+    SFLFLOW_EX_IPV4_TUNNEL_EGRESS  = 1023, /* http://sflow.org/sflow_tunnels.txt */
+    SFLFLOW_EX_IPV4_TUNNEL_INGRESS = 1024,
+    SFLFLOW_EX_VNI_EGRESS          = 1029,
+    SFLFLOW_EX_VNI_INGRESS         = 1030,
 };
 
 typedef union _SFLFlow_type {
@@ -308,6 +320,7 @@ typedef union _SFLFlow_type {
     SFLExtended_mpls_FTN mpls_ftn;
     SFLExtended_mpls_LDP_FEC mpls_ldp_fec;
     SFLExtended_vlan_tunnel vlan_tunnel;
+    SFLExtended_vni tunnel_vni;
 } SFLFlow_type;
 
 typedef struct _SFLFlow_sample_element {
@@ -386,6 +399,9 @@ typedef struct _SFLFlow_sample_expanded {
 
 /* Counter types */
 
+#define SFL_UNDEF_COUNTER(c) c=-1
+#define SFL_UNDEF_GAUGE(c) c=0
+
 /* Generic interface counters - see RFC 1573, 2233 */
 
 typedef struct _SFLIf_counters {
@@ -414,6 +430,8 @@ typedef struct _SFLIf_counters {
     u_int32_t ifPromiscuousMode;
 } SFLIf_counters;
 
+#define SFL_CTR_GENERIC_XDR_SIZE 88
+
 /* Ethernet interface counters - see RFC 2358 */
 typedef struct _SFLEthernet_counters {
     u_int32_t dot3StatsAlignmentErrors;
@@ -430,6 +448,8 @@ typedef struct _SFLEthernet_counters {
     u_int32_t dot3StatsInternalMacReceiveErrors;
     u_int32_t dot3StatsSymbolErrors;
 } SFLEthernet_counters;
+
+#define SFL_CTR_ETHERNET_XDR_SIZE 52
 
 /* Token ring counters - see RFC 1748 */
 
@@ -482,6 +502,81 @@ typedef struct _SFLVlan_counters {
     u_int32_t discards;
 } SFLVlan_counters;
 
+/* OpenFlow port */
+typedef struct {
+    u_int64_t datapath_id;
+    u_int32_t port_no;
+} SFLOpenFlowPort;
+
+#define SFL_CTR_OPENFLOWPORT_XDR_SIZE 12
+
+/* port name */
+typedef struct {
+    SFLString portName;
+} SFLPortName;
+
+#define SFL_MAX_PORTNAME_LEN 255
+
+/* LAG Port Statistics - see http://sflow.org/sflow_lag.txt */
+/* opaque = counter_data; enterprise = 0; format = 7 */
+
+typedef  union _SFLLACP_portState {
+    uint32_t all;
+    struct {
+	uint8_t actorAdmin;
+	uint8_t actorOper;
+	uint8_t partnerAdmin;
+	uint8_t partnerOper;
+    } v;
+} SFLLACP_portState;
+
+typedef struct _SFLLACP_counters {
+    struct eth_addr actorSystemID;   /* 6 bytes */
+    uint8_t pad1[2];
+    struct eth_addr partnerSystemID; /* 6 bytes */
+    uint8_t pad2[2];
+    uint32_t attachedAggID;
+    SFLLACP_portState portState;
+    uint32_t LACPDUsRx;
+    uint32_t markerPDUsRx;
+    uint32_t markerResponsePDUsRx;
+    uint32_t unknownRx;
+    uint32_t illegalRx;
+    uint32_t LACPDUsTx;
+    uint32_t markerPDUsTx;
+    uint32_t markerResponsePDUsTx;
+} SFLLACP_counters;
+
+#define SFL_CTR_LACP_XDR_SIZE 56
+
+/* Application resource counters */
+
+typedef struct _SFLAPPResources_counters {
+    uint32_t user_time;   /* in milliseconds */
+    uint32_t system_time; /* in milliseconds */
+    uint64_t mem_used;
+    uint64_t mem_max;
+    uint32_t fd_open;
+    uint32_t fd_max;
+    uint32_t conn_open;
+    uint32_t conn_max;
+} SFLAPPResources_counters;
+
+#define SFL_CTR_APP_RESOURCES_XDR_SIZE 40
+
+/* OVS datapath stats */
+
+typedef struct _SFLOVSDP_counters {
+    uint32_t n_hit;
+    uint32_t n_missed;
+    uint32_t n_lost;
+    uint32_t n_mask_hit;
+    uint32_t n_flows;
+    uint32_t n_masks;
+} SFLOVSDP_counters;
+
+#define SFL_CTR_OVSDP_XDR_SIZE 24
+
 /* Counters data */
 
 enum SFLCounters_type_tag {
@@ -490,7 +585,12 @@ enum SFLCounters_type_tag {
     SFLCOUNTERS_ETHERNET     = 2,
     SFLCOUNTERS_TOKENRING    = 3,
     SFLCOUNTERS_VG           = 4,
-    SFLCOUNTERS_VLAN         = 5
+    SFLCOUNTERS_VLAN         = 5,
+    SFLCOUNTERS_LACP         = 7,
+    SFLCOUNTERS_OPENFLOWPORT = 1004,
+    SFLCOUNTERS_PORTNAME     = 1005,
+    SFLCOUNTERS_APP_RESOURCES = 2203,
+    SFLCOUNTERS_OVSDP        = 2207
 };
 
 typedef union _SFLCounters_type {
@@ -499,6 +599,11 @@ typedef union _SFLCounters_type {
     SFLTokenring_counters tokenring;
     SFLVg_counters vg;
     SFLVlan_counters vlan;
+    SFLLACP_counters lacp;
+    SFLOpenFlowPort ofPort;
+    SFLPortName portName;
+    SFLAPPResources_counters appResources;
+    SFLOVSDP_counters ovsdp;
 } SFLCounters_type;
 
 typedef struct _SFLCounters_sample_element {

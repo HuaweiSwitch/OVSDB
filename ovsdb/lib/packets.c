@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/ip6.h>
+#include <netinet/icmp6.h>
 #include <stdlib.h>
 #include "byte-order.h"
 #include "csum.h"
@@ -27,12 +28,25 @@
 #include "flow.h"
 #include "hmap.h"
 #include "dynamic-string.h"
-#include "ofpbuf.h"
 #include "ovs-thread.h"
 #include "odp-util.h"
+#include "dp-packet.h"
 #include "unaligned.h"
 
 const struct in6_addr in6addr_exact = IN6ADDR_EXACT_INIT;
+const struct in6_addr in6addr_all_hosts = IN6ADDR_ALL_HOSTS_INIT;
+
+struct in6_addr
+flow_tnl_dst(const struct flow_tnl *tnl)
+{
+    return tnl->ip_dst ? in6_addr_mapped_ipv4(tnl->ip_dst) : tnl->ipv6_dst;
+}
+
+struct in6_addr
+flow_tnl_src(const struct flow_tnl *tnl)
+{
+    return tnl->ip_src ? in6_addr_mapped_ipv4(tnl->ip_src) : tnl->ipv6_src;
+}
 
 /* Parses 's' as a 16-digit hexadecimal number representing a datapath ID.  On
  * success stores the dpid into '*dpidp' and returns true, on failure stores 0
@@ -54,7 +68,7 @@ dpid_from_string(const char *s, uint64_t *dpidp)
  * If you change this function's behavior, please update corresponding
  * documentation in vswitch.xml at the same time. */
 bool
-eth_addr_is_reserved(const uint8_t ea[ETH_ADDR_LEN])
+eth_addr_is_reserved(const struct eth_addr ea)
 {
     struct eth_addr_node {
         struct hmap_node hmap_node;
@@ -127,12 +141,12 @@ eth_addr_is_reserved(const uint8_t ea[ETH_ADDR_LEN])
 }
 
 bool
-eth_addr_from_string(const char *s, uint8_t ea[ETH_ADDR_LEN])
+eth_addr_from_string(const char *s, struct eth_addr *ea)
 {
-    if (ovs_scan(s, ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(ea))) {
+    if (ovs_scan(s, ETH_ADDR_SCAN_FMT, ETH_ADDR_SCAN_ARGS(*ea))) {
         return true;
     } else {
-        memset(ea, 0, ETH_ADDR_LEN);
+        *ea = eth_addr_zero;
         return false;
     }
 }
@@ -144,33 +158,33 @@ eth_addr_from_string(const char *s, uint8_t ea[ETH_ADDR_LEN])
  * The returned packet has enough headroom to insert an 802.1Q VLAN header if
  * desired. */
 void
-compose_rarp(struct ofpbuf *b, const uint8_t eth_src[ETH_ADDR_LEN])
+compose_rarp(struct dp_packet *b, const struct eth_addr eth_src)
 {
     struct eth_header *eth;
     struct arp_eth_header *arp;
 
-    ofpbuf_clear(b);
-    ofpbuf_prealloc_tailroom(b, 2 + ETH_HEADER_LEN + VLAN_HEADER_LEN
+    dp_packet_clear(b);
+    dp_packet_prealloc_tailroom(b, 2 + ETH_HEADER_LEN + VLAN_HEADER_LEN
                              + ARP_ETH_HEADER_LEN);
-    ofpbuf_reserve(b, 2 + VLAN_HEADER_LEN);
-    eth = ofpbuf_put_uninit(b, sizeof *eth);
-    memcpy(eth->eth_dst, eth_addr_broadcast, ETH_ADDR_LEN);
-    memcpy(eth->eth_src, eth_src, ETH_ADDR_LEN);
+    dp_packet_reserve(b, 2 + VLAN_HEADER_LEN);
+    eth = dp_packet_put_uninit(b, sizeof *eth);
+    eth->eth_dst = eth_addr_broadcast;
+    eth->eth_src = eth_src;
     eth->eth_type = htons(ETH_TYPE_RARP);
 
-    arp = ofpbuf_put_uninit(b, sizeof *arp);
+    arp = dp_packet_put_uninit(b, sizeof *arp);
     arp->ar_hrd = htons(ARP_HRD_ETHERNET);
     arp->ar_pro = htons(ARP_PRO_IP);
     arp->ar_hln = sizeof arp->ar_sha;
     arp->ar_pln = sizeof arp->ar_spa;
     arp->ar_op = htons(ARP_OP_RARP);
-    memcpy(arp->ar_sha, eth_src, ETH_ADDR_LEN);
+    arp->ar_sha = eth_src;
     put_16aligned_be32(&arp->ar_spa, htonl(0));
-    memcpy(arp->ar_tha, eth_src, ETH_ADDR_LEN);
+    arp->ar_tha = eth_src;
     put_16aligned_be32(&arp->ar_tpa, htonl(0));
 
-    ofpbuf_set_frame(b, eth);
-    ofpbuf_set_l3(b, arp);
+    dp_packet_reset_offsets(b);
+    dp_packet_set_l3(b, arp);
 }
 
 /* Insert VLAN header according to given TCI. Packet passed must be Ethernet
@@ -178,12 +192,12 @@ compose_rarp(struct ofpbuf *b, const uint8_t eth_src[ETH_ADDR_LEN])
  *
  * Also adjusts the layer offsets accordingly. */
 void
-eth_push_vlan(struct ofpbuf *packet, ovs_be16 tpid, ovs_be16 tci)
+eth_push_vlan(struct dp_packet *packet, ovs_be16 tpid, ovs_be16 tci)
 {
     struct vlan_eth_header *veh;
 
     /* Insert new 802.1Q header. */
-    veh = ofpbuf_resize_l2(packet, VLAN_HEADER_LEN);
+    veh = dp_packet_resize_l2(packet, VLAN_HEADER_LEN);
     memmove(veh, (char *)veh + VLAN_HEADER_LEN, 2 * ETH_ADDR_LEN);
     veh->veth_type = tpid;
     veh->veth_tci = tci & htons(~VLAN_CFI);
@@ -191,44 +205,44 @@ eth_push_vlan(struct ofpbuf *packet, ovs_be16 tpid, ovs_be16 tci)
 
 /* Removes outermost VLAN header (if any is present) from 'packet'.
  *
- * 'packet->l2_5' should initially point to 'packet''s outer-most MPLS header
- * or may be NULL if there are no MPLS headers. */
+ * 'packet->l2_5' should initially point to 'packet''s outer-most VLAN header
+ * or may be NULL if there are no VLAN headers. */
 void
-eth_pop_vlan(struct ofpbuf *packet)
+eth_pop_vlan(struct dp_packet *packet)
 {
-    struct vlan_eth_header *veh = ofpbuf_l2(packet);
+    struct vlan_eth_header *veh = dp_packet_l2(packet);
 
-    if (veh && ofpbuf_size(packet) >= sizeof *veh
-        && veh->veth_type == htons(ETH_TYPE_VLAN)) {
+    if (veh && dp_packet_size(packet) >= sizeof *veh
+        && eth_type_vlan(veh->veth_type)) {
 
         memmove((char *)veh + VLAN_HEADER_LEN, veh, 2 * ETH_ADDR_LEN);
-        ofpbuf_resize_l2(packet, -VLAN_HEADER_LEN);
+        dp_packet_resize_l2(packet, -VLAN_HEADER_LEN);
     }
 }
 
 /* Set ethertype of the packet. */
 static void
-set_ethertype(struct ofpbuf *packet, ovs_be16 eth_type)
+set_ethertype(struct dp_packet *packet, ovs_be16 eth_type)
 {
-    struct eth_header *eh = ofpbuf_l2(packet);
+    struct eth_header *eh = dp_packet_l2(packet);
 
     if (!eh) {
         return;
     }
 
-    if (eh->eth_type == htons(ETH_TYPE_VLAN)) {
+    if (eth_type_vlan(eh->eth_type)) {
         ovs_be16 *p;
-        char *l2_5 = ofpbuf_l2_5(packet);
+        char *l2_5 = dp_packet_l2_5(packet);
 
         p = ALIGNED_CAST(ovs_be16 *,
-                         (l2_5 ? l2_5 : (char *)ofpbuf_l3(packet)) - 2);
+                         (l2_5 ? l2_5 : (char *)dp_packet_l3(packet)) - 2);
         *p = eth_type;
     } else {
         eh->eth_type = eth_type;
     }
 }
 
-static bool is_mpls(struct ofpbuf *packet)
+static bool is_mpls(struct dp_packet *packet)
 {
     return packet->l2_5_ofs != UINT16_MAX;
 }
@@ -281,22 +295,22 @@ set_mpls_lse_values(uint8_t ttl, uint8_t tc, uint8_t bos, ovs_be32 label)
 
 /* Set MPLS label stack entry to outermost MPLS header.*/
 void
-set_mpls_lse(struct ofpbuf *packet, ovs_be32 mpls_lse)
+set_mpls_lse(struct dp_packet *packet, ovs_be32 mpls_lse)
 {
     /* Packet type should be MPLS to set label stack entry. */
     if (is_mpls(packet)) {
-        struct mpls_hdr *mh = ofpbuf_l2_5(packet);
+        struct mpls_hdr *mh = dp_packet_l2_5(packet);
 
         /* Update mpls label stack entry. */
         put_16aligned_be32(&mh->mpls_lse, mpls_lse);
     }
 }
 
-/* Push MPLS label stack entry 'lse' onto 'packet' as the the outermost MPLS
+/* Push MPLS label stack entry 'lse' onto 'packet' as the outermost MPLS
  * header.  If 'packet' does not already have any MPLS labels, then its
  * Ethertype is changed to 'ethtype' (which must be an MPLS Ethertype). */
 void
-push_mpls(struct ofpbuf *packet, ovs_be16 ethtype, ovs_be32 lse)
+push_mpls(struct dp_packet *packet, ovs_be16 ethtype, ovs_be32 lse)
 {
     char * header;
     size_t len;
@@ -314,7 +328,7 @@ push_mpls(struct ofpbuf *packet, ovs_be16 ethtype, ovs_be32 lse)
 
     /* Push new MPLS shim header onto packet. */
     len = packet->l2_5_ofs;
-    header = ofpbuf_resize_l2_5(packet, MPLS_HLEN);
+    header = dp_packet_resize_l2_5(packet, MPLS_HLEN);
     memmove(header, header + MPLS_HLEN, len);
     memcpy(header + len, &lse, sizeof lse);
 }
@@ -324,19 +338,19 @@ push_mpls(struct ofpbuf *packet, ovs_be16 ethtype, ovs_be32 lse)
  * Ethertype to 'ethtype' (which ordinarily should not be an MPLS
  * Ethertype). */
 void
-pop_mpls(struct ofpbuf *packet, ovs_be16 ethtype)
+pop_mpls(struct dp_packet *packet, ovs_be16 ethtype)
 {
     if (is_mpls(packet)) {
-        struct mpls_hdr *mh = ofpbuf_l2_5(packet);
+        struct mpls_hdr *mh = dp_packet_l2_5(packet);
         size_t len = packet->l2_5_ofs;
 
         set_ethertype(packet, ethtype);
         if (get_16aligned_be32(&mh->mpls_lse) & htonl(MPLS_BOS_MASK)) {
-            ofpbuf_set_l2_5(packet, NULL);
+            dp_packet_set_l2_5(packet, NULL);
         }
         /* Shift the l2 header forward. */
-        memmove((char*)ofpbuf_data(packet) + MPLS_HLEN, ofpbuf_data(packet), len);
-        ofpbuf_resize_l2_5(packet, -MPLS_HLEN);
+        memmove((char*)dp_packet_data(packet) + MPLS_HLEN, dp_packet_data(packet), len);
+        dp_packet_resize_l2_5(packet, -MPLS_HLEN);
     }
 }
 
@@ -346,21 +360,21 @@ pop_mpls(struct ofpbuf *packet, ovs_be16 ethtype)
  *
  * Aligns the L3 header of '*packetp' on a 32-bit boundary. */
 const char *
-eth_from_hex(const char *hex, struct ofpbuf **packetp)
+eth_from_hex(const char *hex, struct dp_packet **packetp)
 {
-    struct ofpbuf *packet;
+    struct dp_packet *packet;
 
     /* Use 2 bytes of headroom to 32-bit align the L3 header. */
-    packet = *packetp = ofpbuf_new_with_headroom(strlen(hex) / 2, 2);
+    packet = *packetp = dp_packet_new_with_headroom(strlen(hex) / 2, 2);
 
-    if (ofpbuf_put_hex(packet, hex, NULL)[0] != '\0') {
-        ofpbuf_delete(packet);
+    if (dp_packet_put_hex(packet, hex, NULL)[0] != '\0') {
+        dp_packet_delete(packet);
         *packetp = NULL;
         return "Trailing garbage in packet data";
     }
 
-    if (ofpbuf_size(packet) < ETH_HEADER_LEN) {
-        ofpbuf_delete(packet);
+    if (dp_packet_size(packet) < ETH_HEADER_LEN) {
+        dp_packet_delete(packet);
         *packetp = NULL;
         return "Packet data too short for Ethernet";
     }
@@ -369,24 +383,12 @@ eth_from_hex(const char *hex, struct ofpbuf **packetp)
 }
 
 void
-eth_format_masked(const uint8_t eth[ETH_ADDR_LEN],
-                  const uint8_t mask[ETH_ADDR_LEN], struct ds *s)
+eth_format_masked(const struct eth_addr eth,
+                  const struct eth_addr *mask, struct ds *s)
 {
     ds_put_format(s, ETH_ADDR_FMT, ETH_ADDR_ARGS(eth));
-    if (mask && !eth_mask_is_exact(mask)) {
-        ds_put_format(s, "/"ETH_ADDR_FMT, ETH_ADDR_ARGS(mask));
-    }
-}
-
-void
-eth_addr_bitand(const uint8_t src[ETH_ADDR_LEN],
-                const uint8_t mask[ETH_ADDR_LEN],
-                uint8_t dst[ETH_ADDR_LEN])
-{
-    int i;
-
-    for (i = 0; i < ETH_ADDR_LEN; i++) {
-        dst[i] = src[i] & mask[i];
+    if (mask && !eth_mask_is_exact(*mask)) {
+        ds_put_format(s, "/"ETH_ADDR_FMT, ETH_ADDR_ARGS(*mask));
     }
 }
 
@@ -414,41 +416,88 @@ ip_format_masked(ovs_be32 ip, ovs_be32 mask, struct ds *s)
     }
 }
 
-
-/* Stores the string representation of the IPv6 address 'addr' into the
- * character array 'addr_str', which must be at least INET6_ADDRSTRLEN
- * bytes long. */
-void
-format_ipv6_addr(char *addr_str, const struct in6_addr *addr)
+/* Parses string 's', which must be an IP address with an optional netmask or
+ * CIDR prefix length.  Stores the IP address into '*ip' and the netmask into
+ * '*mask'.  (If 's' does not contain a netmask, 255.255.255.255 is
+ * assumed.)
+ *
+ * Returns NULL if successful, otherwise an error message that the caller must
+ * free(). */
+char * OVS_WARN_UNUSED_RESULT
+ip_parse_masked(const char *s, ovs_be32 *ip, ovs_be32 *mask)
 {
-    inet_ntop(AF_INET6, addr, addr_str, INET6_ADDRSTRLEN);
+    int prefix;
+    int n;
+
+    if (ovs_scan(s, IP_SCAN_FMT"/"IP_SCAN_FMT"%n",
+                 IP_SCAN_ARGS(ip), IP_SCAN_ARGS(mask), &n) && !s[n]) {
+        /* OK. */
+    } else if (ovs_scan(s, IP_SCAN_FMT"/%d%n", IP_SCAN_ARGS(ip), &prefix, &n)
+               && !s[n]) {
+        if (prefix <= 0 || prefix > 32) {
+            return xasprintf("%s: network prefix bits not between 0 and "
+                             "32", s);
+        }
+        *mask = be32_prefix_mask(prefix);
+    } else if (ovs_scan(s, IP_SCAN_FMT"%n", IP_SCAN_ARGS(ip), &n) && !s[n]) {
+        *mask = OVS_BE32_MAX;
+    } else {
+        return xasprintf("%s: invalid IP address", s);
+    }
+    return NULL;
 }
 
 void
-print_ipv6_addr(struct ds *string, const struct in6_addr *addr)
+ipv6_format_addr(const struct in6_addr *addr, struct ds *s)
 {
     char *dst;
 
-    ds_reserve(string, string->length + INET6_ADDRSTRLEN);
+    ds_reserve(s, s->length + INET6_ADDRSTRLEN);
 
-    dst = string->string + string->length;
-    format_ipv6_addr(dst, addr);
-    string->length += strlen(dst);
+    dst = s->string + s->length;
+    inet_ntop(AF_INET6, addr, dst, INET6_ADDRSTRLEN);
+    s->length += strlen(dst);
 }
 
 void
-print_ipv6_masked(struct ds *s, const struct in6_addr *addr,
-                  const struct in6_addr *mask)
+ipv6_format_mapped(const struct in6_addr *addr, struct ds *s)
 {
-    print_ipv6_addr(s, addr);
+    if (IN6_IS_ADDR_V4MAPPED(addr)) {
+        ds_put_format(s, IP_FMT, addr->s6_addr[12], addr->s6_addr[13],
+                                 addr->s6_addr[14], addr->s6_addr[15]);
+    } else {
+        ipv6_format_addr(addr, s);
+    }
+}
+
+void
+ipv6_format_masked(const struct in6_addr *addr, const struct in6_addr *mask,
+                   struct ds *s)
+{
+    ipv6_format_addr(addr, s);
     if (mask && !ipv6_mask_is_exact(mask)) {
         if (ipv6_is_cidr(mask)) {
             int cidr_bits = ipv6_count_cidr_bits(mask);
             ds_put_format(s, "/%d", cidr_bits);
         } else {
             ds_put_char(s, '/');
-            print_ipv6_addr(s, mask);
+            ipv6_format_addr(mask, s);
         }
+    }
+}
+
+/* Stores the string representation of the IPv6 address 'addr' into the
+ * character array 'addr_str', which must be at least INET6_ADDRSTRLEN
+ * bytes long. If addr is IPv4-mapped, store an IPv4 dotted-decimal string. */
+const char *
+ipv6_string_mapped(char *addr_str, const struct in6_addr *addr)
+{
+    ovs_be32 ip;
+    ip = in6_addr_get_mapped_ipv4(addr);
+    if (ip) {
+        return inet_ntop(AF_INET, &ip, addr_str, INET6_ADDRSTRLEN);
+    } else {
+        return inet_ntop(AF_INET6, addr, addr_str, INET6_ADDRSTRLEN);
     }
 }
 
@@ -548,6 +597,43 @@ ipv6_is_cidr(const struct in6_addr *netmask)
     return true;
 }
 
+/* Parses string 's', which must be an IPv6 address with an optional
+ * CIDR prefix length.  Stores the IP address into '*ipv6' and the CIDR
+ * prefix in '*prefix'.  (If 's' does not contain a CIDR length, all-ones
+ * is assumed.)
+ *
+ * Returns NULL if successful, otherwise an error message that the caller must
+ * free(). */
+char * OVS_WARN_UNUSED_RESULT
+ipv6_parse_masked(const char *s, struct in6_addr *ipv6, struct in6_addr *mask)
+{
+    char ipv6_s[IPV6_SCAN_LEN + 1];
+    char mask_s[IPV6_SCAN_LEN + 1];
+    int prefix;
+    int n;
+
+    if (ovs_scan(s, IPV6_SCAN_FMT"/"IPV6_SCAN_FMT"%n", ipv6_s, mask_s, &n)
+        && inet_pton(AF_INET6, ipv6_s, ipv6) == 1
+        && inet_pton(AF_INET6, mask_s, mask) == 1
+        && !s[n]) {
+        /* OK. */
+    } else if (ovs_scan(s, IPV6_SCAN_FMT"/%d%n", ipv6_s, &prefix, &n)
+        && inet_pton(AF_INET6, ipv6_s, ipv6) == 1
+        && !s[n]) {
+        if (prefix <= 0 || prefix > 128) {
+            return xasprintf("%s: prefix bits not between 0 and 128", s);
+        }
+        *mask = ipv6_create_mask(prefix);
+    } else if (ovs_scan(s, IPV6_SCAN_FMT"%n", ipv6_s, &n)
+               && inet_pton(AF_INET6, ipv6_s, ipv6) == 1
+               && !s[n]) {
+        *mask = in6addr_exact;
+    } else {
+        return xasprintf("%s: invalid IP address", s);
+    }
+    return NULL;
+}
+
 /* Populates 'b' with an Ethernet II packet headed with the given 'eth_dst',
  * 'eth_src' and 'eth_type' parameters.  A payload of 'size' bytes is allocated
  * in 'b' and returned.  This payload may be populated with appropriate
@@ -558,46 +644,46 @@ ipv6_is_cidr(const struct in6_addr *netmask)
  * The returned packet has enough headroom to insert an 802.1Q VLAN header if
  * desired. */
 void *
-eth_compose(struct ofpbuf *b, const uint8_t eth_dst[ETH_ADDR_LEN],
-            const uint8_t eth_src[ETH_ADDR_LEN], uint16_t eth_type,
+eth_compose(struct dp_packet *b, const struct eth_addr eth_dst,
+            const struct eth_addr eth_src, uint16_t eth_type,
             size_t size)
 {
     void *data;
     struct eth_header *eth;
 
-    ofpbuf_clear(b);
+    dp_packet_clear(b);
 
     /* The magic 2 here ensures that the L3 header (when it is added later)
      * will be 32-bit aligned. */
-    ofpbuf_prealloc_tailroom(b, 2 + ETH_HEADER_LEN + VLAN_HEADER_LEN + size);
-    ofpbuf_reserve(b, 2 + VLAN_HEADER_LEN);
-    eth = ofpbuf_put_uninit(b, ETH_HEADER_LEN);
-    data = ofpbuf_put_uninit(b, size);
+    dp_packet_prealloc_tailroom(b, 2 + ETH_HEADER_LEN + VLAN_HEADER_LEN + size);
+    dp_packet_reserve(b, 2 + VLAN_HEADER_LEN);
+    eth = dp_packet_put_uninit(b, ETH_HEADER_LEN);
+    data = dp_packet_put_uninit(b, size);
 
-    memcpy(eth->eth_dst, eth_dst, ETH_ADDR_LEN);
-    memcpy(eth->eth_src, eth_src, ETH_ADDR_LEN);
+    eth->eth_dst = eth_dst;
+    eth->eth_src = eth_src;
     eth->eth_type = htons(eth_type);
 
-    ofpbuf_set_frame(b, eth);
-    ofpbuf_set_l3(b, data);
+    dp_packet_reset_offsets(b);
+    dp_packet_set_l3(b, data);
 
     return data;
 }
 
 static void
-packet_set_ipv4_addr(struct ofpbuf *packet,
+packet_set_ipv4_addr(struct dp_packet *packet,
                      ovs_16aligned_be32 *addr, ovs_be32 new_addr)
 {
-    struct ip_header *nh = ofpbuf_l3(packet);
+    struct ip_header *nh = dp_packet_l3(packet);
     ovs_be32 old_addr = get_16aligned_be32(addr);
-    size_t l4_size = ofpbuf_l4_size(packet);
+    size_t l4_size = dp_packet_l4_size(packet);
 
     if (nh->ip_proto == IPPROTO_TCP && l4_size >= TCP_HEADER_LEN) {
-        struct tcp_header *th = ofpbuf_l4(packet);
+        struct tcp_header *th = dp_packet_l4(packet);
 
         th->tcp_csum = recalc_csum32(th->tcp_csum, old_addr, new_addr);
     } else if (nh->ip_proto == IPPROTO_UDP && l4_size >= UDP_HEADER_LEN ) {
-        struct udp_header *uh = ofpbuf_l4(packet);
+        struct udp_header *uh = dp_packet_l4(packet);
 
         if (uh->udp_csum) {
             uh->udp_csum = recalc_csum32(uh->udp_csum, old_addr, new_addr);
@@ -615,13 +701,13 @@ packet_set_ipv4_addr(struct ofpbuf *packet,
  *
  * This function assumes that L3 and L4 offsets are set in the packet. */
 static bool
-packet_rh_present(struct ofpbuf *packet)
+packet_rh_present(struct dp_packet *packet)
 {
     const struct ovs_16aligned_ip6_hdr *nh;
     int nexthdr;
     size_t len;
     size_t remaining;
-    uint8_t *data = ofpbuf_l3(packet);
+    uint8_t *data = dp_packet_l3(packet);
 
     remaining = packet->l4_ofs - packet->l3_ofs;
 
@@ -696,17 +782,17 @@ packet_rh_present(struct ofpbuf *packet)
 }
 
 static void
-packet_update_csum128(struct ofpbuf *packet, uint8_t proto,
+packet_update_csum128(struct dp_packet *packet, uint8_t proto,
                      ovs_16aligned_be32 addr[4], const ovs_be32 new_addr[4])
 {
-    size_t l4_size = ofpbuf_l4_size(packet);
+    size_t l4_size = dp_packet_l4_size(packet);
 
     if (proto == IPPROTO_TCP && l4_size >= TCP_HEADER_LEN) {
-        struct tcp_header *th = ofpbuf_l4(packet);
+        struct tcp_header *th = dp_packet_l4(packet);
 
         th->tcp_csum = recalc_csum128(th->tcp_csum, addr, new_addr);
     } else if (proto == IPPROTO_UDP && l4_size >= UDP_HEADER_LEN) {
-        struct udp_header *uh = ofpbuf_l4(packet);
+        struct udp_header *uh = dp_packet_l4(packet);
 
         if (uh->udp_csum) {
             uh->udp_csum = recalc_csum128(uh->udp_csum, addr, new_addr);
@@ -714,11 +800,16 @@ packet_update_csum128(struct ofpbuf *packet, uint8_t proto,
                 uh->udp_csum = htons(0xffff);
             }
         }
+    } else if (proto == IPPROTO_ICMPV6 &&
+               l4_size >= sizeof(struct icmp6_header)) {
+        struct icmp6_header *icmp = dp_packet_l4(packet);
+
+        icmp->icmp6_cksum = recalc_csum128(icmp->icmp6_cksum, addr, new_addr);
     }
 }
 
 static void
-packet_set_ipv6_addr(struct ofpbuf *packet, uint8_t proto,
+packet_set_ipv6_addr(struct dp_packet *packet, uint8_t proto,
                      ovs_16aligned_be32 addr[4], const ovs_be32 new_addr[4],
                      bool recalculate_csum)
 {
@@ -749,10 +840,10 @@ packet_set_ipv6_tc(ovs_16aligned_be32 *flow_label, uint8_t tc)
  * 'packet' must contain a valid IPv4 packet with correctly populated l[347]
  * markers. */
 void
-packet_set_ipv4(struct ofpbuf *packet, ovs_be32 src, ovs_be32 dst,
+packet_set_ipv4(struct dp_packet *packet, ovs_be32 src, ovs_be32 dst,
                 uint8_t tos, uint8_t ttl)
 {
-    struct ip_header *nh = ofpbuf_l3(packet);
+    struct ip_header *nh = dp_packet_l3(packet);
 
     if (get_16aligned_be32(&nh->ip_src) != src) {
         packet_set_ipv4_addr(packet, &nh->ip_src, src);
@@ -784,11 +875,11 @@ packet_set_ipv4(struct ofpbuf *packet, ovs_be32 src, ovs_be32 dst,
  * appropriate. 'packet' must contain a valid IPv6 packet with correctly
  * populated l[34] offsets. */
 void
-packet_set_ipv6(struct ofpbuf *packet, uint8_t proto, const ovs_be32 src[4],
+packet_set_ipv6(struct dp_packet *packet, uint8_t proto, const ovs_be32 src[4],
                 const ovs_be32 dst[4], uint8_t key_tc, ovs_be32 key_fl,
                 uint8_t key_hl)
 {
-    struct ovs_16aligned_ip6_hdr *nh = ofpbuf_l3(packet);
+    struct ovs_16aligned_ip6_hdr *nh = dp_packet_l3(packet);
 
     if (memcmp(&nh->ip6_src, src, sizeof(ovs_be32[4]))) {
         packet_set_ipv6_addr(packet, proto, nh->ip6_src.be32, src, true);
@@ -819,9 +910,9 @@ packet_set_port(ovs_be16 *port, ovs_be16 new_port, ovs_be16 *csum)
  * the TCP header contained in 'packet'.  'packet' must be a valid TCP packet
  * with its l4 offset properly populated. */
 void
-packet_set_tcp_port(struct ofpbuf *packet, ovs_be16 src, ovs_be16 dst)
+packet_set_tcp_port(struct dp_packet *packet, ovs_be16 src, ovs_be16 dst)
 {
-    struct tcp_header *th = ofpbuf_l4(packet);
+    struct tcp_header *th = dp_packet_l4(packet);
 
     packet_set_port(&th->tcp_src, src, &th->tcp_csum);
     packet_set_port(&th->tcp_dst, dst, &th->tcp_csum);
@@ -831,9 +922,9 @@ packet_set_tcp_port(struct ofpbuf *packet, ovs_be16 src, ovs_be16 dst)
  * the UDP header contained in 'packet'.  'packet' must be a valid UDP packet
  * with its l4 offset properly populated. */
 void
-packet_set_udp_port(struct ofpbuf *packet, ovs_be16 src, ovs_be16 dst)
+packet_set_udp_port(struct dp_packet *packet, ovs_be16 src, ovs_be16 dst)
 {
-    struct udp_header *uh = ofpbuf_l4(packet);
+    struct udp_header *uh = dp_packet_l4(packet);
 
     if (uh->udp_csum) {
         packet_set_port(&uh->udp_src, src, &uh->udp_csum);
@@ -852,11 +943,11 @@ packet_set_udp_port(struct ofpbuf *packet, ovs_be16 src, ovs_be16 dst)
  * the SCTP header contained in 'packet'.  'packet' must be a valid SCTP packet
  * with its l4 offset properly populated. */
 void
-packet_set_sctp_port(struct ofpbuf *packet, ovs_be16 src, ovs_be16 dst)
+packet_set_sctp_port(struct dp_packet *packet, ovs_be16 src, ovs_be16 dst)
 {
-    struct sctp_header *sh = ofpbuf_l4(packet);
+    struct sctp_header *sh = dp_packet_l4(packet);
     ovs_be32 old_csum, old_correct_csum, new_csum;
-    uint16_t tp_len = ofpbuf_l4_size(packet);
+    uint16_t tp_len = dp_packet_l4_size(packet);
 
     old_csum = get_16aligned_be32(&sh->sctp_csum);
     put_16aligned_be32(&sh->sctp_csum, 0);
@@ -867,6 +958,75 @@ packet_set_sctp_port(struct ofpbuf *packet, ovs_be16 src, ovs_be16 dst)
 
     new_csum = crc32c((void *)sh, tp_len);
     put_16aligned_be32(&sh->sctp_csum, old_csum ^ old_correct_csum ^ new_csum);
+}
+
+/* Sets the ICMP type and code of the ICMP header contained in 'packet'.
+ * 'packet' must be a valid ICMP packet with its l4 offset properly
+ * populated. */
+void
+packet_set_icmp(struct dp_packet *packet, uint8_t type, uint8_t code)
+{
+    struct icmp_header *ih = dp_packet_l4(packet);
+    ovs_be16 orig_tc = htons(ih->icmp_type << 8 | ih->icmp_code);
+    ovs_be16 new_tc = htons(type << 8 | code);
+
+    if (orig_tc != new_tc) {
+        ih->icmp_type = type;
+        ih->icmp_code = code;
+
+        ih->icmp_csum = recalc_csum16(ih->icmp_csum, orig_tc, new_tc);
+    }
+}
+
+void
+packet_set_nd(struct dp_packet *packet, const ovs_be32 target[4],
+              const struct eth_addr sll, const struct eth_addr tll) {
+    struct ovs_nd_msg *ns;
+    struct ovs_nd_opt *nd_opt;
+    int bytes_remain = dp_packet_l4_size(packet);
+
+    if (OVS_UNLIKELY(bytes_remain < sizeof(*ns))) {
+        return;
+    }
+
+    ns = dp_packet_l4(packet);
+    nd_opt = &ns->options[0];
+    bytes_remain -= sizeof(*ns);
+
+    if (memcmp(&ns->target, target, sizeof(ovs_be32[4]))) {
+        packet_set_ipv6_addr(packet, IPPROTO_ICMPV6,
+                             ns->target.be32,
+                             target, true);
+    }
+
+    while (bytes_remain >= ND_OPT_LEN && nd_opt->nd_opt_len != 0) {
+        if (nd_opt->nd_opt_type == ND_OPT_SOURCE_LINKADDR
+            && nd_opt->nd_opt_len == 1) {
+            if (!eth_addr_equals(nd_opt->nd_opt_mac, sll)) {
+                ovs_be16 *csum = &(ns->icmph.icmp6_cksum);
+
+                *csum = recalc_csum48(*csum, nd_opt->nd_opt_mac, sll);
+                nd_opt->nd_opt_mac = sll;
+            }
+
+            /* A packet can only contain one SLL or TLL option */
+            break;
+        } else if (nd_opt->nd_opt_type == ND_OPT_TARGET_LINKADDR
+                   && nd_opt->nd_opt_len == 1) {
+            if (!eth_addr_equals(nd_opt->nd_opt_mac, tll)) {
+                ovs_be16 *csum = &(ns->icmph.icmp6_cksum);
+
+                *csum = recalc_csum48(*csum, nd_opt->nd_opt_mac, tll);
+                nd_opt->nd_opt_mac = tll;
+            }
+
+            /* A packet can only contain one SLL or TLL option */
+            break;
+        }
+
+        nd_opt += nd_opt->nd_opt_len;
+        bytes_remain -= nd_opt->nd_opt_len * ND_OPT_LEN;
+    }
 }
 
 const char *
@@ -950,3 +1110,112 @@ packet_format_tcp_flags(struct ds *s, uint16_t tcp_flags)
         ds_put_cstr(s, "[800]");
     }
 }
+
+#define ARP_PACKET_SIZE  (2 + ETH_HEADER_LEN + VLAN_HEADER_LEN + \
+                          ARP_ETH_HEADER_LEN)
+
+/* Clears 'b' and replaces its contents by an ARP frame with the specified
+ * 'arp_op', 'arp_sha', 'arp_tha', 'arp_spa', and 'arp_tpa'.  The outer
+ * Ethernet frame is initialized with Ethernet source 'arp_sha' and destination
+ * 'arp_tha', except that destination ff:ff:ff:ff:ff:ff is used instead if
+ * 'broadcast' is true. */
+void
+compose_arp(struct dp_packet *b, uint16_t arp_op,
+            const struct eth_addr arp_sha, const struct eth_addr arp_tha,
+            bool broadcast, ovs_be32 arp_spa, ovs_be32 arp_tpa)
+{
+    struct eth_header *eth;
+    struct arp_eth_header *arp;
+
+    dp_packet_clear(b);
+    dp_packet_prealloc_tailroom(b, ARP_PACKET_SIZE);
+    dp_packet_reserve(b, 2 + VLAN_HEADER_LEN);
+
+    eth = dp_packet_put_uninit(b, sizeof *eth);
+    eth->eth_dst = broadcast ? eth_addr_broadcast : arp_tha;
+    eth->eth_src = arp_sha;
+    eth->eth_type = htons(ETH_TYPE_ARP);
+
+    arp = dp_packet_put_uninit(b, sizeof *arp);
+    arp->ar_hrd = htons(ARP_HRD_ETHERNET);
+    arp->ar_pro = htons(ARP_PRO_IP);
+    arp->ar_hln = sizeof arp->ar_sha;
+    arp->ar_pln = sizeof arp->ar_spa;
+    arp->ar_op = htons(arp_op);
+    arp->ar_sha = arp_sha;
+    arp->ar_tha = arp_tha;
+
+    put_16aligned_be32(&arp->ar_spa, arp_spa);
+    put_16aligned_be32(&arp->ar_tpa, arp_tpa);
+
+    dp_packet_reset_offsets(b);
+    dp_packet_set_l3(b, arp);
+}
+
+void
+compose_nd(struct dp_packet *b, const struct eth_addr eth_src,
+           struct in6_addr * ipv6_src, struct in6_addr * ipv6_dst)
+{
+    struct in6_addr sn_addr;
+    struct eth_addr eth_dst;
+    struct ovs_nd_msg *ns;
+    struct ovs_nd_opt *nd_opt;
+
+    in6_addr_solicited_node(&sn_addr, ipv6_dst);
+    ipv6_multicast_to_ethernet(&eth_dst, &sn_addr);
+
+    eth_compose(b, eth_dst, eth_src, ETH_TYPE_IPV6,
+                IPV6_HEADER_LEN + ICMP6_HEADER_LEN + ND_OPT_LEN);
+    packet_set_ipv6(b, IPPROTO_ICMPV6,
+                    ALIGNED_CAST(ovs_be32 *, ipv6_src->s6_addr),
+                    ALIGNED_CAST(ovs_be32 *, sn_addr.s6_addr),
+                    0, 0, 255);
+
+    ns = dp_packet_l4(b);
+    nd_opt = &ns->options[0];
+
+    ns->icmph.icmp6_type = ND_NEIGHBOR_SOLICIT;
+    ns->icmph.icmp6_code = 0;
+
+    nd_opt->nd_opt_type = ND_OPT_SOURCE_LINKADDR;
+    packet_set_nd(b, ALIGNED_CAST(ovs_be32 *, ipv6_dst->s6_addr),
+                  eth_src, eth_addr_zero);
+}
+
+uint32_t
+packet_csum_pseudoheader(const struct ip_header *ip)
+{
+    uint32_t partial = 0;
+
+    partial = csum_add32(partial, get_16aligned_be32(&ip->ip_src));
+    partial = csum_add32(partial, get_16aligned_be32(&ip->ip_dst));
+    partial = csum_add16(partial, htons(ip->ip_proto));
+    partial = csum_add16(partial, htons(ntohs(ip->ip_tot_len) -
+                                        IP_IHL(ip->ip_ihl_ver) * 4));
+
+    return partial;
+}
+
+#ifndef __CHECKER__
+uint32_t
+packet_csum_pseudoheader6(const struct ovs_16aligned_ip6_hdr *ip6)
+{
+    uint32_t partial = 0;
+
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_src.be32[0])));
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_src.be32[1])));
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_src.be32[2])));
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_src.be32[3])));
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_dst.be32[0])));
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_dst.be32[1])));
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_dst.be32[2])));
+    partial = csum_add32(partial, get_16aligned_be32(&(ip6->ip6_dst.be32[3])));
+
+    partial = csum_add16(partial, 0);
+    partial = csum_add16(partial, ip6->ip6_plen);
+    partial = csum_add16(partial, 0);
+    partial = csum_add16(partial, ip6->ip6_nxt);
+
+    return partial;
+}
+#endif

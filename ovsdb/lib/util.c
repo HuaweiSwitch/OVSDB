@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,8 @@
 #include "coverage.h"
 #include "ovs-rcu.h"
 #include "ovs-thread.h"
-#include "vlog.h"
+#include "socket-util.h"
+#include "openvswitch/vlog.h"
 #ifdef HAVE_PTHREAD_SET_NAME_NP
 #include <pthread_np.h>
 #endif
@@ -447,18 +448,19 @@ ovs_strerror(int error)
  *
  * The 'date' and 'time' arguments should likely be called with
  * "__DATE__" and "__TIME__" to use the time the binary was built.
- * Alternatively, the "set_program_name" macro may be called to do this
+ * Alternatively, the "ovs_set_program_name" macro may be called to do this
  * automatically.
  */
 void
-set_program_name__(const char *argv0, const char *version, const char *date,
-                   const char *time)
+ovs_set_program_name__(const char *argv0, const char *version, const char *date,
+                       const char *time)
 {
     char *basename;
 #ifdef _WIN32
     size_t max_len = strlen(argv0) + 1;
 
     SetErrorMode(GetErrorMode() | SEM_NOGPFAULTERRORBOX);
+    _set_output_format(_TWO_DIGIT_EXPONENT);
 
     basename = xmalloc(max_len);
     _splitpath_s(argv0, NULL, 0, NULL, 0, basename, max_len, NULL, 0);
@@ -469,9 +471,15 @@ set_program_name__(const char *argv0, const char *version, const char *date,
 
     assert_single_threaded();
     free(program_name);
+    /* Remove libtool prefix, if it is there */
+    if (strncmp(basename, "lt-", 3) == 0) {
+        char *tmp_name = basename;
+        basename = xstrdup(basename + 3);
+        free(tmp_name);
+    }
     program_name = basename;
-    free(program_version);
 
+    free(program_version);
     if (!strcmp(version, VERSION)) {
         program_version = xasprintf("%s (Open vSwitch) "VERSION"\n"
                                     "Compiled %s %s\n",
@@ -492,24 +500,13 @@ get_subprogram_name(void)
     return name ? name : "";
 }
 
-/* Sets the formatted value of 'format' as the name of the currently running
- * thread or process.  (This appears in log messages and may also be visible in
- * system process listings and debuggers.) */
+/* Sets 'subprogram_name' as the name of the currently running thread or
+ * process.  (This appears in log messages and may also be visible in system
+ * process listings and debuggers.) */
 void
-set_subprogram_name(const char *format, ...)
+set_subprogram_name(const char *subprogram_name)
 {
-    char *pname;
-
-    if (format) {
-        va_list args;
-
-        va_start(args, format);
-        pname = xvasprintf(format, args);
-        va_end(args);
-    } else {
-        pname = xstrdup(program_name);
-    }
-
+    char *pname = xstrdup(subprogram_name ? subprogram_name : program_name);
     free(subprogram_name_set(pname));
 
 #if HAVE_GLIBC_PTHREAD_SETNAME_NP
@@ -525,9 +522,18 @@ set_subprogram_name(const char *format, ...)
  * caller must not modify or free the returned string.
  */
 const char *
-get_program_version(void)
+ovs_get_program_version(void)
 {
     return program_version;
+}
+
+/* Returns a pointer to a string describing the program name.  The
+ * caller must not modify or free the returned string.
+ */
+const char *
+ovs_get_program_name(void)
+{
+    return program_name;
 }
 
 /* Print the version information for the program.  */
@@ -634,11 +640,11 @@ str_to_uint(const char *s, int base, unsigned int *u)
     long long ll;
     bool ok = str_to_llong(s, base, &ll);
     if (!ok || ll < 0 || ll > UINT_MAX) {
-	*u = 0;
-	return false;
+        *u = 0;
+        return false;
     } else {
-	*u = ll;
-	return true;
+        *u = ll;
+        return true;
     }
 }
 
@@ -699,30 +705,107 @@ hexit_value(int c)
 }
 
 /* Returns the integer value of the 'n' hexadecimal digits starting at 's', or
- * UINT_MAX if one of those "digits" is not really a hex digit.  If 'ok' is
- * nonnull, '*ok' is set to true if the conversion succeeds or to false if a
- * non-hex digit is detected. */
-unsigned int
+ * UINTMAX_MAX if one of those "digits" is not really a hex digit.  Sets '*ok'
+ * to true if the conversion succeeds or to false if a non-hex digit is
+ * detected. */
+uintmax_t
 hexits_value(const char *s, size_t n, bool *ok)
 {
-    unsigned int value;
+    uintmax_t value;
     size_t i;
 
     value = 0;
     for (i = 0; i < n; i++) {
         int hexit = hexit_value(s[i]);
         if (hexit < 0) {
-            if (ok) {
-                *ok = false;
-            }
-            return UINT_MAX;
+            *ok = false;
+            return UINTMAX_MAX;
         }
         value = (value << 4) + hexit;
     }
-    if (ok) {
-        *ok = true;
-    }
+    *ok = true;
     return value;
+}
+
+/* Parses the string in 's' as an integer in either hex or decimal format and
+ * puts the result right justified in the array 'valuep' that is 'field_width'
+ * big. If the string is in hex format, the value may be arbitrarily large;
+ * integers are limited to 64-bit values. (The rationale is that decimal is
+ * likely to represent a number and 64 bits is a reasonable maximum whereas
+ * hex could either be a number or a byte string.)
+ *
+ * On return 'tail' points to the first character in the string that was
+ * not parsed as part of the value. ERANGE is returned if the value is too
+ * large to fit in the given field. */
+int
+parse_int_string(const char *s, uint8_t *valuep, int field_width, char **tail)
+{
+    unsigned long long int integer;
+    int i;
+
+    if (!strncmp(s, "0x", 2) || !strncmp(s, "0X", 2)) {
+        uint8_t *hexit_str;
+        int len = 0;
+        int val_idx;
+        int err = 0;
+
+        s += 2;
+        hexit_str = xmalloc(field_width * 2);
+
+        for (;;) {
+            uint8_t hexit;
+            bool ok;
+
+            s += strspn(s, " \t\r\n");
+            hexit = hexits_value(s, 1, &ok);
+            if (!ok) {
+                *tail = CONST_CAST(char *, s);
+                break;
+            }
+
+            if (hexit != 0 || len) {
+                if (DIV_ROUND_UP(len + 1, 2) > field_width) {
+                    err = ERANGE;
+                    goto free;
+                }
+
+                hexit_str[len] = hexit;
+                len++;
+            }
+            s++;
+        }
+
+        val_idx = field_width;
+        for (i = len - 1; i >= 0; i -= 2) {
+            val_idx--;
+            valuep[val_idx] = hexit_str[i];
+            if (i > 0) {
+                valuep[val_idx] += hexit_str[i - 1] << 4;
+            }
+        }
+
+        memset(valuep, 0, val_idx);
+
+free:
+        free(hexit_str);
+        return err;
+    }
+
+    errno = 0;
+    integer = strtoull(s, tail, 0);
+    if (errno) {
+        return errno;
+    }
+
+    for (i = field_width - 1; i >= 0; i--) {
+        valuep[i] = integer;
+        integer >>= 8;
+    }
+    if (integer) {
+        return ERANGE;
+    }
+
+    return 0;
 }
 
 /* Returns the current working directory as a malloc()'d string, or a null
@@ -768,6 +851,7 @@ all_slashes_name(const char *s)
                    : ".");
 }
 
+#ifndef _WIN32
 /* Returns the directory name portion of 'file_name' as a malloc()'d string,
  * similar to the POSIX dirname() function but thread-safe. */
 char *
@@ -809,6 +893,7 @@ base_name(const char *file_name)
 
     return xmemdup0(file_name + start, end - start);
 }
+#endif /* _WIN32 */
 
 /* If 'file_name' starts with '/', returns a copy of 'file_name'.  Otherwise,
  * returns an absolute path to 'file_name' considering it relative to 'dir',
@@ -945,7 +1030,7 @@ english_list_delimiter(size_t index, size_t total)
 }
 
 /* Returns the number of trailing 0-bits in 'n'.  Undefined if 'n' == 0. */
-#if __GNUC__ >= 4
+#if __GNUC__ >= 4 || _MSC_VER
 /* Defined inline in util.h. */
 #else
 /* Returns the number of trailing 0-bits in 'n'.  Undefined if 'n' == 0. */
@@ -1021,8 +1106,9 @@ const uint8_t count_1bits_8[256] = {
 
 /* Returns true if the 'n' bytes starting at 'p' are zeros. */
 bool
-is_all_zeros(const uint8_t *p, size_t n)
+is_all_zeros(const void *p_, size_t n)
 {
+    const uint8_t *p = p_;
     size_t i;
 
     for (i = 0; i < n; i++) {
@@ -1035,8 +1121,9 @@ is_all_zeros(const uint8_t *p, size_t n)
 
 /* Returns true if the 'n' bytes starting at 'p' are 0xff. */
 bool
-is_all_ones(const uint8_t *p, size_t n)
+is_all_ones(const void *p_, size_t n)
 {
+    const uint8_t *p = p_;
     size_t i;
 
     for (i = 0; i < n; i++) {
@@ -1267,6 +1354,62 @@ bitwise_is_all_zeros(const void *p_, unsigned int len, unsigned int ofs,
     return true;
 }
 
+/* Scans the bits in 'p' that have bit offsets 'start' (inclusive) through
+ * 'end' (exclusive) for the first bit with value 'target'.  If one is found,
+ * returns its offset, otherwise 'end'.  'p' is 'len' bytes long.
+ *
+ * If you consider all of 'p' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in p[len - 1], bit 1 is the bit with value 2, bit 2 is the bit
+ * with value 4, ..., bit 8 is the bit with value 1 in p[len - 2], and so on.
+ *
+ * Required invariant:
+ *   start <= end
+ */
+unsigned int
+bitwise_scan(const void *p, unsigned int len, bool target, unsigned int start,
+             unsigned int end)
+{
+    unsigned int ofs;
+
+    for (ofs = start; ofs < end; ofs++) {
+        if (bitwise_get_bit(p, len, ofs) == target) {
+            break;
+        }
+    }
+    return ofs;
+}
+
+/* Scans the bits in 'p' that have bit offsets 'start' (inclusive) through
+ * 'end' (exclusive) for the first bit with value 'target', in reverse order.
+ * If one is found, returns its offset, otherwise 'end'.  'p' is 'len' bytes
+ * long.
+ *
+ * If you consider all of 'p' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in p[len - 1], bit 1 is the bit with value 2, bit 2 is the bit
+ * with value 4, ..., bit 8 is the bit with value 1 in p[len - 2], and so on.
+ *
+ * To scan an entire bit array in reverse order, specify start == len * 8 - 1
+ * and end == -1, in which case the return value is nonnegative if successful
+ * and -1 if no 'target' match is found.
+ *
+ * Required invariant:
+ *   start >= end
+ */
+int
+bitwise_rscan(const void *p, unsigned int len, bool target, int start, int end)
+{
+    int ofs;
+
+    for (ofs = start; ofs > end; ofs--) {
+        if (bitwise_get_bit(p, len, ofs) == target) {
+            break;
+        }
+    }
+    return ofs;
+}
+
 /* Copies the 'n_bits' low-order bits of 'value' into the 'n_bits' bits
  * starting at bit 'dst_ofs' in 'dst', which is 'dst_len' bytes long.
  *
@@ -1314,6 +1457,104 @@ bitwise_get(const void *src, unsigned int src_len,
                  &value, sizeof value, 0,
                  n_bits);
     return ntohll(value);
+}
+
+/* Returns the value of the bit with offset 'ofs' in 'src', which is 'len'
+ * bytes long.
+ *
+ * If you consider all of 'src' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in src[len - 1], bit 1 is the bit with value 2, bit 2 is the
+ * bit with value 4, ..., bit 8 is the bit with value 1 in src[len - 2], and so
+ * on.
+ *
+ * Required invariants:
+ *   ofs < len * 8
+ */
+bool
+bitwise_get_bit(const void *src_, unsigned int len, unsigned int ofs)
+{
+    const uint8_t *src = src_;
+
+    return (src[len - (ofs / 8 + 1)] & (1u << (ofs % 8))) != 0;
+}
+
+/* Sets the bit with offset 'ofs' in 'dst', which is 'len' bytes long, to 0.
+ *
+ * If you consider all of 'dst' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in dst[len - 1], bit 1 is the bit with value 2, bit 2 is the
+ * bit with value 4, ..., bit 8 is the bit with value 1 in dst[len - 2], and so
+ * on.
+ *
+ * Required invariants:
+ *   ofs < len * 8
+ */
+void
+bitwise_put0(void *dst_, unsigned int len, unsigned int ofs)
+{
+    uint8_t *dst = dst_;
+
+    dst[len - (ofs / 8 + 1)] &= ~(1u << (ofs % 8));
+}
+
+/* Sets the bit with offset 'ofs' in 'dst', which is 'len' bytes long, to 1.
+ *
+ * If you consider all of 'dst' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in dst[len - 1], bit 1 is the bit with value 2, bit 2 is the
+ * bit with value 4, ..., bit 8 is the bit with value 1 in dst[len - 2], and so
+ * on.
+ *
+ * Required invariants:
+ *   ofs < len * 8
+ */
+void
+bitwise_put1(void *dst_, unsigned int len, unsigned int ofs)
+{
+    uint8_t *dst = dst_;
+
+    dst[len - (ofs / 8 + 1)] |= 1u << (ofs % 8);
+}
+
+/* Sets the bit with offset 'ofs' in 'dst', which is 'len' bytes long, to 'b'.
+ *
+ * If you consider all of 'dst' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in dst[len - 1], bit 1 is the bit with value 2, bit 2 is the
+ * bit with value 4, ..., bit 8 is the bit with value 1 in dst[len - 2], and so
+ * on.
+ *
+ * Required invariants:
+ *   ofs < len * 8
+ */
+void
+bitwise_put_bit(void *dst, unsigned int len, unsigned int ofs, bool b)
+{
+    if (b) {
+        bitwise_put1(dst, len, ofs);
+    } else {
+        bitwise_put0(dst, len, ofs);
+    }
+}
+
+/* Flips the bit with offset 'ofs' in 'dst', which is 'len' bytes long.
+ *
+ * If you consider all of 'dst' to be a single unsigned integer in network byte
+ * order, then bit N is the bit with value 2**N.  That is, bit 0 is the bit
+ * with value 1 in dst[len - 1], bit 1 is the bit with value 2, bit 2 is the
+ * bit with value 4, ..., bit 8 is the bit with value 1 in dst[len - 2], and so
+ * on.
+ *
+ * Required invariants:
+ *   ofs < len * 8
+ */
+void
+bitwise_toggle_bit(void *dst_, unsigned int len, unsigned int ofs)
+{
+    uint8_t *dst = dst_;
+
+    dst[len - (ofs / 8 + 1)] ^= 1u << (ofs % 8);
 }
 
 /* ovs_scan */
@@ -1576,34 +1817,13 @@ scan_chars(const char *s, const struct scan_spec *spec, va_list *args)
     return s + n;
 }
 
-/* This is an implementation of the standard sscanf() function, with the
- * following exceptions:
- *
- *   - It returns true if the entire format was successfully scanned and
- *     converted, false if any conversion failed.
- *
- *   - The standard doesn't define sscanf() behavior when an out-of-range value
- *     is scanned, e.g. if a "%"PRIi8 conversion scans "-1" or "0x1ff".  Some
- *     implementations consider this an error and stop scanning.  This
- *     implementation never considers an out-of-range value an error; instead,
- *     it stores the least-significant bits of the converted value in the
- *     destination, e.g. the value 255 for both examples earlier.
- *
- *   - Only single-byte characters are supported, that is, the 'l' modifier
- *     on %s, %[, and %c is not supported.  The GNU extension 'a' modifier is
- *     also not supported.
- *
- *   - %p is not supported.
- */
-bool
-ovs_scan(const char *s, const char *format, ...)
+static bool
+ovs_scan__(const char *s, int *n, const char *format, va_list *args)
 {
     const char *const start = s;
     bool ok = false;
     const char *p;
-    va_list args;
 
-    va_start(args, format);
     p = format;
     while (*p != '\0') {
         struct scan_spec spec;
@@ -1698,24 +1918,24 @@ ovs_scan(const char *s, const char *format, ...)
         }
         switch (c) {
         case 'd':
-            s = scan_int(s, &spec, 10, &args);
+            s = scan_int(s, &spec, 10, args);
             break;
 
         case 'i':
-            s = scan_int(s, &spec, 0, &args);
+            s = scan_int(s, &spec, 0, args);
             break;
 
         case 'o':
-            s = scan_int(s, &spec, 8, &args);
+            s = scan_int(s, &spec, 8, args);
             break;
 
         case 'u':
-            s = scan_int(s, &spec, 10, &args);
+            s = scan_int(s, &spec, 10, args);
             break;
 
         case 'x':
         case 'X':
-            s = scan_int(s, &spec, 16, &args);
+            s = scan_int(s, &spec, 16, args);
             break;
 
         case 'e':
@@ -1723,24 +1943,24 @@ ovs_scan(const char *s, const char *format, ...)
         case 'g':
         case 'E':
         case 'G':
-            s = scan_float(s, &spec, &args);
+            s = scan_float(s, &spec, args);
             break;
 
         case 's':
-            s = scan_string(s, &spec, &args);
+            s = scan_string(s, &spec, args);
             break;
 
         case '[':
-            s = scan_set(s, &spec, &p, &args);
+            s = scan_set(s, &spec, &p, args);
             break;
 
         case 'c':
-            s = scan_chars(s, &spec, &args);
+            s = scan_chars(s, &spec, args);
             break;
 
         case 'n':
             if (spec.type != SCAN_DISCARD) {
-                *va_arg(args, int *) = s - start;
+                *va_arg(*args, int *) = s - start;
             }
             break;
         }
@@ -1749,11 +1969,64 @@ ovs_scan(const char *s, const char *format, ...)
             goto exit;
         }
     }
-    ok = true;
+    if (n) {
+        *n = s - start;
+    }
 
+    ok = true;
 exit:
-    va_end(args);
     return ok;
+}
+
+/* This is an implementation of the standard sscanf() function, with the
+ * following exceptions:
+ *
+ *   - It returns true if the entire format was successfully scanned and
+ *     converted, false if any conversion failed.
+ *
+ *   - The standard doesn't define sscanf() behavior when an out-of-range value
+ *     is scanned, e.g. if a "%"PRIi8 conversion scans "-1" or "0x1ff".  Some
+ *     implementations consider this an error and stop scanning.  This
+ *     implementation never considers an out-of-range value an error; instead,
+ *     it stores the least-significant bits of the converted value in the
+ *     destination, e.g. the value 255 for both examples earlier.
+ *
+ *   - Only single-byte characters are supported, that is, the 'l' modifier
+ *     on %s, %[, and %c is not supported.  The GNU extension 'a' modifier is
+ *     also not supported.
+ *
+ *   - %p is not supported.
+ */
+bool
+ovs_scan(const char *s, const char *format, ...)
+{
+    va_list args;
+    bool res;
+
+    va_start(args, format);
+    res = ovs_scan__(s, NULL, format, &args);
+    va_end(args);
+    return res;
+}
+
+/*
+ * This function is similar to ovs_scan(), with an extra parameter `n` added to
+ * return the number of scanned characters.
+ */
+bool
+ovs_scan_len(const char *s, int *n, const char *format, ...)
+{
+    va_list args;
+    bool success;
+    int n1;
+
+    va_start(args, format);
+    success = ovs_scan__(s + *n, &n1, format, &args);
+    va_end(args);
+    if (success) {
+        *n = *n + n1;
+    }
+    return success;
 }
 
 void
@@ -1799,5 +2072,15 @@ ftruncate(int fd, off_t length)
         return -1;
     }
     return 0;
+}
+
+OVS_CONSTRUCTOR(winsock_start) {
+    WSADATA wsaData;
+    int error;
+
+    error = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (error != 0) {
+        VLOG_FATAL("WSAStartup failed: %s", sock_strerror(sock_errno()));
+   }
 }
 #endif

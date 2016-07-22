@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@
 #include "timeval.h"
 #include "unixctl.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(coverage);
 
@@ -245,9 +245,14 @@ coverage_read(struct svec *lines)
 
 /* Runs approximately every COVERAGE_CLEAR_INTERVAL amount of time to
  * synchronize per-thread counters with global counters. Every thread maintains
- * a separate timer to ensure all counters are periodically aggregated. */
-void
-coverage_clear(void)
+ * a separate timer to ensure all counters are periodically aggregated.
+ *
+ * Uses 'ovs_mutex_trylock()' if 'trylock' is true.  This is to prevent
+ * multiple performance-critical threads contending over the 'coverage_mutex'.
+ *
+ * */
+static void
+coverage_clear__(bool trylock)
 {
     long long int now, *thread_time;
 
@@ -262,7 +267,15 @@ coverage_clear(void)
     if (now >= *thread_time) {
         size_t i;
 
-        ovs_mutex_lock(&coverage_mutex);
+        if (trylock) {
+            /* Returns if cannot acquire lock. */
+            if (ovs_mutex_trylock(&coverage_mutex)) {
+                return;
+            }
+        } else {
+            ovs_mutex_lock(&coverage_mutex);
+        }
+
         for (i = 0; i < n_coverage_counters; i++) {
             struct coverage_counter *c = coverage_counters[i];
             c->total += c->count();
@@ -272,6 +285,18 @@ coverage_clear(void)
     }
 }
 
+void
+coverage_clear(void)
+{
+    coverage_clear__(false);
+}
+
+void
+coverage_try_clear(void)
+{
+    coverage_clear__(true);
+}
+
 /* Runs approximately every COVERAGE_RUN_INTERVAL amount of time to update the
  * coverage counters' 'min' and 'hr' array.  'min' array is for cumulating
  * per second counts into per minute count.  'hr' array is for cumulating per
@@ -279,8 +304,6 @@ coverage_clear(void)
 void
 coverage_run(void)
 {
-    /* Defines the moving average array index variables. */
-    static unsigned int min_idx, hr_idx;
     struct coverage_counter **c = coverage_counters;
     long long int now;
 
@@ -300,8 +323,6 @@ coverage_run(void)
 
         for (i = 0; i < n_coverage_counters; i++) {
             unsigned int count, portion;
-            unsigned int m_idx = min_idx;
-            unsigned int h_idx = hr_idx;
             unsigned int idx = idx_count;
 
             /* Computes the differences between the current total and the one
@@ -317,8 +338,8 @@ coverage_run(void)
                 /* The m_idx is increased from 0 to MIN_AVG_LEN - 1. Every
                  * time the m_idx finishes a cycle (a cycle is one minute),
                  * the h_idx is incremented by 1. */
-                m_idx = idx % MIN_AVG_LEN;
-                h_idx = idx / MIN_AVG_LEN;
+                unsigned int m_idx = idx % MIN_AVG_LEN;
+                unsigned int h_idx = idx / MIN_AVG_LEN;
 
                 c[i]->min[m_idx] = portion + (j == (slots - 1)
                                               ? count % slots : 0);
@@ -332,8 +353,6 @@ coverage_run(void)
 
         /* Updates the global index variables. */
         idx_count = (idx_count + slots) % (MIN_AVG_LEN * HR_AVG_LEN);
-        min_idx = idx_count % MIN_AVG_LEN;
-        hr_idx  = idx_count / MIN_AVG_LEN;
         /* Updates the run time. */
         coverage_run_time = now + COVERAGE_RUN_INTERVAL;
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014 Nicira, Inc.
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@
 #include "timeval.h"
 #include "unixctl.h"
 #include "util.h"
-#include "vlog.h"
+#include "openvswitch/vlog.h"
 #include "netconf/libnetconf.h"
 #include "netconf/libnetconf_ssh.h"
 #include "ovsdb-client.h"
@@ -127,7 +127,7 @@ void mac_translate_ovsdb_to_ce(char* mac_ovsdb, char* mac_ce)
     /*根据vtep的dump,ovsdb的mac格式如上面那种格式*/
     if((strlen(mac_ovsdb))!=(strlen("11:22:33:44:55:66")))
     {
-        OVSDB_PRINTF_DEBUG_ERROR("wrong ovsdb-mac format,return.");
+        OVSDB_PRINTF_DEBUG_ERROR("wrong ovsdb-mac format, return.");
         return;
     }
 
@@ -2628,7 +2628,7 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char *pl
             OVSDB_PRINTF_DEBUG_TRACE("pl_dst_ip=%s.", pl_dst_ip);
             OVSDB_PRINTF_DEBUG_TRACE("switch_vxlan_tunnel[k].dst_ip=%s.", switch_vxlan_tunnel[k].dst_ip);
             OVSDB_PRINTF_DEBUG_TRACE("tunnel_key == switch_vxlan_tunnel[k].vni=%d.", (tunnel_key == switch_vxlan_tunnel[k].vni));
-            OVSDB_PRINTF_DEBUG_TRACE("string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip=%d.", (string_equals(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)));
+            OVSDB_PRINTF_DEBUG_TRACE("strcmp(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)=%d.", (strcmp(pl_dst_ip, switch_vxlan_tunnel[k].dst_ip)));
             OVSDB_PRINTF_DEBUG_TRACE("switch_vxlan_tunnel[k].source_ip=%s.", switch_vxlan_tunnel[k].source_ip);
             OVSDB_PRINTF_DEBUG_TRACE("ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]=%s.", ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0]);
 
@@ -2672,7 +2672,7 @@ static struct table_style table_style = TABLE_STYLE_DEFAULT;
 
 static const struct ovsdb_client_command *get_all_commands(void);
 
-static void usage(void) NO_RETURN;
+OVS_NO_RETURN static void usage(void);
 static void parse_options(int argc, char *argv[]);
 static struct jsonrpc *open_jsonrpc(const char *server);
 static void fetch_dbs(struct jsonrpc *, struct svec *dbs);
@@ -2683,13 +2683,13 @@ main(int argc, char *argv[])
     const struct ovsdb_client_command *command;
     const char *database;
     struct jsonrpc *rpc;
-    unsigned int uiRet = 0;
 
-    proctitle_init(argc, argv);
+    ovs_cmdl_proctitle_init(argc, argv);
     set_program_name(argv[0]);
     parse_options(argc, argv);
     fatal_ignore_sigpipe();
 
+    daemon_become_new_user(false);
     if (optind >= argc) {
         ovs_fatal(0, "missing command name; use --help for help");
     }
@@ -2782,7 +2782,7 @@ parse_options(int argc, char *argv[])
         TABLE_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
-    char *short_options = long_options_to_short_options(long_options);
+    char *short_options = ovs_cmdl_long_options_to_short_options(long_options);
 
     for (;;) {
         int c;
@@ -2854,7 +2854,7 @@ usage(void)
            "\n  monitor [SERVER] [DATABASE] ALL\n"
            "    monitor all changes to all columns in all tables\n"
            "    in DATBASE on SERVER.\n"
-           "\n  dump [SERVER] [DATABASE]\n"
+           "\n  dump [SERVER] [DATABASE] [TABLE [COLUMN]...]\n"
            "    dump contents of DATABASE on SERVER to stdout\n"
            "\nThe default SERVER is unix:%s/db.sock.\n"
            "The default DATABASE is Open_vSwitch.\n",
@@ -3740,9 +3740,9 @@ void physical_locator_table_process(struct jsonrpc *rpc, struct json *new, struc
                         /*首先在switch_vxlan_tunnel全局变量中找对应的隧道*/
                         for(m=0; m<VXLAN_TUNNEL_NUM_MAX; m++)
                         {
-                            if(0 == strcmp(switch_vxlan_tunnel[m].dst_ip, ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
+                            if((switch_vxlan_tunnel[m].used_bit)&&(switch_vxlan_tunnel[m].vni>4095))
                             {
-                                if((switch_vxlan_tunnel[m].used_bit)&&(switch_vxlan_tunnel[m].vni>4095))
+                                if(0 == strcmp(switch_vxlan_tunnel[m].dst_ip, ovsdb_vtep_db_table.table_physical_locator[j].dst_ip))
                                 {
                                     //ce_undo_config_vxlan_tunnel(switch_vxlan_tunnel[m].vni,
                                         //ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0], switch_vxlan_tunnel[m].dst_ip);
@@ -5557,7 +5557,7 @@ do_monitor(struct jsonrpc *rpc, const char *database,
     size_t n_mts, allocated_mts;
 
     daemon_save_fd(STDOUT_FILENO);
-    daemonize_start();
+    daemonize_start(false);
     if (get_detach()) {
         int error;
 
@@ -5633,14 +5633,6 @@ do_monitor(struct jsonrpc *rpc, const char *database,
             } else if (msg->type == JSONRPC_REPLY
                        && json_equal(msg->id, request_id)) {
                 monitor_print(msg->result, mts, n_mts, true);
-
-
-                OVSDB_PRINTF_DEBUG_TRACE("Begin to print monitor INIT json.");
-                print_json(msg->result);
-                putchar('\n');
-                OVSDB_PRINTF_DEBUG_TRACE("End to print monitor INIT json.");
-                
-
                 fflush(stdout);
                 daemonize_complete();
             } else if (msg->type == JSONRPC_NOTIFY
@@ -5650,14 +5642,6 @@ do_monitor(struct jsonrpc *rpc, const char *database,
                     && params->u.array.n == 2
                     && params->u.array.elems[0]->type == JSON_NULL) {
                     monitor_print(params->u.array.elems[1], mts, n_mts, false);
-
-
-                    OVSDB_PRINTF_DEBUG_TRACE("Begin to print monitor NOTIFY json.");
-                    print_json(params->u.array.elems[1]);
-                    putchar('\n');
-                    OVSDB_PRINTF_DEBUG_TRACE("End to print monitor NOTIFY json.");
-
-
                     fflush(stdout);
                 }
             }
@@ -5744,7 +5728,8 @@ compare_columns(const void *a_, const void *b_)
 }
 
 static void
-dump_table(const struct ovsdb_table_schema *ts, struct json_array *rows)
+dump_table(const char *table_name, const struct shash *cols,
+           struct json_array *rows)
 {
     const struct ovsdb_column **columns;
     size_t n_columns;
@@ -5757,9 +5742,9 @@ dump_table(const struct ovsdb_table_schema *ts, struct json_array *rows)
     size_t x, y;
 
     /* Sort columns by name, for reproducibility. */
-    columns = xmalloc(shash_count(&ts->columns) * sizeof *columns);
+    columns = xmalloc(shash_count(cols) * sizeof *columns);
     n_columns = 0;
-    SHASH_FOR_EACH (node, &ts->columns) {
+    SHASH_FOR_EACH (node, cols) {
         struct ovsdb_column *column = node->data;
         if (strcmp(column->name, "_version")) {
             columns[n_columns++] = column;
@@ -5774,7 +5759,7 @@ dump_table(const struct ovsdb_table_schema *ts, struct json_array *rows)
 
         if (rows->elems[y]->type != JSON_OBJECT) {
             ovs_fatal(0,  "row %"PRIuSIZE" in table %s response is not a JSON object: "
-                      "%s", y, ts->name, json_to_string(rows->elems[y], 0));
+                      "%s", y, table_name, json_to_string(rows->elems[y], 0));
         }
         row = json_object(rows->elems[y]);
 
@@ -5783,7 +5768,7 @@ dump_table(const struct ovsdb_table_schema *ts, struct json_array *rows)
             const struct json *json = shash_find_data(row, columns[x]->name);
             if (!json) {
                 ovs_fatal(0, "row %"PRIuSIZE" in table %s response lacks %s column",
-                          y, ts->name, columns[x]->name);
+                          y, table_name, columns[x]->name);
             }
 
             check_ovsdb_error(ovsdb_datum_from_json(&data[y][x],
@@ -5800,7 +5785,7 @@ dump_table(const struct ovsdb_table_schema *ts, struct json_array *rows)
 
     /* Add column headings. */
     table_init(&t);
-    table_set_caption(&t, xasprintf("%s table", ts->name));
+    table_set_caption(&t, xasprintf("%s table", table_name));
     for (x = 0; x < n_columns; x++) {
         table_add_column(&t, "%s", columns[x]->name);
     }
@@ -5825,34 +5810,59 @@ dump_table(const struct ovsdb_table_schema *ts, struct json_array *rows)
 
 static void
 do_dump(struct jsonrpc *rpc, const char *database,
-        int argc OVS_UNUSED, char *argv[] OVS_UNUSED)
+        int argc, char *argv[])
 {
     struct jsonrpc_msg *request, *reply;
     struct ovsdb_schema *schema;
     struct json *transaction;
 
-    const struct shash_node **tables;
+    const struct shash_node *node, **tables;
     size_t n_tables;
+    struct ovsdb_table_schema *tschema;
+    const struct shash *columns;
+    struct shash custom_columns;
 
     size_t i;
 
+    shash_init(&custom_columns);
     schema = fetch_schema(rpc, database);
-    tables = shash_sort(&schema->tables);
-    n_tables = shash_count(&schema->tables);
+    if (argc) {
+        node = shash_find(&schema->tables, argv[0]);
+        if (!node) {
+            ovs_fatal(0, "No table \"%s\" found.", argv[0]);
+        }
+        tables = xmemdup(&node, sizeof(&node));
+        n_tables = 1;
+        tschema = tables[0]->data;
+        for (i = 1; i < argc; i++) {
+            node = shash_find(&tschema->columns, argv[i]);
+            if (!node) {
+                ovs_fatal(0, "Table \"%s\" has no column %s.", argv[0], argv[1]);
+            }
+            shash_add(&custom_columns, argv[1], node->data);
+        }
+    } else {
+        tables = shash_sort(&schema->tables);
+        n_tables = shash_count(&schema->tables);
+    }
 
     /* Construct transaction to retrieve entire database. */
     transaction = json_array_create_1(json_string_create(database));
     for (i = 0; i < n_tables; i++) {
         const struct ovsdb_table_schema *ts = tables[i]->data;
-        struct json *op, *columns;
-        struct shash_node *node;
+        struct json *op, *jcolumns;
 
-        columns = json_array_create_empty();
-        SHASH_FOR_EACH (node, &ts->columns) {
+        if (argc > 1) {
+            columns = &custom_columns;
+        } else {
+            columns = &ts->columns;
+        }
+        jcolumns = json_array_create_empty();
+        SHASH_FOR_EACH (node, columns) {
             const struct ovsdb_column *column = node->data;
 
             if (strcmp(column->name, "_version")) {
-                json_array_add(columns, json_string_create(column->name));
+                json_array_add(jcolumns, json_string_create(column->name));
             }
         }
 
@@ -5860,7 +5870,7 @@ do_dump(struct jsonrpc *rpc, const char *database,
         json_object_put_string(op, "op", "select");
         json_object_put_string(op, "table", tables[i]->name);
         json_object_put(op, "where", json_array_create_empty());
-        json_object_put(op, "columns", columns);
+        json_object_put(op, "columns", jcolumns);
         json_array_add(transaction, op);
     }
 
@@ -5887,10 +5897,15 @@ do_dump(struct jsonrpc *rpc, const char *database,
                       ts->name, json_to_string(op_result, 0));
         }
 
-        dump_table(ts, &rows->u.array);
+        if (argc > 1) {
+            dump_table(tables[i]->name, &custom_columns, &rows->u.array);
+        } else {
+            dump_table(tables[i]->name, &ts->columns, &rows->u.array);
+        }
     }
 
     jsonrpc_msg_destroy(reply);
+    shash_destroy(&custom_columns);
     free(tables);
     ovsdb_schema_destroy(schema);
 }
@@ -7507,7 +7522,7 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     ovsdb_set_manager(rpc);
     
     daemon_save_fd(STDOUT_FILENO);
-    daemonize_start();
+    daemonize_start(false);
     if (get_detach()) {
         int error;
 
@@ -7669,13 +7684,12 @@ static const struct ovsdb_client_command all_commands[] = {
     { "list-columns",       NEED_DATABASE, 0, 1,       do_list_columns },
     { "transact",           NEED_RPC,      1, 1,       do_transact },
     { "monitor",            NEED_DATABASE, 1, INT_MAX, do_monitor },
-    { "dump",               NEED_DATABASE, 0, 0,       do_dump },
+    { "dump",               NEED_DATABASE, 0, INT_MAX, do_dump },
     { "vtep",               NEED_DATABASE, 1, 2,       do_vtep },
-
 
     { "help",               NEED_NONE,     0, INT_MAX, do_help },
 
-    { NULL,                 NEED_NONE,     0, 0,       NULL },
+    { NULL,                 0,             0, 0,       NULL },
 };
 
 static const struct ovsdb_client_command *get_all_commands(void)

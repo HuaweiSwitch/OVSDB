@@ -33,6 +33,11 @@
 #define MAX_MAC_TYPE_LEN              10
 #define MAX_SET_ID_LEN                20
 
+#define BFD_ENABLE_STATUS             16
+#define BFD_SESSION_NAME_LEN          16
+#define BFD_SESSION_DEST_ADD_LEN      20
+#define BFD_SESSION_RUN_STATE_LEN     12
+
 #define OVSDB_NULL_RETURN(p) if(p == NULL){ return OVSDB_ERR;}
 
 #define OVSDB_NULL_BREAK(p) if(p == NULL){ break;}
@@ -104,6 +109,33 @@ do{                                                                             
     start = pRight + strlen(right);                                             \
 }while (0)
 
+#define OVSDB_CLIENT_GET_TUNNELS_FROM_PHYSICAL_SWITCH(strLeft, num, left, right, start)\
+do{                                                                                    \
+    char * pLeft  = NULL;                                                              \
+    char * pRight = NULL;                                                              \
+    int i = 0;                                                                         \
+    pLeft = strstr(start, left);                                                       \
+    if (NULL == pLeft)                                                                 \
+    {                                                                                  \
+        start = NULL;                                                                  \
+        break;                                                                         \
+    }                                                                                  \
+    pLeft = pLeft + strlen(left);                                                      \
+    strLeft = pLeft;                                                                   \
+    pRight = strstr(pLeft, right);                                                     \
+    if (NULL == pLeft)                                                                 \
+    {                                                                                  \
+        start = NULL;                                                                  \
+        break;                                                                         \
+    }                                                                                  \
+    while (pLeft != pRight)                                                            \
+    {                                                                                  \
+        pLeft++;                                                                       \
+        i++;                                                                           \
+    }                                                                                  \
+    *num = i;                                                                          \
+}while (0)
+
 #define OVSDB_SUB_GET_TABLE(NAME)         (*(g_aucTBL[NAME].pstTbl))
 #define OVSDB_SUB_GET_AGEINGTABLE(NAME)   (*(g_aucTBL[NAME].pstAgeingTbl))
 #define OVSDB_SUB_GET_DATA_LENGTH(NAME)   ((g_aucTBL[NAME].iDataLength))
@@ -173,11 +205,12 @@ enum OVSDB_CLIENT_CFG_TYPE
     OVSDB_CLIENT_CFG_DESCRIPTION,
     OVSDB_CLIENT_CFG_SWITCHMANAGEIP,
     OVSDB_CLIENT_CFG_TUNNERIP,
+    OVSDB_CLIENT_CFG_TUNNERBFDENABLE,
     OVSDB_CLIENT_CFG_NETCONFIP,
     OVSDB_CLIENT_CFG_NETCONFPORT,
     OVSDB_CLIENT_CFG_NETCONFUSER,
     OVSDB_CLIENT_CFG_NETCONFPW,
-    OVSDB_CLIENT_CFG_MAX,   
+    OVSDB_CLIENT_CFG_MAX,
 };
 
 struct ovsdb_client_cfg_map {
@@ -192,6 +225,10 @@ int ovsdb_sub_table_mac_add(char *mac, char *bd, char *interface, int mac_type);
 int ovsdb_sub_table_mac_delete();
 int ovsdb_sub_table_interface_add(char *interface);
 int ovsdb_sub_table_interface_delete();
+void ovsdb_sub_table_tunnel_add(struct jsonrpc * rpc);
+void ovsdb_sub_table_tunnel_delete(struct jsonrpc * rpc, bool deleted_pl_uuid_is_local, struct uuid * deleted_pl_uuid);
+void ovsdb_sub_table_tunnel_update_bfd_status(struct jsonrpc * rpc, int i);
+void ovsdb_sub_table_tunnel_delete_bfd_status(struct jsonrpc * rpc, int i);
 
 void ovsdb_add_port(char *interface);
 void ovsdb_delete_port(char * interface);
@@ -246,6 +283,31 @@ struct ovsdb_vtep_status{
     char* value;
 };
 
+struct ovsdb_bfd_config{
+    char* bfd_mac;
+    char* bfd_ip;
+};
+
+struct ovsdb_bfd_params{
+    char* enable;
+    char* min_rx;
+    char* min_tx;
+    char* decay_min_rx;
+    char* forwarding_if_rx;
+    char* cpath_down;
+    char* check_tnl_key;
+};
+
+struct ovsdb_bfd_status{
+    char* enable;
+    char* state;
+    char* forwarding;
+    char* diagnostic;
+    char* remote_state;
+    char* remote_diagnostic;
+    char* info;
+};
+
 /*1 Global*/
 #define GLOBAL_SWITCHES_NUM 10
 
@@ -267,6 +329,7 @@ struct ovsdb_vtep_table_global{
 #define PHYSICAL_SWITCH_MANAGE_IP_NUM 10
 #define PHYSICAL_SWITCH_PORT_NUM 100
 #define PHYSICAL_SWITCH_TUNNEL_IP_NUM 10
+#define PHYSICAL_SWITCH_TUNNELS_NUM 100
 
 struct ovsdb_vtep_table_physical_switch{
     struct uuid uuid_self;
@@ -275,6 +338,7 @@ struct ovsdb_vtep_table_physical_switch{
     char* name;
     struct uuid ports[PHYSICAL_SWITCH_PORT_NUM]; /*uuid of Physical_Port*/
     char* tunnel_ips[PHYSICAL_SWITCH_TUNNEL_IP_NUM];
+    struct uuid tunnels[PHYSICAL_SWITCH_TUNNELS_NUM];
     int used_num_management_ips;
     int used_num_ports;
     int used_num_tunnel_ips;
@@ -400,6 +464,17 @@ struct ovsdb_vtep_table_manager{
     int used_num_status;
 };
 
+/*14 tunnel*/
+struct ovsdb_vtep_table_tunnel{
+    struct uuid uuid_self;
+    struct ovsdb_bfd_config bfd_config_local;
+    struct ovsdb_bfd_config bfd_config_remote;
+    struct ovsdb_bfd_params bfd_params;
+    struct ovsdb_bfd_status bfd_status;
+    struct uuid local;
+    struct uuid remote;
+};
+
 #define TABLE_PHYSICAL_SWITCH_NUM 10
 #define TABLE_PHYSICAL_PORT_NUM 100
 #define TABLE_LOGICAL_BINDING_STATS_NUM 100
@@ -412,6 +487,7 @@ struct ovsdb_vtep_table_manager{
 #define TABLE_PHYSICAL_LOCATOR_SET_NUM 100
 #define TABLE_PHYSICAL_LOCATOR_NUM 1000
 #define TABLE_MANAGER_NUM 100
+#define TABLE_TUNNEL_NUM PHYSICAL_SWITCH_TUNNELS_NUM
 
 /*The whole DB,including 13 tables above*/
 struct ovsdb_vtep_db_tables{
@@ -428,6 +504,7 @@ struct ovsdb_vtep_db_tables{
     struct ovsdb_vtep_table_physical_locator_set table_physical_locator_set[TABLE_PHYSICAL_LOCATOR_SET_NUM];    /*11 Physical_Locator_Set*/
     struct ovsdb_vtep_table_physical_locator table_physical_locator[TABLE_PHYSICAL_LOCATOR_NUM];    /*12 Physical_Locator*/
     struct ovsdb_vtep_table_manager table_manager[TABLE_MANAGER_NUM];      /*13 Manager*/
+    struct ovsdb_vtep_table_tunnel table_tunnel[TABLE_TUNNEL_NUM];         /*14 Tunnel*/
     int used_num_table_global;
     int used_num_table_physical_switch;
     int used_num_table_physical_port;
@@ -441,6 +518,7 @@ struct ovsdb_vtep_db_tables{
     int used_num_table_physical_locator_set;
     int used_num_table_physical_locator;
     int used_num_table_manager;
+    int used_num_table_tunnel;
 };
 
 
@@ -496,6 +574,7 @@ struct port_vlan_to_vni_map{
 #define UCAST_MACS_REMOTE_TABLE_NAME "Ucast_Macs_Remote"
 #define MCAST_MACS_LOCAL_TABLE_NAME "Mcast_Macs_Local"
 #define MCAST_MACS_REMOTE_TABLE_NAME "Mcast_Macs_Remote"
+#define TUNNEL_TABLE_NAME "Tunnel"
 
 #define LOGICAL_BINDING_STATS_TABLE_NAME "Logical_Binding_Stats"
 #define LOGICAL_ROUTER_TABLE_NAME "Logical_Router"
@@ -504,7 +583,23 @@ struct port_vlan_to_vni_map{
 #define ARP_SOURCES_REMOTE_TABLE_NAME "Arp_Sources_Remote"
 
 /*°üº¬ÁËArp_Sources_LocalºÍArp_Sources_Remote*/
-#define MAX_TABLE_ID 15
+#define MAX_TABLE_ID 16
+
+enum OVSDB_TUNNEL_TABLE_BFD_CONFIG_LOCAL_ENUM
+{
+    BFD_CONFIG_LOCAL_ENABLE,
+    BFD_CONFIG_LOCAL_MIN_RX,
+    BFD_CONFIG_LOCAL_MIN_TX,
+    BFD_CONFIG_LOCAL_DECAY_MIN_RX,
+    BFD_CONFIG_LOCAL_FORWARDING_IF_RX,
+    BFD_CONFIG_LOCAL_CPATH_DOWN,
+    BFD_CONFIG_LOCAL_CHECK_TNL_KEY,
+    BFD_CONFIG_LOCAL_MAX,
+};
+
+#define TUNNEL_TABLE_GET_NAME(p, num) json_array(json_array(json_array(p)->elems[1])->elems[num])->elems[0]
+#define TUNNEL_TABLE_GET_VALUE(p, num) json_array(json_array(json_array(p)->elems[1])->elems[num])->elems[1]
+#define TUNNEL_TABLE_GET_NUMBER(p) json_array(json_array(p)->elems[1])->n
 
 #if 0
 enum table_list
@@ -552,6 +647,7 @@ void mcast_macs_remote_table_process(struct jsonrpc*,struct json*, struct json*,
 void physical_switch_table_process(struct jsonrpc*,struct json*, struct json*, char*, int );
 void logical_switch_table_process(struct jsonrpc*,struct json*, struct json*, char*, int );
 void physical_locator_set_table_process(struct jsonrpc*,struct json*, struct json*, char*, int );
+void tunnel_table_process(struct jsonrpc*,struct json*, struct json*, char*, int );
 
 void logical_binding_stats_table_process(struct jsonrpc*,struct json*, struct json*, char*, int );
 void logical_router_table_process(struct jsonrpc*,struct json*, struct json*, char*, int );
@@ -570,6 +666,7 @@ void mcast_macs_remote_table_process_2(struct jsonrpc*,struct json*, struct json
 void physical_switch_table_process_2(struct jsonrpc*,struct json*, struct json*, char*, int );
 void logical_switch_table_process_2(struct jsonrpc*,struct json*, struct json*, char*, int );
 void physical_locator_set_table_process_2(struct jsonrpc*,struct json*, struct json*, char*, int );
+void tunnel_table_process_2(struct jsonrpc*,struct json*, struct json*, char*, int );
 
 void logical_binding_stats_table_process_2(struct jsonrpc*,struct json*, struct json*, char*, int );
 void logical_router_table_process_2(struct jsonrpc*,struct json*, struct json*, char*, int );
@@ -635,7 +732,8 @@ void do_transact_temp_query_port_binding_logical_switch(struct jsonrpc *rpc, cha
 void do_transact_temp_query_logical_switch_tunnel_key(struct jsonrpc *rpc, char *json_char ,int *tunnel_key_exist, int *tunnel_key);
 void do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_char ,char* dst_ip);
 void do_transact_temp_query_mac_local_uuid(struct jsonrpc *rpc, char *json_char ,int *uuid_num, struct uuid *ucast_local_uuids);
-
+void do_transact_temp_query_tunnel_uuid(struct jsonrpc *rpc, char *json_char, struct uuid *tunnel_self_uuid);
+void do_transact_temp_query_tunnel_bfd_params_enable(struct jsonrpc *rpc, char *json_char, struct uuid *tunnel_self_uuid, bool *enable);
 
 void do_vtep(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );
 void do_vtep_transact(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );

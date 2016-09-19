@@ -467,11 +467,9 @@ unsigned int netconf_ce_query_config_data(char* send_data, char ** ppcReplyData)
 {
     NC_MSG_TYPE     sessionRet   = NC_MSG_REPLY;
     NC_REPLY_TYPE   replyRet     = NC_REPLY_DATA;
-    unsigned int    uiLen        = 0;
     unsigned int    uiTry        = 0;
     nc_rpc          *rpc         = NULL;
     nc_reply        *reply       = NULL;
-    char            *paReplyData = NULL;
 
     OVSDB_NULL_RETURN(send_data);
 
@@ -511,33 +509,24 @@ RETRY:
     }
 
     /* 获取reply中的数据部分 */
-    paReplyData = nc_reply_get_data(reply);
-
-    uiLen = strlen(paReplyData);
-
-    *ppcReplyData = xmalloc(uiLen + 1);
+    *ppcReplyData = nc_reply_get_data(reply);
     if (NULL == *ppcReplyData)
     {
         nc_reply_free(reply);
         return OVSDB_ERR;
     }
 
-    snprintf(*ppcReplyData, uiLen+1, paReplyData);
-
     nc_reply_free(reply);
     return OVSDB_OK;
-
 }
 
 unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
 {
     NC_MSG_TYPE     sessionRet   = NC_MSG_REPLY;
     NC_REPLY_TYPE   replyRet     = NC_REPLY_DATA;
-    unsigned int    uiLen        = 0;
     unsigned int    uiTry        = 0;
     nc_rpc          *rpc         = NULL;
     nc_reply        *reply       = NULL;
-    char            *paReplyData = NULL;
 
     OVSDB_NULL_RETURN(send_data);
 
@@ -577,18 +566,12 @@ RETRY:
     }
 
     /* 获取reply的所有数据 */
-    paReplyData = nc_reply_dump(reply);
-
-    uiLen = strlen(paReplyData);
-
-    *ppcReplyData = xmalloc(uiLen + 1);
+    *ppcReplyData = nc_reply_dump(reply);
     if (NULL == *ppcReplyData)
     {
         nc_reply_free(reply);
         return OVSDB_ERR;
     }
-
-    snprintf(*ppcReplyData, uiLen+1, paReplyData);
 
     nc_reply_free(reply);
     return OVSDB_OK;
@@ -5115,7 +5098,7 @@ void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                             {
                                 /*MAC格式转换*/
                                 char *mac_ce;
-                                mac_ce= malloc(strlen(CE_MAC_FORM)+1);
+                                mac_ce = malloc(strlen(CE_MAC_FORM)+1);
                                 memset(mac_ce, 0 ,strlen(CE_MAC_FORM)+1);
 
                                 mac_translate_ovsdb_to_ce(ovsdb_vtep_db_table.table_ucast_macs_remote[j].MAC, mac_ce);
@@ -5130,16 +5113,13 @@ void ucast_macs_remote_table_process(struct jsonrpc *rpc, struct json *new, stru
                                     ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
                                     ovsdb_vtep_db_table.table_physical_locator[k].dst_ip,
                                     ovsdb_vtep_db_table.table_logical_switch[m].tunnel_key);
+                                free(mac_ce);
+
                                 if (OVSDB_OK != uiRet)
                                 {
                                     OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to undo static mac of vxlan tunnel");
-                                    if (mac_ce != NULL)
-                                    {
-                                        free(mac_ce);
-                                    }
                                     return;
                                 }
-
 
                             }
 

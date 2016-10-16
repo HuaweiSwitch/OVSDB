@@ -11,7 +11,10 @@ addons:
       - libssl-dev
       - llvm-dev
 
-before_install: sudo ./ovsdb/.travis/prepare.sh
+before_install: 
+  chown root:root /usr/bin/sudo
+  chmod 4755 usr/bin/sudo
+  sudo ./ovsdb/.travis/prepare.sh
 
 before_script: export PATH=$PATH:$HOME/bin
 

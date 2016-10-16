@@ -12,9 +12,9 @@ addons:
       - llvm-dev
 
 before_install: 
-  chown root:root /usr/bin/sudo
-  chmod 4755 usr/bin/sudo
-  sudo ./ovsdb/.travis/prepare.sh
+  - chown root:root /usr/bin/sudo
+  - chmod 4755 usr/bin/sudo
+  - sudo ./ovsdb/.travis/prepare.sh
 
 before_script: export PATH=$PATH:$HOME/bin
 

@@ -6,6 +6,7 @@
 
 #undef  OVSDB_DESC
 #define OVSDB_DESC(name)              (1)
+#define OVSDB_DEBUG                   (0)
 
 /* 错误码 */
 #define OVSDB_OK                      (0)
@@ -13,13 +14,14 @@
 #define OVSDB_ERR_NULL_PTR            (OVSDB_ERR + 0x01)       /* 指针为空                                 */
 #define OVSDB_ERR_INPUT_PARAM         (OVSDB_ERR + 0x02)       /* 输入参数错误                             */
 #define OVSDB_ERR_EXISTED             (OVSDB_ERR + 0x03)       /* 已经存在                                 */
-#define OVSDB_ERR_INDEX_FULL          (OVSDB_ERR + 0x04)       /* 资源分配完                               */
+#define OVSDB_ERR_NOT_EXISTED         (OVSDB_ERR + 0x04)       /* 已经存在                                 */
+#define OVSDB_ERR_INDEX_FULL          (OVSDB_ERR + 0x05)       /* 资源分配完                               */
 
 #define MAX_NETCONF_USERNAME_LEN      256
 #define NETCONF_PORT                  22
-#define MAX_IP_V4_LEN                 15
+#define MAX_IP_V4_LEN                 16
 #define NETCONF_SEND_DATA_LEN         2601
-#define MAX_VNI_ID                    32768
+#define MAX_VNI_ID                    16000000
 #define MIN_VNI_ID                    4096
 #define MAX_VLAN_ID                   4063
 #define MIN_VLAN_ID                   0
@@ -28,8 +30,8 @@
 #define NETCONF_MAX_REPLY_LEN         20000
 #define MAX_IFNAME_LEN                32
 #define MAX_CE_MAC_LEN                15
-#define MAX_OVSDB_MAC_LEN             17
-#define MAX_BDID_LEN                  6
+#define MAX_OVSDB_MAC_LEN             18
+#define MAX_BDID_LEN                  12
 #define MAX_MAC_TYPE_LEN              10
 #define MAX_SET_ID_LEN                20
 
@@ -37,6 +39,8 @@
 #define BFD_SESSION_NAME_LEN          16
 #define BFD_SESSION_DEST_ADD_LEN      20
 #define BFD_SESSION_RUN_STATE_LEN     12
+#define BFD_SESSION_DIAGNOSTIC_LEN    32
+#define BFD_LOCAL_MAC                 g_aucBFD_local_mac
 
 #define OVSDB_NULL_RETURN(p) if(p == NULL){ return OVSDB_ERR;}
 
@@ -59,6 +63,39 @@ else                                    \
     str = 0;                            \
 }
 
+#define OVSDB_FREE(ptr)         \
+do {\
+    if (ptr) {\
+        free(ptr);\
+        ptr = NULL;\
+    }\
+}while(0)
+
+#define OVSDB_SET_STR(ptr, str)         \
+do {\
+    OVSDB_FREE((ptr));\
+    if (NULL == (str)) break;\
+    ptr = malloc(strlen((str)) + 1);\
+    if (NULL == (ptr)) break;\
+    strcpy((ptr), (str));\
+}while(0)
+
+struct netconf_ce_bfd_session {
+    char * bfd_session_name;
+    char * bfd_peer_ip;
+    char * bfd_peer_mac;
+    char * bfd_src_ip;
+    char * min_tx;
+    char * min_rx;
+};
+
+#define OVSDB_PRINTF_DEBUG_BFD_Debuf(szfmt, args...)\
+//do{\
+//    OVSDB_PRINTF_DEBUG_TRACE(szfmt, ##args);\
+//    printf(">>>func: %s, line: %d. Debug: "szfmt"\r\n",\
+//        __FUNCTION__, __LINE__, ##args);\
+//}while(0)
+
 #define OVSDB_PRINTF_DEBUG_TRACE(szfmt, args...)\
 do{\
     VLOG_DBG(\
@@ -79,6 +116,16 @@ do{\
         ">>>func: %s, line: %d. Error: "szfmt"\r\n",\
         __FUNCTION__, __LINE__, ##args);\
 }while(0)
+
+#define OVSDB_CHECK_NULL_PTR_RET(ptr)\
+do{\
+    if (NULL == (ptr))\
+    {\
+        OVSDB_PRINTF_DEBUG_ERROR("%s is NULL.", #ptr);\
+        return OVSDB_ERR_NULL_PTR;\
+    }\
+}while(0)
+
 
 #define OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(str, str_len, left, right, start)  \
 do{                                                                             \
@@ -136,6 +183,11 @@ do{                                                                             
     *num = i;                                                                          \
 }while (0)
 
+struct bfd_status_map {
+    char * ce_word;
+    char * ovsdb_word;
+};
+
 #define OVSDB_SUB_GET_TABLE(NAME)         (*(g_aucTBL[NAME].pstTbl))
 #define OVSDB_SUB_GET_AGEINGTABLE(NAME)   (*(g_aucTBL[NAME].pstAgeingTbl))
 #define OVSDB_SUB_GET_DATA_LENGTH(NAME)   ((g_aucTBL[NAME].iDataLength))
@@ -171,7 +223,7 @@ struct ovsdb_sub_table {
     int iDataLength;
 };
 
-#define OVSDB_SUB_BD_LEN         8
+#define OVSDB_SUB_BD_LEN         12
 #define OVSDB_SUB_INTERFACE_LEN  64
 
 struct ovsdb_sub_mac_key {
@@ -222,13 +274,12 @@ struct ovsdb_client_cfg_map {
 #define OVSDB_CLIENT_CFG_GET_STRING(TYPE) (gast_ovsdb_client_cfg_map[TYPE].acAttribute)
 
 int ovsdb_sub_table_mac_add(char *mac, char *bd, char *interface, int mac_type);
-int ovsdb_sub_table_mac_delete();
+int ovsdb_sub_table_mac_delete(void);
 int ovsdb_sub_table_interface_add(char *interface);
-int ovsdb_sub_table_interface_delete();
-void ovsdb_sub_table_tunnel_add(struct jsonrpc * rpc);
-void ovsdb_sub_table_tunnel_delete(struct jsonrpc * rpc, bool deleted_pl_uuid_is_local, struct uuid * deleted_pl_uuid);
-void ovsdb_sub_table_tunnel_update_bfd_status(struct jsonrpc * rpc, int i);
-void ovsdb_sub_table_tunnel_delete_bfd_status(struct jsonrpc * rpc, int i);
+int ovsdb_sub_table_interface_delete(void);
+void ovsdb_tunnel_add_process(struct jsonrpc * rpc, struct uuid *uuid_pl);
+void ovsdb_tunnel_update_bfd_status(struct jsonrpc * rpc, int i);
+void ovsdb_tunnel_delete_bfd_status(struct jsonrpc * rpc, int i);
 
 void ovsdb_add_port(char *interface);
 void ovsdb_delete_port(char * interface);
@@ -429,7 +480,7 @@ struct ovsdb_vtep_table_logical_route{
 };
 
 /*11 Physical_Locator_Set*/
-#define LOCATOR_NUM_IN_LOCATION_SET 100
+#define LOCATOR_NUM_IN_LOCATION_SET 256
 
 struct ovsdb_vtep_table_physical_locator_set{
     struct uuid uuid_self;
@@ -440,15 +491,8 @@ struct ovsdb_vtep_table_physical_locator_set{
 /*12 Physical_Locator*/
 struct ovsdb_vtep_table_physical_locator{
     struct uuid uuid_self;
-    struct ovsdb_vtep_bfd bfd[10];
-    struct ovsdb_vtep_bfd_status bfd_status[10];
     char* dst_ip;
     enum ovsdb_vtep_encapsulation_type encapsulation_type;
-
-    //int vni;    /*特意添加的一个属性，删除隧道时用*/
-
-    int used_num_bfd;
-    int used_num_bfd_status;
 };
 
 /*13 Manager*/
@@ -466,7 +510,8 @@ struct ovsdb_vtep_table_manager{
 
 /*14 tunnel*/
 struct ovsdb_vtep_table_tunnel{
-    struct uuid uuid_self;
+    struct uuid uuid_self1;    //取消，不再使用
+    char name[BFD_SESSION_NAME_LEN];
     struct ovsdb_bfd_config bfd_config_local;
     struct ovsdb_bfd_config bfd_config_remote;
     struct ovsdb_bfd_params bfd_params;
@@ -478,14 +523,14 @@ struct ovsdb_vtep_table_tunnel{
 #define TABLE_PHYSICAL_SWITCH_NUM 10
 #define TABLE_PHYSICAL_PORT_NUM 100
 #define TABLE_LOGICAL_BINDING_STATS_NUM 100
-#define TABLE_LOGICAL_SWITCH_NUM 1000
-#define TABLE_UCAST_MACS_LOCAL_NUM 1000
-#define TABLE_UCAST_MACS_REMOTE_NUM 1000
-#define TABLE_MCAST_MACS_LOCAL_NUM 100
-#define TABLE_MCAST_MACS_REMOTE_NUM 100
+#define TABLE_LOGICAL_SWITCH_NUM 4096
+#define TABLE_UCAST_MACS_LOCAL_NUM 131584
+#define TABLE_UCAST_MACS_REMOTE_NUM 4096
+#define TABLE_MCAST_MACS_LOCAL_NUM 256
+#define TABLE_MCAST_MACS_REMOTE_NUM 256
 #define TABLE_LOGICAL_ROUTE_NUM 10
-#define TABLE_PHYSICAL_LOCATOR_SET_NUM 100
-#define TABLE_PHYSICAL_LOCATOR_NUM 1000
+#define TABLE_PHYSICAL_LOCATOR_SET_NUM 256
+#define TABLE_PHYSICAL_LOCATOR_NUM 4096
 #define TABLE_MANAGER_NUM 100
 #define TABLE_TUNNEL_NUM PHYSICAL_SWITCH_TUNNELS_NUM
 
@@ -521,16 +566,24 @@ struct ovsdb_vtep_db_tables{
     int used_num_table_tunnel;
 };
 
-
 #define VXLAN_TUNNEL_NUM_MAX 4096
 #define VXLAN_PORT_MAP_MAX 4094
-#define VXLAN_TUNNEL_MAC_MAX 16384
+#define VXLAN_TUNNEL_MAC_MAX 131584
 
-#define SERVICE_NODE_MAX 10
+#define SERVICE_NODE_MAX 32
 #define HYPERVISOR_MAX 1024
 
 #define IP_LENGTH_MAX 32
 
+enum HW_VTEP_VXLAN_TUNNEL_TYPE
+{
+    HW_VTEP_VXLAN_TUNNEL_HYPERVISOR  = 0,
+    HW_VTEP_VXLAN_TUNNEL_SERVICENODE = 1,
+};
+
+#define HW_BIT_SET(item, bit)    ((item) |= 1 << (bit))
+#define HW_BIT_CLEAR(item, bit)  ((item) &= ~(1 << (bit)))
+#define HW_BIT_GET(item, bit)    ((item)>>(bit) & 1)
 
 struct hw_vtep_vxlan_tunnel{
     int vni;
@@ -562,6 +615,10 @@ struct port_vlan_to_vni_map{
     struct vlan_to_vni_map vlan_vni_map[VXLAN_PORT_MAP_MAX];  /*下标表示vlanid,子接口为vlanid +1*/
 };
 
+struct tunnel_table_query{
+    struct uuid tunnel_uuid;
+    struct uuid remote_uuid;
+};
 
 
 #define GLOBAL_TABLE_NAME "Global"
@@ -675,22 +732,13 @@ void arp_sources_local_table_process_2(struct jsonrpc*,struct json*, struct json
 void arp_sources_remote_table_process_2(struct jsonrpc*,struct json*, struct json*, char*, int );
 
 
-
-void mac_translate_ovsdb_to_ce(char*, char*);
-
-#define CE_MAC_FORM "1122-3344-5566"
-
-unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
-
-void ovsdb_port_add_vlanbinding_process(struct json *new, struct json *old, char* node_name);
-void ovsdb_port_update_vlanbinding_process(struct json *new, struct json *old, char* node_name, int* update_type);
+void ovsdb_port_update_vlanbinding_process(char * port_name,struct json * new_port_vlan_bindings,struct json * old_port_vlan_bindings);
 void ovsdb_switch_update_management_ips_process(struct json *new, struct json *old, char* node_name);
 void ovsdb_switch_update_tunnel_ips_process(struct json *new, struct json *old, char* node_name);
-void ovsdb_physical_locator_process(struct uuid *uuid_pl, char *pl_dst_ip);
+void ovsdb_physical_locator_process(struct jsonrpc * rpc, struct uuid *uuid_pl, char *pl_dst_ip);
 void  ovsdb_physical_locator_process_hypervisor_ip(struct uuid *uuid_pl, char *pl_dst_ip);
-void  ovsdb_physical_locator_process_service_node_ip(struct uuid *uuid_pl, char *pl_dst_ip);
-void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char *pl_dst_ip);
-void ovsdb_mcast_remote_update_locator_set_process(struct json *new, struct json *old, char* node_name);
+void  ovsdb_physical_locator_process_service_node_ip(struct jsonrpc * rpc, struct uuid *uuid_pl, char *pl_dst_ip);
+void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char * pl_dst_ip, enum HW_VTEP_VXLAN_TUNNEL_TYPE type);
 void ovsdb_mcast_local_update_locator_set_process(struct json *new, struct json *old, char* node_name);
 
 void ovsdb_query_port_and_mac(void *args);
@@ -727,12 +775,12 @@ void do_transact_temp(struct jsonrpc *rpc, char *json_char);
 void do_transact_temp_query_global(struct jsonrpc *rpc, int* global_uuid_num, struct uuid *uuid_global);
 void do_transact_temp_query_logical_switch(struct jsonrpc *rpc, int* ls_num, struct logical_switch_uuid_and_vni *ls_info);
 void do_transact_temp_query_locator_dstip(struct jsonrpc *rpc, char *json_char, int *pl_exist,  char* pl_dst_ip);
-void do_transact_temp_query_locator_uuid(struct jsonrpc *rpc, char *json_char, struct uuid *locator_uuid);
+void do_transact_temp_query_locator_uuid(struct jsonrpc *rpc, char *dst_ip, struct uuid *locator_uuid);
 void do_transact_temp_query_port_binding_logical_switch(struct jsonrpc *rpc, char *json_char ,int *ls_num, struct uuid *ls_uuids);
 void do_transact_temp_query_logical_switch_tunnel_key(struct jsonrpc *rpc, char *json_char ,int *tunnel_key_exist, int *tunnel_key);
 void do_transact_temp_query_physical_locator_dst_ip(struct jsonrpc *rpc, char *json_char ,char* dst_ip);
 void do_transact_temp_query_mac_local_uuid(struct jsonrpc *rpc, char *json_char ,int *uuid_num, struct uuid *ucast_local_uuids);
-void do_transact_temp_query_tunnel_uuid(struct jsonrpc *rpc, char *json_char, struct uuid *tunnel_self_uuid);
+void do_transact_temp_query_tunnel_uuid(struct jsonrpc * rpc, struct uuid * remote_uuid, struct uuid * tunnel_uuid);
 void do_transact_temp_query_tunnel_bfd_params_enable(struct jsonrpc *rpc, char *json_char, struct uuid *tunnel_self_uuid, bool *enable);
 
 void do_vtep(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );

@@ -1,9 +1,9 @@
 #!/bin/bash
 
-host=192.168.10.109
-manage=192.168.13.1
+host=192.168.10.1  #¿ØÖÆÆ÷IP
+manage=192.168.0.1 #Ö÷»úIP
 
-start_ovsdb()
+init_ovsdb()
 {
     ovsdb-server --bootstrap-ca-cert=/etc/openvswitch/vswitchd3.cacert -p /etc/openvswitch/vtep-privkey.pem -c /etc/openvswitch/vtep-cert.pem /usr/local/etc/openvswitch/conf.db -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --remote=punix:/usr/local/var/run/openvswitch/db.sock --remote=db:hardware_vtep,Global,managers --no-chdir --log-file=/usr/local/var/log/openvswitch/ovsdb-server.log --pidfile=/usr/local/var/run/openvswitch/ovsdb-server.pid --detach --monitor --remote=ptcp:8111
     ssh-keygen -f "/root/.ssh/known_hosts" -R $manage
@@ -14,7 +14,8 @@ start_ovsdb()
     #ovsdb-client vtep transact &
     ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-transact.log vtep transact &
     echo `date +'%Y-%m-%d %H:%M:%S'` start transact OK >> /var/log/ovsdb-init.log
-    exit 0
+
+    return
 }
 
 ping_fun()
@@ -26,24 +27,44 @@ ping_fun()
         if [ $? = 0 ];then
             echo `date +'%Y-%m-%d %H:%M:%S'` ping OK >> /var/log/ovsdb-init.log
             sleep 3
-            start_ovsdb
-            break
+
+            return 0
         else
             echo `date +'%Y-%m-%d %H:%M:%S'` ping failed >> /var/log/ovsdb-init.log
             sleep 3
         fi
     done
     
-    exit 0
+    return 1
 }
 
+start_ovsdb()
+{
+    ping_fun
+    
+    if [ $? = 0 ] ; then
+        init_ovsdb
+    fi
+    
+    return
+}
+
+stop_ovsdb()
+{
+    ovsdb_pid=`ps -ef | grep "ovsdb-server\: monitoring pid" | grep -v grep | awk '{print $11}'`
+    kill $ovsdb_pid 2>/dev/null
+    echo `date +'%Y-%m-%d %H:%M:%S'` stop ovsdb OK >> /var/log/ovsdb-init.log
+
+    return
+}
 
 touch /var/log/ovsdb-init.log
 case "$1" in
     start)
-        ping_fun
+        start_ovsdb
     ;;
     stop)
+        stop_ovsdb
     ;;
     *)
         echo "Usage: /etc/init.d/ovsdb-init {start|stop}"

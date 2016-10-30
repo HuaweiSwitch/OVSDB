@@ -23,16 +23,16 @@ env:
   - TESTSUITE=1 OPTS="--enable-shared"
   - BUILD_ENV="-m32" OPTS="--disable-ssl"
   - KERNEL=3.17.7 DPDK=1
-  - KERNEL=3.17.7 DPDK=1 OPTS="--enable-shared"
-  - KERNEL=4.3.5
-  - KERNEL=4.1.17
-  - KERNEL=3.18.26
-  - KERNEL=3.14.60
-  - KERNEL=3.12.53
-  - KERNEL=3.10.96
-  - KERNEL=3.4.110
-  - KERNEL=3.2.76
-  - KERNEL=2.6.32.70
+  #- KERNEL=3.17.7 DPDK=1 OPTS="--enable-shared"
+  #- KERNEL=4.3.5
+  #- KERNEL=4.1.17
+  #- KERNEL=3.18.26
+  #- KERNEL=3.14.60
+  #- KERNEL=3.12.53
+  #- KERNEL=3.10.96
+  #- KERNEL=3.4.110
+  #- KERNEL=3.2.76
+  #- KERNEL=2.6.32.70
 
 script: sudo ./ovsdb/.travis/build.sh $OPTS
 

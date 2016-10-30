@@ -15,7 +15,7 @@ before_install: chmod +x ./ovsdb/.travis/prepare.sh ; ./ovsdb/.travis/prepare.sh
 
 before_script: export PATH=$PATH:$HOME/bin
 
-sudo: false
+sudo: true
 
 env:
   - OPTS="--disable-ssl"

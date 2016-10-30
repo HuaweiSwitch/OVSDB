@@ -11,7 +11,7 @@ addons:
       - libssl-dev
       - llvm-dev
 
-before_install: chmod 777 ./ovsdb/.travis/prepare.sh ; ./ovsdb/.travis/prepare.sh
+before_install: git clone git://git.kernel.org/pub/scm/devel/sparse/chrisl/sparse.git ; cd sparse && make && make install && cd ..
 
 before_script: export PATH=$PATH:$HOME/bin
 

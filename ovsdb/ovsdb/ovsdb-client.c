@@ -346,6 +346,15 @@ int ovsdb_bfd_dstIPtoName(struct ovsdb_vtep_table_tunnel * entry)
 struct nc_session* gst_netconf_session = NULL;
 struct nc_cpblts*  gst_cpblts          = NULL;
 
+int netconf_msg_list_config_bd(unsigned int uiVniId);
+int netconf_msg_list_undo_config_bd(unsigned int uiVniId);
+int netconf_msg_list_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
+int netconf_msg_list_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
+int netconf_msg_list_config_port(unsigned int uiVlanId, unsigned int uiVniId, char* paIfname);
+int netconf_msg_list_undo_config_port(unsigned int uiVlanId, char* paIfname);
+int netconf_msg_list_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId);
+int netconf_msg_list_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId);
+
 unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
 
 char * netconf_ce_config_password(const char * username, const char * hostname)
@@ -368,7 +377,7 @@ int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session sess
     unsigned char *hash_sha1 = NULL;
     size_t hlen;
     enum ssh_keytypes_e srv_pubkey_type;
-    
+
     state = ssh_is_server_known(session);
     
     ret = ssh_get_publickey(session, &srv_pubkey);
@@ -392,15 +401,15 @@ int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session sess
         break; /* ok */
     
     case SSH_SERVER_KNOWN_CHANGED:
-        OVSDB_PRINTF_DEBUG_TRACE("Remote host key changed, the connection will be terminated!");
+        OVSDB_PRINTF_DEBUG_ERROR("Remote host key changed, the connection will be terminated!");
         goto fail;
     
     case SSH_SERVER_FOUND_OTHER:
-        OVSDB_PRINTF_DEBUG_TRACE("The remote host key was not found but another type of key was, the connection will be terminated.");
+        OVSDB_PRINTF_DEBUG_ERROR("The remote host key was not found but another type of key was, the connection will be terminated.");
         goto fail;
     
     case SSH_SERVER_FILE_NOT_FOUND:
-        OVSDB_PRINTF_DEBUG_TRACE("Could not find the known hosts file.");
+        OVSDB_PRINTF_DEBUG_ERROR("Could not find the known hosts file.");
         /* fallback to SSH_SERVER_NOT_KNOWN behavior */
         
     case SSH_SERVER_NOT_KNOWN:
@@ -431,7 +440,7 @@ fail:
 int netconf_ce_config_init(void)
 {
     int port = 0;
-    
+
     port = atoi(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFPORT));
     
     if (port <= 0 || port >= 65535)
@@ -501,34 +510,30 @@ void netconf_ce_config_destory(void)
     return;
 }
 
-void netconf_get_confbit(unsigned int uiVlanId, unsigned char *netconfBit)
-{
-    //int    i           = 0;
-    unsigned int    uiVlanValue = 0;
-
-    uiVlanValue = uiVlanId;
-    netconfBit[(uiVlanValue >> 3)] |= (1 << (uiVlanValue & 0x07));
-}
-
-void netconf_vlanbit2netvlanbit(unsigned char aucVlanBit[], unsigned char aucNetVlanBitStr[])
+void netconf_vlanbit2netvlanbit(unsigned int uiVlanId, unsigned char aucNetVlanBitStr[])
 {
     unsigned int uiLoopi     = 0;
     unsigned int uiLoopj     = 0;
     unsigned int uiLoopk     = 0;
     unsigned int ucVlanValue = 0;
+    unsigned char vlanBit[NETCONF_VLANBIT_LEN] = {0};
+
+    vlanBit[(uiVlanId >> 3)] |= (1 << (uiVlanId & 0x07));
 
     for (uiLoopi = 0; (uiLoopi < NETCONF_VLANBIT_LEN) && (uiLoopk < NETCONF_VLANBIT_LEN_STR); uiLoopi++)
     {
         ucVlanValue = 0;
         for (uiLoopj = 0; uiLoopj < 8; uiLoopj++)
         {
-            ucVlanValue += NETCONF_BIT_REVERSE(aucVlanBit[uiLoopi], uiLoopj);
+            ucVlanValue += NETCONF_BIT_REVERSE(vlanBit[uiLoopi], uiLoopj);
         }
 
         NETCONF_NUM_TO_STR((ucVlanValue & 0xf), aucNetVlanBitStr[uiLoopk+1]);
         NETCONF_NUM_TO_STR(((ucVlanValue & 0xf0)>>4), aucNetVlanBitStr[uiLoopk]);
         uiLoopk += 2;
     }
+
+    return;
 }
 
 
@@ -545,11 +550,16 @@ unsigned int netconf_ce_set_config(char* send_data)
 RETRY:
     rpc = nc_rpc_generic(send_data);
 
-    if (NULL == rpc)
+    if (NULL == rpc) {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to rpc generic.");
         return OVSDB_ERR;
+    }
 
     /* netconf下发配置*/
     sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
+
+    nc_rpc_free(rpc);
+    rpc = NULL;
 
     if (sessionRet != NC_MSG_REPLY){
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to set configuration, error message is %s.",
@@ -565,13 +575,9 @@ RETRY:
         goto RETRY;
     }
 
-    nc_rpc_free(rpc);
-    rpc = NULL;
-
     uiRet = nc_reply_get_type(reply);
-    if (uiRet != NC_REPLY_OK)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to set vxlan configuration, error message is %s.",
+    if (uiRet != NC_REPLY_OK) {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to set vxlan configuration, error message is %s",
                            nc_reply_get_errormsg(reply));
         nc_reply_free(reply);
         return OVSDB_ERR;
@@ -594,8 +600,10 @@ unsigned int netconf_ce_query_config_data(char* send_data, char ** ppcReplyData)
 RETRY:
     rpc = nc_rpc_generic(send_data);
 
-    if (NULL == rpc)
+    if (NULL == rpc) {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to rpc generic.");
         return OVSDB_ERR;
+    }
 
     /* netconf下发配置*/
     sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
@@ -651,8 +659,10 @@ unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
 RETRY:
     rpc = nc_rpc_generic(send_data);
 
-    if (NULL == rpc)
+    if (NULL == rpc) {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to rpc generic.");
         return OVSDB_ERR;
+    }
 
     /* netconf下发配置*/
     sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
@@ -759,14 +769,12 @@ unsigned int netconf_ce_config_bd(unsigned int uiVniId)
     return OVSDB_OK;
 }
 
-
 /*
    undo bridge-domain xxxx
 */
 unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
 {
     OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_undo_config_bd********************");
-    unsigned int    uiLoop                            = 0;
     unsigned int    uiRet                             = 0;
     char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
     char            *paReplyData                      = NULL;
@@ -811,23 +819,6 @@ unsigned int netconf_ce_undo_config_bd(unsigned int uiVniId)
 
     /* 1.1 删除此VNI对应的隧道列表 */
     (void)netconf_ce_undo_config_vxlan_tunnel(uiVniId, NULL);
-
-    for (uiLoop = 0; uiLoop < VXLAN_TUNNEL_NUM_MAX; uiLoop++) {
-        if (switch_vxlan_tunnel[uiLoop].vni != uiVniId)
-            continue;
-        
-        /*释放switch_vxlan_tunnel中的该条表项*/
-        if(switch_vxlan_tunnel[uiLoop].source_ip)
-        {
-            free(switch_vxlan_tunnel[uiLoop].source_ip);
-        }
-        if(switch_vxlan_tunnel[uiLoop].dst_ip)
-        {
-            free(switch_vxlan_tunnel[uiLoop].dst_ip);
-        }
-
-        memset(&switch_vxlan_tunnel[uiLoop], 0, sizeof(struct hw_vtep_vxlan_tunnel));
-    }
 
     /* 2.config [undo bridge-domain uiVniId] */
     snprintf(send_data, sizeof(send_data),
@@ -1130,7 +1121,6 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
     unsigned int  uiRet                                   = 0;
     unsigned int  uiSubInterNum                           = 0;
     char          send_data[NETCONF_SEND_DATA_LEN]        = {0};
-    unsigned char vlanBit[NETCONF_VLANBIT_LEN]            = {0};
     unsigned char netconfBit[NETCONF_VLANBIT_LEN_STR + 1] = {0};
     char          *paReplyData                            = NULL;
 
@@ -1275,8 +1265,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
     }
     else
     {
-        netconf_get_confbit(uiVlanId, vlanBit);
-        netconf_vlanbit2netvlanbit(vlanBit, netconfBit);
+        netconf_vlanbit2netvlanbit(uiVlanId, netconfBit);
 
         /* 配置encapsulation dot1q vid uiVlanId */
         snprintf(send_data, sizeof(send_data),
@@ -1303,7 +1292,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
         uiRet = netconf_ce_set_config(send_data);
         if (OVSDB_OK != uiRet)
         {
-            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [encapsulation untag]");
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [encapsulation vlan %d]", uiVlanId);
             return OVSDB_ERR;
         }
     }
@@ -2930,6 +2919,27 @@ hw_vtep_vxlan_tunnel_get_empty(void)
     return NULL;
 }
 
+void 
+hw_vtep_vxlan_tunnel_delete_by_vni
+(
+    int vni
+)
+{
+    int i;
+
+    for (i = 0; i < VXLAN_TUNNEL_NUM_MAX; i++) {
+        if (switch_vxlan_tunnel[i].vni != vni)
+            continue;
+
+        /*释放switch_vxlan_tunnel中的该条表项*/
+        OVSDB_FREE(switch_vxlan_tunnel[i].source_ip);
+        OVSDB_FREE(switch_vxlan_tunnel[i].dst_ip);
+        memset(&switch_vxlan_tunnel[i], 0, sizeof(struct hw_vtep_vxlan_tunnel));
+    }
+
+    return;
+}
+
 int 
 hw_vtep_vxlan_tunnel_add
 (
@@ -3368,7 +3378,7 @@ void ovsdb_port_update_vlanbinding_process
     struct json_array *old_vlanbinding_elems_array = NULL;
     int old_vlanbinding_elem_num = 0;
     int i, j;
-    unsigned int uiRet;
+    int ret;
     int new_vlanid, old_vlanid;
     bool flag;
     struct uuid new_uuid_ls, old_uuid_ls;
@@ -3412,8 +3422,8 @@ void ovsdb_port_update_vlanbinding_process
             continue;
         }
 
-        uiRet = netconf_ce_undo_config_port(old_vlanid, port_name);
-        if (OVSDB_OK != uiRet)
+        ret = netconf_msg_list_undo_config_port(old_vlanid, port_name);
+        if (OVSDB_OK != ret)
         {
             OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config subinterface, new_vlanid = %d, port = %s.",
                                      old_vlanid, port_name);
@@ -3455,8 +3465,8 @@ void ovsdb_port_update_vlanbinding_process
             continue;
         }
 
-        uiRet = netconf_ce_config_port(new_vlanid, pstLS->tunnel_key, port_name);
-        if (OVSDB_OK != uiRet)
+        ret = netconf_msg_list_config_port(new_vlanid, pstLS->tunnel_key, port_name);
+        if (OVSDB_OK != ret)
         {
             OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config subinterface, new_vlanid = %d, vni = %d, port = %s.",
                                      new_vlanid, pstLS->tunnel_key, port_name);
@@ -3876,7 +3886,6 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel
 )
 {
     int ret = 0;
-    unsigned int uiRet = 0;
     struct hw_vtep_vxlan_tunnel * pstHW_vxlan_tunnel;
 
     if(tunnel_key < MIN_VNI_ID) {
@@ -3886,8 +3895,8 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel
 
     pstHW_vxlan_tunnel = hw_vtep_vxlan_tunnel_query(tunnel_key, pl_dst_ip);
     if (NULL == pstHW_vxlan_tunnel) {
-        uiRet = netconf_ce_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
-        if (OVSDB_OK != uiRet) {
+        ret = netconf_msg_list_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+        if (OVSDB_OK != ret) {
             OVSDB_PRINTF_DEBUG_ERROR("Failed to config vxlan tunnel, vni %d, dstip %s, type = %d.",
                 tunnel_key, pl_dst_ip, type);
             //return;
@@ -3912,7 +3921,6 @@ void ovsdb_physical_locator_process_undo_config_vxlan_tunnel
 )
 {
     int ret = 0;
-    unsigned int uiRet = 0;
     struct hw_vtep_vxlan_tunnel * pstHW_vxlan_tunnel;
 
     if(tunnel_key < MIN_VNI_ID) {
@@ -3933,8 +3941,8 @@ void ovsdb_physical_locator_process_undo_config_vxlan_tunnel
     }
 
     if (0 == pstHW_vxlan_tunnel->used_bit) {
-        uiRet = netconf_ce_undo_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
-        if (OVSDB_OK != uiRet) {
+        ret = netconf_msg_list_undo_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+        if (OVSDB_OK != ret) {
             OVSDB_PRINTF_DEBUG_ERROR("Failed to undo config vxlan tunnel, vni %d, dstip %s, type = %d.",
                 tunnel_key, pl_dst_ip, type);
             //return;
@@ -3947,7 +3955,6 @@ void ovsdb_physical_locator_process_undo_config_vxlan_tunnel
 void ovsdb_ucast_macs_remote_process_add(struct uuid * uuidUMR)
 {
     int ret;
-    unsigned int uiRet;
     char mac_ce[MAX_CE_MAC_LEN] = {0};
     struct ovsdb_vtep_table_ucast_macs_remote * pstUMR;
     struct ovsdb_vtep_table_logical_switch * pstLS;
@@ -3981,11 +3988,11 @@ void ovsdb_ucast_macs_remote_process_add(struct uuid * uuidUMR)
     mac_translate_ovsdb_to_ce(pstUMR->MAC, mac_ce);
 
     /* 下发远端静态MAC表 */
-    uiRet = netconf_ce_config_vxlan_tunnel_static_mac(mac_ce,
+    ret = netconf_msg_list_config_vxlan_tunnel_static_mac(mac_ce,
         ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
         pstPL->dst_ip, pstLS->tunnel_key);
 
-    if (uiRet != OVSDB_OK) {
+    if (ret != OVSDB_OK) {
         OVSDB_PRINTF_DEBUG_ERROR("Configure static mac failed, uuid: "UUID_FMT,
             UUID_ARGS(uuidUMR));
         return;
@@ -4006,7 +4013,6 @@ void ovsdb_ucast_macs_remote_process_add(struct uuid * uuidUMR)
 void ovsdb_ucast_macs_remote_process_delete(struct uuid * uuidUMR)
 {
     int ret;
-    unsigned int uiRet;
     char mac_ce[MAX_CE_MAC_LEN] = {0};
     struct ovsdb_vtep_table_ucast_macs_remote * pstUMR;
     struct ovsdb_vtep_table_logical_switch * pstLS;
@@ -4036,10 +4042,10 @@ void ovsdb_ucast_macs_remote_process_delete(struct uuid * uuidUMR)
     mac_translate_ovsdb_to_ce(pstUMR->MAC, mac_ce);
 
     /* 删除远端静态MAC表 */
-    uiRet = netconf_ce_undo_config_vxlan_tunnel_static_mac(mac_ce,
+    ret = netconf_msg_list_undo_config_vxlan_tunnel_static_mac(mac_ce,
         ovsdb_vtep_db_table.table_physical_switch[0].tunnel_ips[0],
         pstPL->dst_ip, pstLS->tunnel_key);
-    if (uiRet != OVSDB_OK) {
+    if (ret != OVSDB_OK) {
         OVSDB_PRINTF_DEBUG_ERROR("Configure undo static mac failed, uuid: "UUID_FMT,
             UUID_ARGS(uuidUMR));
         return;
@@ -4335,6 +4341,8 @@ static void parse_options(int argc, char *argv[]);
 static struct jsonrpc *open_jsonrpc(const char *server);
 static void fetch_dbs(struct jsonrpc *, struct svec *dbs);
 
+struct jsonrpc * g_rpc_transact = NULL;
+
 int
 main(int argc, char *argv[])
 {
@@ -4366,10 +4374,13 @@ main(int argc, char *argv[])
         if (argc - optind > command->min_args
             && (isalpha((unsigned char) argv[optind][0])
                 && strchr(argv[optind], ':'))) {
-            rpc = open_jsonrpc(argv[optind++]);
+            rpc = open_jsonrpc(argv[optind]);
+            g_rpc_transact = open_jsonrpc(argv[optind]);
+            optind++;
         } else {
             char *sock = xasprintf("unix:%s/db.sock", ovs_rundir());
             rpc = open_jsonrpc(sock);
+            g_rpc_transact = open_jsonrpc(sock);
             free(sock);
         }
     } else {
@@ -4406,6 +4417,7 @@ main(int argc, char *argv[])
     command->handler(rpc, database, argc - optind, argv + optind);
 
     jsonrpc_close(rpc);
+    jsonrpc_close(g_rpc_transact);
 
     if (ferror(stdout)) {
         VLOG_FATAL("write to stdout failed");
@@ -5088,7 +5100,6 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
             struct json *name;
             struct json *des;
             struct json *tunnel_key;    /*vni*/
-            unsigned int uiRet = 0;
             char *paReply = NULL;
             struct uuid uuid_self;
 
@@ -5113,8 +5124,8 @@ void logical_switch_table_process(struct jsonrpc *rpc, struct json *new, struct 
                 OVSDB_PRINTF_DEBUG_ERROR("Add logical switch error, ret = %d, UUDI: "UUID_FMT, iRet, UUID_ARGS(&uuid_self));
             }
 
-            uiRet = netconf_ce_config_bd(vni);
-            if (OVSDB_OK != uiRet)
+            iRet = netconf_msg_list_config_bd(vni);
+            if (OVSDB_OK != iRet)
             {
                 OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config bridge-domain when inserting table in processing logical switch table");
                 //return;
@@ -5313,7 +5324,6 @@ void logical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, struc
             int k=0;
             int iRet = 0;
             int other_ls_has_same_vni_exist=0;
-            unsigned int uiRet = 0;
             struct ovsdb_vtep_table_logical_switch * pstLS;
 
             uuid_zero(&deleted_ls_uuid);
@@ -5327,12 +5337,14 @@ void logical_switch_table_process_2(struct jsonrpc *rpc, struct json *new, struc
                 return;
             }
 
-            uiRet = netconf_ce_undo_config_bd(pstLS->tunnel_key);
-            if (OVSDB_OK != uiRet)
+            iRet = netconf_msg_list_undo_config_bd(pstLS->tunnel_key);
+            if (OVSDB_OK != iRet)
             {
                 OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config bridge-domain when inserting table in processing logical switch table");
                 return;
             }
+
+            hw_vtep_vxlan_tunnel_delete_by_vni(pstLS->tunnel_key);
 
             iRet = ovsdb_table_logical_switch_delete(&deleted_ls_uuid);
             if (iRet != OVSDB_OK)
@@ -5613,6 +5625,7 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
             int used_num_locators = 0;
 
             (void)uuid_from_string(&uuid_self, node_name);
+            (void)memcpy(array_locators, 0, sizeof(struct uuid) * LOCATOR_NUM_IN_LOCATION_SET);
 
             locators = shash_find_data(json_object(new), "locators");
             locators_value = json_array(locators);
@@ -8085,7 +8098,7 @@ void do_transact_temp_query_logical_switch_has_mcast_local_record(struct jsonrpc
     if(!rows_elem_num)
     {
         *ls_has_mcast_local_record = 0;
-        OVSDB_PRINTF_DEBUG_WARN("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
+        OVSDB_PRINTF_DEBUG_TRACE("logical switch with uuid = "UUID_FMT"has no mcast local record.", UUID_ARGS(ls_uuid));
     }
     else
     {
@@ -9226,7 +9239,7 @@ void ovsdb_refresh_bfd_status(struct jsonrpc *rpc, char * dst_ip, char * sess_st
 
     do_transact_temp(rpc, json_query);
 
-    return;    
+    return;
 }
 
 unsigned int ovsdb_get_bfd_status(struct jsonrpc *rpc, char *paData)
@@ -10247,6 +10260,610 @@ void ovsdb_write_mcast_local(void *args)
 }
 #endif
 
+#if OVSDB_DESC("netconf packet download")
+
+#include "list.h"
+
+struct netconf_msg_list {
+    struct ovs_list head;
+    unsigned int num;
+    struct timeval tv;
+};
+
+struct netconf_msg_node {
+    struct ovs_list list_node;
+    char * msg;
+    size_t len;
+};
+
+struct netconf_msg_list g_netconf_msg_list = {0};
+
+#define netconf_msg_list_count(list) ((list)->num)
+
+#define netconf_msg_list_init(list) \
+do{ \
+    list_init(&((list)->head)); \
+    ((list)->num) = 0; \
+    xgettimeofday(&((list)->tv)); \
+}while(0)
+
+#define netconf_msg_list_push_back(list, node) \
+do{ \
+    list_push_back(&((list)->head), (node)); \
+    ((list)->num)++; \
+    xgettimeofday(&((list)->tv)); \
+}while(0)
+
+#define netconf_msg_list_destroy_node(node) \
+do{ \
+    OVSDB_FREE((node)->msg); \
+    OVSDB_FREE(node);        \
+}while(0)
+
+#define NETCONF_MSG_ERROR_TYPE "continue-on-error"
+
+#define NETCONF_MSG_HEAD \
+"<edit-config>"\
+"<target><running/></target>"\
+"<default-operation>merge</default-operation>"\
+"<error-option>"NETCONF_MSG_ERROR_TYPE"</error-option>"\
+"<config>"
+
+#define NETCONF_MSG_END \
+"</config>"\
+"</edit-config>"
+
+#define NETCONF_MSG_DATA_LEN 512
+#define NETCONF_MSG_LIST_MAX 40
+#define NETCONF_MSG_LIST_TIME 5
+
+int netconf_msg_list_send_msg(struct netconf_msg_list * list)
+{
+    size_t len = 0;
+    int ret = 0;
+    int len_current = 0;
+    struct netconf_msg_node * node;
+    char * msg = NULL;
+
+    if (0 == netconf_msg_list_count(list))
+        return OVSDB_OK;
+
+    len = strlen(NETCONF_MSG_HEAD) + strlen(NETCONF_MSG_END) + 1;
+
+    LIST_FOR_EACH(node, list_node, &list->head) {
+        len += node->len;
+    }
+
+    msg = (char *)malloc(len);
+    if (NULL == msg) {
+        OVSDB_PRINTF_DEBUG_ERROR("Malloc msg error, len = %d.", len);
+        return OVSDB_ERR;
+    }
+
+    (void)memset(msg, 0, len);
+
+    len_current = snprintf(msg, len, NETCONF_MSG_HEAD);
+    if (len_current < 0) {
+        OVSDB_FREE(msg);
+        return OVSDB_ERR;
+    }
+
+    LIST_FOR_EACH_POP(node, list_node, &list->head) {
+        ret = snprintf(msg + len_current, len - len_current, node->msg);
+
+        netconf_msg_list_destroy_node(node);
+        list->num --;
+
+        if (ret < 0) {
+            OVSDB_PRINTF_DEBUG_ERROR("set msg = %d.", list->num);
+            OVSDB_FREE(msg);
+            return OVSDB_ERR;
+        }
+        len_current += ret;
+    }
+
+    ret = snprintf(msg + len_current, len - len_current, NETCONF_MSG_END);
+    if (ret < 0) {
+        OVSDB_PRINTF_DEBUG_ERROR("set msg end fail. len = %d, current = %d.", len, len_current);
+        OVSDB_FREE(msg);
+        return OVSDB_ERR;
+    }
+
+    (void)netconf_ce_set_config(msg);
+
+    OVSDB_FREE(msg);
+    return OVSDB_OK;
+}
+
+void netconf_msg_list_send_all_msg(struct netconf_msg_list * list)
+{
+    struct timeval tv;
+    time_t temp;
+
+    if (0 == netconf_msg_list_count(list))
+        return;
+
+    xgettimeofday(&tv);
+    temp = (list->tv.tv_sec <= tv.tv_sec) ?
+        (tv.tv_sec - list->tv.tv_sec) : (list->tv.tv_sec - tv.tv_sec);
+    if (temp >= NETCONF_MSG_LIST_TIME) {
+        (void)netconf_msg_list_send_msg(list);
+        (void)memcpy(&list->tv, &tv, sizeof(struct timeval));
+    }
+
+    return;
+}
+
+int netconf_msg_list_add_node(char * msg)
+{
+    struct netconf_msg_node * node;
+
+    if (NULL == msg)
+        return OVSDB_ERR;
+        
+    node = (struct netconf_msg_node *)malloc(sizeof(struct netconf_msg_node));
+    if (NULL == node)
+        return OVSDB_ERR;
+
+    (void)memset(node, 0, sizeof(struct netconf_msg_node));
+
+    OVSDB_SET_STR(node->msg, msg);
+
+    if (NULL == node->msg) {
+        OVSDB_FREE(node);
+        return OVSDB_ERR;
+    }
+
+    node->len = strlen(node->msg);
+
+    netconf_msg_list_push_back(&g_netconf_msg_list, node);
+
+    if (netconf_msg_list_count(&g_netconf_msg_list) >= NETCONF_MSG_LIST_MAX) {
+        netconf_msg_list_send_msg(&g_netconf_msg_list);
+    }
+
+    return OVSDB_OK;
+}
+
+int netconf_msg_list_config_bd(unsigned int uiVniId)
+{
+    int  ret                              = 0;
+    char send_data[NETCONF_MSG_DATA_LEN]  = {0};
+
+    if (uiVniId > MAX_VNI_ID || uiVniId < MIN_VNI_ID)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]The VNI id %d is illegal.", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    snprintf(send_data, sizeof(send_data),
+            "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
+              "<bds>"\
+                "<bd operation=\"create\">"\
+                  "<bdId>%d</bdId>"\
+                "</bd>"\
+              "</bds>"\
+            "</evc>"\
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Vni2Bds>"\
+                "<nvo3Vni2Bd operation=\"create\">"\
+                  "<vniId>%d</vniId>"\
+                  "<bdId>%d</bdId>"\
+                "</nvo3Vni2Bd>"\
+              "</nvo3Vni2Bds>"\
+            "</nvo3>", uiVniId, uiVniId, uiVniId);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [vxlan vni %d]", uiVniId);
+    }
+
+    return ret;
+}
+
+/*
+   undo bridge-domain xxxx
+*/
+int netconf_msg_list_undo_config_bd(unsigned int uiVniId)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+
+    if (uiVniId > MAX_VNI_ID || uiVniId < MIN_VNI_ID)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]The VNI id %d is illegal.", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    (void)netconf_msg_list_undo_config_vxlan_tunnel(uiVniId, NULL);
+
+    snprintf(send_data, sizeof(send_data),
+            "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" format-version=\"1.0\" content-version=\"1.0\">"\
+              "<bds>"\
+                "<bd operation=\"delete\">"\
+                  "<bdId>%d</bdId>"\
+                "</bd>"\
+              "</bds>"\
+            "</evc>", uiVniId);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo bridge-domain %d].", uiVniId);
+    }
+
+    return ret;
+}
+
+int netconf_msg_list_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+
+    /* 1.判断VNI是否合法 */
+    if((uiVni > MAX_VNI_ID)||(uiVni < MIN_VNI_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is not valid.", uiVni);
+        return OVSDB_ERR;
+    }
+
+    /* 2.判断dst_ip是否为空 */
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Dst_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    /* 4.配置vni uiVni head-end peer-list paDstIp */
+    snprintf(send_data, sizeof(send_data),
+            "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<nvo3Nves>"\
+                "<nvo3Nve operation=\"merge\">"\
+                  "<ifName>nve1</ifName>"\
+                  "<vniMembers>"\
+                    "<vniMember operation=\"merge\">"\
+                      "<vniId>%d</vniId>"\
+                      "<nvo3VniPeers>"\
+                        "<nvo3VniPeer operation=\"merge\">"\
+                          "<peerAddr>%s</peerAddr>"\
+                        "</nvo3VniPeer>"\
+                      "</nvo3VniPeers>"\
+                    "</vniMember>"\
+                  "</vniMembers>"\
+                "</nvo3Nve>"\
+              "</nvo3Nves>"\
+            "</nvo3>", uiVni, paDstIp);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [vni %d head-end peer-list %s]", uiVni, paDstIp);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+int netconf_msg_list_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+
+    /* 1.判断VNI是否合法 */
+    if((uiVni > MAX_VNI_ID)||(uiVni < MIN_VNI_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is not valid.", uiVni);
+        return OVSDB_ERR;
+    }
+
+    /* 4.删除vxlan隧道 */
+    if (NULL != paDstIp) {
+        /* 4.1.先删除头端复制列表*/
+        snprintf(send_data, sizeof(send_data),
+                "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<nvo3Nves>"\
+                    "<nvo3Nve operation=\"merge\">"\
+                      "<ifName>nve1</ifName>"\
+                      "<vniMembers>"\
+                        "<vniMember operation=\"merge\">"\
+                          "<vniId>%d</vniId>"\
+                          "<nvo3VniPeers>"\
+                            "<nvo3VniPeer operation=\"delete\">"\
+                              "<peerAddr>%s</peerAddr>"\
+                            "</nvo3VniPeer>"\
+                          "</nvo3VniPeers>"\
+                        "</vniMember>"\
+                      "</vniMembers>"\
+                    "</nvo3Nve>"\
+                  "</nvo3Nves>"\
+                "</nvo3>", uiVni, paDstIp);
+    }
+    else {
+        /* 4.2.再删除VNI*/
+        snprintf(send_data, sizeof(send_data),
+                "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<nvo3Nves>"\
+                    "<nvo3Nve operation=\"merge\">"\
+                      "<ifName>nve1</ifName>"\
+                      "<vniMembers>"\
+                        "<vniMember operation=\"delete\">"\
+                          "<vniId>%d</vniId>"\
+                        "</vniMember>"\
+                      "</vniMembers>"\
+                    "</nvo3Nve>"\
+                  "</nvo3Nves>"\
+                "</nvo3>", uiVni);
+    }
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        if (NULL != paDstIp)
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
+        else
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo vni %d]", uiVni);
+    }
+
+    return ret;
+}
+
+int netconf_msg_list_config_port(unsigned int uiVlanId, unsigned int uiVniId, char* paIfname)
+{
+    int    ret = 0;
+    char   subifname[NETCONF_SUBINTERFACE_LEN] = {0};
+    char  *send_data = NULL;
+    unsigned char netconfBit[NETCONF_VLANBIT_LEN_STR + 1] = {0};
+
+    if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vlan id %d id invalid", uiVlanId);
+        return OVSDB_ERR;
+    }
+
+    if((uiVniId > MAX_VNI_ID)||(uiVniId < MIN_VNI_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is invalid", uiVniId);
+        return OVSDB_ERR;
+    }
+
+    if(!paIfname)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Port ifname name %s is NULL", paIfname);
+        return;
+    }
+
+    (void)snprintf(subifname, NETCONF_SUBINTERFACE_LEN,
+        "%s.%d", paIfname, uiVlanId + 1);
+
+    send_data = (char *)malloc(NETCONF_SEND_DATA_LEN);
+    if (NULL == send_data){
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to malloc msg [interface %s mode l2]", subifname);
+        return OVSDB_ERR;
+    }
+
+    (void)memset(send_data, 0, NETCONF_SEND_DATA_LEN);
+
+    /* 配置interface paIfname.uiSubInterNum mode l2 */
+    (void)snprintf(send_data, NETCONF_SEND_DATA_LEN,
+        "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+          "<interfaces>"\
+            "<interface operation=\"create\">"\
+              "<ifName>%s</ifName>"\
+              "<l2SubIfFlag>true</l2SubIfFlag>"\
+            "</interface>"\
+          "</interfaces>"\
+        "</ifm>"\
+        "<evc xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+          "<bds>"\
+            "<bd operation=\"merge\">"\
+              "<bdId>%d</bdId>"\
+                "<servicePoints>"\
+                  "<servicePoint operation=\"create\">"\
+                    "<ifName>%s</ifName>"\
+                  "</servicePoint>"\
+              "</servicePoints>"\
+            "</bd>"\
+          "</bds>"\
+        "</evc>", subifname, uiVniId, subifname);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [interface %s mode l2]", subifname);
+        OVSDB_FREE(send_data);
+        return ret;
+    }
+
+    if(0 == uiVlanId)
+    {
+        /* 配置encapsulation untag */
+        (void)snprintf(send_data, NETCONF_SEND_DATA_LEN,
+            "<ethernet xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<servicePoints>"\
+                "<servicePoint operation=\"merge\">"\
+                  "<ifName>%s</ifName>"\
+                  "<flowType>untag</flowType>"\
+                "</servicePoint>"\
+              "</servicePoints>"\
+            "</ethernet>", subifname);
+
+        ret = netconf_msg_list_add_node(send_data);
+        if (OVSDB_OK != ret)
+        {
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config %s [encapsulation untag]", subifname);
+        }
+    }
+    else
+    {
+        netconf_vlanbit2netvlanbit(uiVlanId, netconfBit);
+
+        /* 配置encapsulation dot1q vid uiVlanId */
+        (void)snprintf(send_data, NETCONF_SEND_DATA_LEN,
+                "<ethernet xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+                  "<servicePoints>"\
+                    "<servicePoint operation=\"merge\">"\
+                      "<ifName>%s</ifName>"\
+                      "<flowType>dot1q</flowType>"\
+                      "<flowDot1qs>"\
+                        "<dot1qVids>%s:%s</dot1qVids>"\
+                      "</flowDot1qs>"\
+                    "</servicePoint>"\
+                  "</servicePoints>"\
+                "</ethernet>", subifname, netconfBit, netconfBit);
+
+        ret = netconf_msg_list_add_node(send_data);
+        if (OVSDB_OK != ret)
+        {
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config %s [encapsulation vlan %d]", subifname, uiVlanId);
+        }
+    }
+
+    OVSDB_FREE(send_data);
+
+    return ret;
+}
+
+int netconf_msg_list_undo_config_port(unsigned int uiVlanId, char* paIfname)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+    unsigned int  uiSubInterNum            = 0;
+
+    if((uiVlanId > MAX_VLAN_ID)||(uiVlanId < MIN_VLAN_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vlan id %d id invalid", uiVlanId);
+        return OVSDB_ERR;
+    }
+
+    if(!paIfname)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Port ifname name %s is NULL", paIfname);
+        return OVSDB_ERR;
+    }
+
+    /* 为子接口号赋值 */
+    uiSubInterNum = uiVlanId + 1;
+
+    /* 删除interface paIfname.uiSubInterNum mode l2 */
+    snprintf(send_data, sizeof(send_data),
+            "<ifm xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<interfaces>"\
+                "<interface operation=\"delete\">"\
+                  "<ifName>%s.%d</ifName>"\
+                  "<l2SubIfFlag>true</l2SubIfFlag>"\
+                "</interface>"\
+              "</interfaces>"\
+            "</ifm>", paIfname, uiSubInterNum);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo interface %s.%d mode l2]", paIfname, uiSubInterNum);
+    }
+
+    return ret;
+}
+
+int netconf_msg_list_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+
+    if(!paSourceIp)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]source_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]dst_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    if(!paStaticMac)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]ce_mac is NULL.");
+        return OVSDB_ERR;
+    }
+
+    /* 配置mac-address static paStaticMac bridge-domain uiVniId source paSourceIp peer paDstIp vni uiVniId */
+    snprintf(send_data, sizeof(send_data),
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<vxlanFdbs>"\
+                "<vxlanFdb operation=\"create\">"\
+                  "<slotId>0</slotId>"\
+                  "<macAddress>%s</macAddress>"\
+                  "<bdId>%d</bdId>"\
+                  "<macType>static</macType>"\
+                  "<sourceIP>%s</sourceIP>"\
+                  "<peerIP>%s</peerIP>"\
+                  "<vnId>%d</vnId>"\
+                "</vxlanFdb>"\
+              "</vxlanFdbs>"\
+            "</mac>", paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [mac-address static %s bridge-domain %d source %s peer %s vni %d]",
+            paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+    }
+
+    return ret;
+}
+
+int netconf_msg_list_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+
+    if(!paSourceIp)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]source_ip is NULL");
+        return OVSDB_ERR;
+    }
+
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]dst_ip is NULL");
+        return OVSDB_ERR;
+    }
+
+    if(!paStaticMac)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]ce_mac is NULL");
+        return OVSDB_ERR;
+    }
+
+    /* 删除mac-address static paStaticMac bridge-domain uiVniId source paSourceIp peer paDstIp vni uiVniId */
+    snprintf(send_data, sizeof(send_data),
+            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
+              "<vxlanFdbs>"\
+                "<vxlanFdb operation=\"delete\">"\
+                  "<slotId>0</slotId>"\
+                  "<macAddress>%s</macAddress>"\
+                  "<bdId>%d</bdId>"\
+                  "<macType>static</macType>"\
+                  "<sourceIP>%s</sourceIP>"\
+                  "<peerIP>%s</peerIP>"\
+                  "<vnId>%d</vnId>"\
+                "</vxlanFdb>"\
+              "</vxlanFdbs>"\
+            "</mac>", paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo mac-address static %s bridge-domain %d source %s peer %s vni %d]",
+            paStaticMac, uiVniId, paSourceIp, paDstIp, uiVniId);
+    }
+
+    return ret;
+}
+
+#endif
+
 /*以do monitor函数为主体*/
 void
 do_vtep(struct jsonrpc *rpc, const char *database,
@@ -10480,17 +11097,16 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     struct monitored_table *mts;
     size_t n_mts, allocated_mts;
 
+    netconf_msg_list_init(&g_netconf_msg_list);
+
 #if OVSDB_DESC("Apply transact rpc")
-    struct jsonrpc *rpc_transact;
-    char *sock = xasprintf("unix:%s/db.sock", ovs_rundir());
-    rpc_transact = open_jsonrpc(sock);
-    free(sock);
-#endif
+    struct jsonrpc *rpc_transact = g_rpc_transact;
 
     if (NULL == rpc_transact) {
         OVSDB_PRINTF_DEBUG_ERROR("transact rpc is NULL.");
         return;
     }
+#endif
 
     ovsdb_set_manager(rpc_transact);
     
@@ -10555,17 +11171,17 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
 
     for (;;) {
         unixctl_server_run(unixctl);
-        unsigned int uiExist = 0;
+        //unsigned int uiExist = 0;
         while (!blocked) {
             struct jsonrpc_msg *msg;
             int error;
 
             /* netconf连接保活 */
-            if (0 == uiExist) {
-                (void)netconf_ce_query_nve_port("Nve1", &uiExist);
-                uiExist = 10;
-            }
-            uiExist--;
+            //if (0 == uiExist) {
+            //    (void)netconf_ce_query_nve_port("Nve1", &uiExist);
+            //    uiExist = 10;
+            //}
+            //uiExist--;
 
             error = jsonrpc_recv(rpc, &msg);
             if (error == EAGAIN) {
@@ -10615,6 +11231,9 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
                     do_table_process(rpc_transact, params->u.array.elems[1], mts, n_mts, false);
                     do_table_process_2(rpc_transact, params->u.array.elems[1], mts, n_mts, false);
 
+                    //发送netconf消息队列中的消息
+                    netconf_msg_list_send_all_msg(&g_netconf_msg_list);
+
                     OVSDB_PRINTF_DEBUG_TRACE("end do_table_processn.");
 
                     fflush(stdout);
@@ -10635,9 +11254,6 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
         unixctl_server_wait(unixctl);
         poll_block();
     }
-
-    jsonrpc_close(rpc_transact);
-
 }
 
 

@@ -27,6 +27,7 @@
 #define MIN_VLAN_ID                   0
 #define NETCONF_VLANBIT_LEN           512
 #define NETCONF_VLANBIT_LEN_STR       1024
+#define NETCONF_SUBINTERFACE_LEN      64
 #define NETCONF_MAX_REPLY_LEN         20000
 #define MAX_IFNAME_LEN                32
 #define MAX_CE_MAC_LEN                15

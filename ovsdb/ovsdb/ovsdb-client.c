@@ -253,8 +253,16 @@ int ovsdb_client_init_cfg(void)
     int     i;
     char    acTmp[512]      = {0};
     char    *pcHead, *pcEnd;
-    
-    fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg","rb");
+    char    *pcEnvHome = getenv("HOME");
+
+    if (NULL == pcEnvHome) {
+        printf("\r\n[ERROR]Get env \"HOME\" failed.");
+        return -1;
+    }
+
+    (void)snprintf(acTmp, 512, "%s/openvswitch/ovsdb-client.cfg", pcEnvHome);
+
+    fpCfg = fopen(acTmp, "rb");
     if (NULL == fpCfg) {
         printf("\r\n[ERROR]Open ovsdb-client.cfg failed.");
         return -1;

@@ -5625,7 +5625,7 @@ void physical_locator_set_table_process(struct jsonrpc *rpc, struct json *new, s
             int used_num_locators = 0;
 
             (void)uuid_from_string(&uuid_self, node_name);
-            (void)memcpy(array_locators, 0, sizeof(struct uuid) * LOCATOR_NUM_IN_LOCATION_SET);
+            (void)memset(array_locators, 0, sizeof(struct uuid) * LOCATOR_NUM_IN_LOCATION_SET);
 
             locators = shash_find_data(json_object(new), "locators");
             locators_value = json_array(locators);

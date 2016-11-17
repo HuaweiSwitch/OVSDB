@@ -12,9 +12,6 @@ init_ovsdb()
     #ovsdb-client vtep monitor &
     ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-monitor.log vtep monitor &
     echo `date +'%Y-%m-%d %H:%M:%S'` start monitor OK >> $log_file
-    #ovsdb-client vtep transact &
-    ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-transact.log vtep transact &
-    echo `date +'%Y-%m-%d %H:%M:%S'` start transact OK >> $log_file
 
     return
 }

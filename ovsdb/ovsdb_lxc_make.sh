@@ -30,11 +30,11 @@ chmod 775 ./mydeb/DEBIAN/postrm
 chmod 775 ./mydeb/DEBIAN/control
 
 # Make the lib&bin directory
-mkdir -p ./mydeb/etc
 mkdir -p ./mydeb/etc/openvswitch
 mkdir -p ./mydeb/usr/local/etc/openvswitch/
-mkdir -p ./mydeb/usr/local/var/run/
 mkdir -p ./mydeb/usr/local/var/run/openvswitch/
+mkdir -p ./mydeb/usr/local/var/lib/openvswitch/
+mkdir -p ./mydeb/usr/local/var/log/openvswitch/
 mkdir -p ./mydeb/usr/bin
 mkdir -p ./mydeb/usr/lib/powerpc-linux-gnu
 
@@ -52,6 +52,12 @@ cp libssh.so.4 ./mydeb/usr/lib/powerpc-linux-gnu
 cp libssh_threads.so.4 ./mydeb/usr/lib/powerpc-linux-gnu
 cp ovsdb-client.cfg ./mydeb/etc/openvswitch
 cp ovsdb-init ./mydeb/etc/openvswitch
+
+chmod 777 ./mydeb/etc/openvswitch -R
+chmod 777 ./mydeb/usr/local/etc/openvswitch/ -R
+chmod 777 ./mydeb/usr/local/var/run/openvswitch/ -R
+chmod 777 ./mydeb/usr/local/var/lib/openvswitch/ -R
+chmod 777 ./mydeb/usr/local/var/log/openvswitch/ -R
 
 # Write files
 echo Package: ovsdb >> ./mydeb/DEBIAN/control
@@ -74,6 +80,11 @@ echo 'rm -rf /usr/bin/ovsdb-server' >> ./mydeb/DEBIAN/postrm
 echo 'rm -rf /usr/bin/ovsdb-tool' >> ./mydeb/DEBIAN/postrm
 echo 'rm -rf /usr/bin/vtep-ctl' >> ./mydeb/DEBIAN/postrm
 echo 'rm -rf /etc/init.d/ovsdb-init' >> ./mydeb/DEBIAN/postrm
+echo 'rm -rf /etc/openvswitch' >> ./mydeb/DEBIAN/postrm
+echo 'rm -rf /usr/local/etc/openvswitch' >> ./mydeb/DEBIAN/postrm
+echo 'rm -rf /usr/local/var/run/openvswitch' >> ./mydeb/DEBIAN/postrm
+echo 'rm -rf /usr/local/var/lib/openvswitch' >> ./mydeb/DEBIAN/postrm
+echo 'rm -rf /usr/local/var/log/openvswitch' >> ./mydeb/DEBIAN/postrm
 #echo 'rm -rf /usr/lib/powerpc-linux-gnu/libnetconf.so.0' >> ./mydeb/DEBIAN/postrm
 #echo 'rm -rf /etc/openvswitch/ovsdb-client.cfg' >> ./mydeb/DEBIAN/postrm
 

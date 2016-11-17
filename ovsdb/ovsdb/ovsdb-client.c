@@ -253,16 +253,8 @@ int ovsdb_client_init_cfg(void)
     int     i;
     char    acTmp[512]      = {0};
     char    *pcHead, *pcEnd;
-    char    *pcEnvHome = getenv("HOME");
 
-    if (NULL == pcEnvHome) {
-        printf("\r\n[ERROR]Get env \"HOME\" failed.");
-        return -1;
-    }
-
-    (void)snprintf(acTmp, 512, "%s/openvswitch/ovsdb-client.cfg", pcEnvHome);
-
-    fpCfg = fopen(acTmp, "rb");
+    fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg", "rb");
     if (NULL == fpCfg) {
         printf("\r\n[ERROR]Open ovsdb-client.cfg failed.");
         return -1;
@@ -4349,7 +4341,8 @@ static void parse_options(int argc, char *argv[]);
 static struct jsonrpc *open_jsonrpc(const char *server);
 static void fetch_dbs(struct jsonrpc *, struct svec *dbs);
 
-struct jsonrpc * g_rpc_transact = NULL;
+struct jsonrpc * g_rpc_transact1 = NULL;
+struct jsonrpc * g_rpc_transact2 = NULL;
 
 int
 main(int argc, char *argv[])
@@ -4383,12 +4376,14 @@ main(int argc, char *argv[])
             && (isalpha((unsigned char) argv[optind][0])
                 && strchr(argv[optind], ':'))) {
             rpc = open_jsonrpc(argv[optind]);
-            g_rpc_transact = open_jsonrpc(argv[optind]);
+            g_rpc_transact1 = open_jsonrpc(argv[optind]);
+            g_rpc_transact2 = open_jsonrpc(argv[optind]);
             optind++;
         } else {
             char *sock = xasprintf("unix:%s/db.sock", ovs_rundir());
             rpc = open_jsonrpc(sock);
-            g_rpc_transact = open_jsonrpc(sock);
+            g_rpc_transact1 = open_jsonrpc(sock);
+            g_rpc_transact2 = open_jsonrpc(sock);
             free(sock);
         }
     } else {
@@ -4425,7 +4420,8 @@ main(int argc, char *argv[])
     command->handler(rpc, database, argc - optind, argv + optind);
 
     jsonrpc_close(rpc);
-    jsonrpc_close(g_rpc_transact);
+    jsonrpc_close(g_rpc_transact1);
+    jsonrpc_close(g_rpc_transact2);
 
     if (ferror(stdout)) {
         VLOG_FATAL("write to stdout failed");
@@ -10228,9 +10224,9 @@ void ovsdb_write_mcast_local(void *args)
                             "\"uuid-name\":\"locator_uuid\","\
                             "\"op\":\"insert\"}]",
                     UUID_ARGS(&ls_info[i].uuid_ls),tunnel_ip);
-                do_transact_temp(rpc, json_insert_mcast_local);
+                    do_transact_temp(rpc, json_insert_mcast_local);
 
-                OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is without locator before");
+                    OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is without locator before");
                 }
                 /* 有nve ip对应的locator */
                 else
@@ -11108,7 +11104,7 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     netconf_msg_list_init(&g_netconf_msg_list);
 
 #if OVSDB_DESC("Apply transact rpc")
-    struct jsonrpc *rpc_transact = g_rpc_transact;
+    struct jsonrpc *rpc_transact = g_rpc_transact1;
 
     if (NULL == rpc_transact) {
         OVSDB_PRINTF_DEBUG_ERROR("transact rpc is NULL.");

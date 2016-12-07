@@ -261,14 +261,15 @@ enum OVSDB_CLIENT_CFG_TYPE
     OVSDB_CLIENT_CFG_TUNNERBFDENABLE,
     OVSDB_CLIENT_CFG_NETCONFIP,
     OVSDB_CLIENT_CFG_NETCONFPORT,
-    OVSDB_CLIENT_CFG_NETCONFUSER,
-    OVSDB_CLIENT_CFG_NETCONFPW,
+    //OVSDB_CLIENT_CFG_NETCONFUSER,
+    //OVSDB_CLIENT_CFG_NETCONFPW,
     OVSDB_CLIENT_CFG_MAX,
 };
 
+#define OVSDB_CLIENT_CFG_STRINGLEN 256
 struct ovsdb_client_cfg_map {
     char acType[32];
-    char acAttribute[256];
+    char acAttribute[OVSDB_CLIENT_CFG_STRINGLEN];
     int (*pfnCheck)(void);
 };
 
@@ -786,6 +787,7 @@ void do_transact_temp_query_tunnel_bfd_params_enable(struct jsonrpc *rpc, char *
 void do_vtep(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );
 void do_vtep_transact(struct jsonrpc *rpc);
 void do_vtep_monitor(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );
+void do_vtep_savekey(struct jsonrpc * rpc, const char * database, int argc, char * argv []);
 
 
 /*below is socket related*/

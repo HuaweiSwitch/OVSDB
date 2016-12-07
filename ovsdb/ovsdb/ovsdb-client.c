@@ -257,13 +257,8 @@ int ovsdb_client_init_cfg(void)
     int     i;
     char    acTmp[512]      = {0};
     char    *pcHead, *pcEnd;
-<<<<<<< HEAD
 
     fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg", "rb");
-=======
-    
-    fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg","rb");
->>>>>>> parent of d5399c2... 淇敼ovsdb_client_init_cfg鍑芥暟涓殑ovsdb-client.cfg璺緞
     if (NULL == fpCfg) {
         printf("\r\n[ERROR]Open ovsdb-client.cfg failed.");
         return -1;
@@ -288,7 +283,7 @@ int ovsdb_client_init_cfg(void)
                 pcHead++;
         
             if ((pcHead >= pcEnd) ||
-                (sizeof(gast_ovsdb_client_cfg_map[i].acAttribute) <= (pcEnd - pcHead))) {
+                (OVSDB_CLIENT_CFG_STRINGLEN <= (pcEnd - pcHead))) {
                 continue;
             }
         
@@ -356,6 +351,7 @@ struct ovsdb_nc_sess {
     pid_t tid;
     struct nc_session * pst_netconf_session;
     struct nc_cpblts  * pst_cpblts;
+    bool init;
 };
 struct ovsdb_nc_sess gst_nc_sess[2] = {0};
 
@@ -382,6 +378,7 @@ int netconf_msg_list_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, char
 
 unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
 
+#if OVSDB_DEBUG
 char * netconf_ce_config_password(const char * username, const char * hostname)
 {
     char * pcPW = xmalloc(256);
@@ -393,6 +390,7 @@ char * netconf_ce_config_password(const char * username, const char * hostname)
     
     return pcPW;
 }
+#endif
 
 int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session session)
 {
@@ -462,10 +460,155 @@ fail:
     return -1;
 }
 
+#include "huaweiswitch-crypto-pub.h"
+#define NETCONF_STRING_FILE "/etc/openvswitch/netconf_key"
+#define NETCONF_STRING_LEN 256
+char * netconf_pw = NULL;
+
+char * netconf_ce_config_password(const char * username, const char * hostname)
+{
+    char * pcPW = xmalloc(NETCONF_STRING_LEN);
+    
+    if (NULL == pcPW)
+        return NULL;
+    
+    strncpy(pcPW, netconf_pw, NETCONF_STRING_LEN);
+    
+    return pcPW;
+}
+
+int netconf_ce_config_save(const char * username, const char * password)
+{
+    int ret;
+    int length = strlen(username) + strlen(password) + 3;
+    unsigned char * msg;
+    unsigned char * out;
+    unsigned int out_len;
+    unsigned int i = 0;
+    FILE* pstFile;
+
+    unlink(NETCONF_STRING_FILE);
+
+    msg = (unsigned char *)malloc(length);
+    if (msg == NULL) {
+        return -1;
+    }
+
+    (void)memset(msg, 0, length);
+
+    length = snprintf(msg, length, "%s\r\n%s", username, password);
+
+    ret = Encrypto(msg, length, &out, &out_len);
+    if (ret != 0) {
+        return -1;
+    }
+
+    pstFile = fopen(NETCONF_STRING_FILE, "w+");
+    if (NULL == pstFile) {
+        return -1;
+    }
+
+    while(i < out_len){
+        fputc(out[i], pstFile);
+        i++;
+    }
+
+    fclose(pstFile);
+
+    return 0;    
+}
+
+int netconf_ce_config_input_username
+(
+    char * username,
+    unsigned int usernamelen,
+    char * password,
+    unsigned int passwordlen
+)
+{
+    unsigned int length = 0;
+
+    unlink(NETCONF_STRING_FILE);
+
+    //不存在
+    printf("Netconf user: ");
+    fgets(username, usernamelen, stdin);
+    while (length < usernamelen) {
+        if (username[length] == '\n') {
+            username[length] = '\0';
+            break;
+        }
+        length++;
+    }
+
+    length = passwordlen;
+    printf("Password: ");
+    Getpassword(password, &length);
+
+    return 0;    
+}
+
+int netconf_ce_config_read_username
+(
+    char * username,
+    unsigned int usernamelen,
+    char * password,
+    unsigned int passwordlen
+)
+{
+    FILE* pstFile = fopen(NETCONF_STRING_FILE, "r");
+    unsigned char temp[1024] = {0};
+    int len = 0;
+    int ret;
+    unsigned char * out;
+    unsigned char * out_cur;
+    unsigned int out_len;
+
+    if (NULL == pstFile) {
+        printf("Error: Please save netconf password first.\r\n");
+        return -1;
+    }
+
+    while (len < 1024) {
+        ret = fgetc(pstFile);
+        if (ret == EOF) {
+            break;
+        }
+
+        temp[len] = (unsigned char)ret;
+        len++;
+    }
+    (void)fclose(pstFile);
+
+    ret = Decrypto(temp, len, &out, &out_len);
+    if (ret != 0) {
+        printf("Error: Please save netconf password first.\r\n");
+        return -1;
+    }
+
+    out_cur = out;
+    for (len = 0; len < out_len; len++) {
+        if ((*out_cur == '\r') && (*(out_cur + 1) == '\n'))
+            break;
+        out_cur++;
+    }
+
+    (void)memcpy(username, out, len);
+    username[len + 1] = '\0';
+
+    (void)memcpy(password, out + len + 2, out_len - (len + 2));
+    password[out_len - (len + 2) + 1] = '\0';
+
+    OVSDB_FREE(out);
+
+    return 0;    
+}
+
 int netconf_ce_config_init(struct ovsdb_nc_sess * pst_nc_sess)
 {
-    int i = 0;
+    int ret;
     int port = 0;
+    char username[NETCONF_STRING_LEN] = {0};
 
     port = atoi(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFPORT));
     
@@ -501,21 +644,54 @@ int netconf_ce_config_init(struct ovsdb_nc_sess * pst_nc_sess)
     nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:notification:1.0");
     nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:interleave:1.0");
 
-    nc_callback_ssh_host_authenticity_check(netconf_ce_ssh_hostkey_check_default);
-    nc_callback_sshauth_password(netconf_ce_config_password);
-    
-    pst_nc_sess->pst_netconf_session = nc_session_connect(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFIP),
-                                             (unsigned short)port,
-                                             OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFUSER),
-                                             pst_nc_sess->pst_cpblts);
-    if (NULL == pst_nc_sess->pst_netconf_session)
-    {
+    netconf_pw = (char *)malloc(NETCONF_STRING_LEN);
+    if (NULL == netconf_pw) {
         nc_cpblts_free(pst_nc_sess->pst_cpblts);
-        pst_nc_sess->pst_cpblts = NULL;
-        printf("\r\n[ERROR]Session connect failed when trying to connect to netconf.");
+        return -1;
+    }
+    (void)memset(netconf_pw, 0, NETCONF_STRING_LEN);
+
+    if (pst_nc_sess->init == true) {
+        ret = netconf_ce_config_input_username(username, NETCONF_STRING_LEN,
+                                     netconf_pw, NETCONF_STRING_LEN);
+    }
+    else {
+        ret = netconf_ce_config_read_username(username, NETCONF_STRING_LEN,
+                                         netconf_pw, NETCONF_STRING_LEN);
+    }
+    if (ret != 0) {
+        nc_cpblts_free(pst_nc_sess->pst_cpblts);
+        OVSDB_FREE(netconf_pw);
         return -1;
     }
 
+    nc_callback_ssh_host_authenticity_check(netconf_ce_ssh_hostkey_check_default);
+    nc_callback_sshauth_password(netconf_ce_config_password);
+
+    pst_nc_sess->pst_netconf_session = nc_session_connect(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFIP),
+                                             (unsigned short)port,
+                                             username,
+                                             pst_nc_sess->pst_cpblts);
+    if (NULL == pst_nc_sess->pst_netconf_session)
+    {
+        printf("[ERROR]Session connect failed when trying to connect to netconf.\r\n");
+        nc_cpblts_free(pst_nc_sess->pst_cpblts);
+        pst_nc_sess->pst_cpblts = NULL;
+        OVSDB_FREE(netconf_pw);
+        return -1;
+    }
+
+    if (pst_nc_sess->init == true) {
+        ret = netconf_ce_config_save(username, netconf_pw);
+        if (ret != 0) {
+            printf("[ERROR]Save netconf failed.\r\n");
+            netconf_ce_config_destory(pst_nc_sess);
+            OVSDB_FREE(netconf_pw);
+            return -1;
+        }
+    }
+    
+    OVSDB_FREE(netconf_pw);
     return 0;
 }
 
@@ -4577,6 +4753,10 @@ usage(void)
            "    in DATBASE on SERVER.\n"
            "\n  dump [SERVER] [DATABASE] [TABLE [COLUMN]...]\n"
            "    dump contents of DATABASE on SERVER to stdout\n"
+           "\n  vtep monitor\n"
+           "    CloudEngine switch ovsdb agent process.\n"
+           "\n  save-key\n"
+           "    save private key and netconf user infomation.\n"
            "\nThe default SERVER is unix:%s/db.sock.\n"
            "The default DATABASE is Open_vSwitch.\n",
            program_name, program_name, ovs_rundir());
@@ -10878,31 +11058,149 @@ do_vtep(struct jsonrpc *rpc, const char *database,
     if (0 != ovsdb_client_init_cfg())
         return;
 
-    /* create netconf connection*/
-    gst_nc_sess[0].tid = gettid();
-    ret = netconf_ce_config_init(&gst_nc_sess[0]);
-    if (0 != ret)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("Netconf session connects failed.");
-        return;
-    }
-
-    ret = ovsdb_client_init_system_mac();
-    if (0 != ret)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("Get system mac failed.");
-        return;
-    }
-
     if(!strcmp(argv[0], "monitor"))
     {
+        /* create netconf connection*/
+        gst_nc_sess[0].tid = gettid();
+        gst_nc_sess[0].init = false;
+        ret = netconf_ce_config_init(&gst_nc_sess[0]);
+        if (0 != ret)
+        {
+            OVSDB_PRINTF_DEBUG_ERROR("Netconf session connects failed.");
+            return;
+        }
+
+        ret = ovsdb_client_init_system_mac();
+        if (0 != ret)
+        {
+            OVSDB_PRINTF_DEBUG_ERROR("Get system mac failed.");
+            return;
+        }
+
         OVSDB_PRINTF_DEBUG_TRACE("ovsdb-client transact.");
         do_vtep_transact(g_rpc_transact2);
 
         OVSDB_PRINTF_DEBUG_TRACE("ovsdb-client monitor.");
         do_vtep_monitor(rpc, database, argc, argv);
+
+        netconf_ce_config_destory(&gst_nc_sess[0]);
+        gst_nc_sess[0].tid = 0;
     }
 
+    return;
+}
+
+#define OVSDB_PRIVATE_KEYLENGTH      2048
+#define OVSDB_PRIVATE_FILE           "/etc/openvswitch/vtep-privkey.pem"
+#define OVSDB_PRIVATE_ENCRYPTO_FILE  "/etc/openvswitch/private_key"
+
+int do_vtep_save_private_key(char * private_keyfile)
+{
+    int ret;
+    FILE* pstFile;
+
+    pstFile = fopen(private_keyfile, "r");
+    if (NULL == pstFile) {
+        printf("Error: Open privkey.pem failed.\r\n");
+        return -1;
+    }
+
+    char * private_key = NULL;
+    unsigned int length = 0;
+    private_key = (char *)malloc(OVSDB_PRIVATE_KEYLENGTH);
+    if (NULL == private_key) {
+        printf("Error: Malloc key failed.\r\n");
+        fclose(pstFile);
+        return -1;
+    }
+    (void)memset(private_key, 0, OVSDB_PRIVATE_KEYLENGTH);
+
+    while (!feof(pstFile)) {
+        if (length >= OVSDB_PRIVATE_KEYLENGTH - 1) {
+            printf("Error: Key is too length.\r\n");
+            fclose(pstFile);
+            OVSDB_FREE(private_key);
+            return -1;
+        }
+        private_key[length] = fgetc(pstFile);
+        length++;
+    }
+    fclose(pstFile);
+
+    unsigned char * out = NULL;
+    unsigned int out_len = 0;
+    ret = Encrypto(private_key, length, &out, &out_len);
+    if (ret != 0) {
+        printf("Error: Encrypto key failed.\r\n");
+        OVSDB_FREE(private_key);
+        return -1;
+    }
+
+    OVSDB_FREE(private_key);
+
+    unlink(OVSDB_PRIVATE_ENCRYPTO_FILE);
+
+    pstFile = fopen(OVSDB_PRIVATE_ENCRYPTO_FILE, "w+");
+    if (NULL == pstFile) {
+        printf("Error: Create encrypto file failed.\r\n");
+        return -1;
+    }
+
+    for(length = 0; length < out_len; length++) {
+        (void)fputc(out[length], pstFile);
+    }
+
+    fclose(pstFile);
+    OVSDB_FREE(private_key);
+
+    return 0;
+}
+
+void
+do_vtep_savekey(struct jsonrpc *rpc OVS_UNUSED, const char *database OVS_UNUSED,
+        int argc , char *argv[] )
+{
+    char * private_keyfile = OVSDB_PRIVATE_FILE;
+    char input[64] = {0};
+
+    if (argc >= 1) {
+        private_keyfile = argv[0];
+    }
+
+    printf("Are your sure save netconf user and ssl private key, it will delete private key file(yes/no):");
+    while(1) {
+        fgets(input, 64, stdin);
+
+        if (0 == strcmp(input, "yes\n")) {
+            break;
+        }
+        else if (0 == strcmp(input, "no\n")) {
+            return;
+        }
+        (void)memset(input, 0, 64);
+        printf("Please input yes/no:");
+    }
+
+    printf("Please input netconf user name and password.\r\n");
+
+    if (0 != ovsdb_client_init_cfg()) {
+        return;
+    }
+
+    if (0 != do_vtep_save_private_key(private_keyfile)) {
+        return;
+    }
+
+    gst_nc_sess[0].tid = gettid();
+    gst_nc_sess[0].init = true;
+    if (0 != netconf_ce_config_init(&gst_nc_sess[0])) {
+        unlink(OVSDB_PRIVATE_ENCRYPTO_FILE);
+        return;
+    }
+
+    printf("Save successfully.\r\n");
+    unlink(private_keyfile);
+    
     netconf_ce_config_destory(&gst_nc_sess[0]);
     gst_nc_sess[0].tid = 0;
 
@@ -10933,6 +11231,7 @@ void ovsdb_vtep_transact_thread(void *args)
     }
 
     gst_nc_sess[1].tid = gettid();
+    gst_nc_sess[1].init = false;
     ret = netconf_ce_config_init(&gst_nc_sess[1]);
     if (0 != ret)
     {
@@ -10993,9 +11292,9 @@ void do_vtep_transact(struct jsonrpc *rpc)
         do_transact_temp_query_global(rpc, &global_uuid_num, &uuid_global);
         if(global_uuid_num)
         {
-            OVSDB_PRINTF_DEBUG_TRACE("Global Table is present.");
             break;
         }
+        ovsdb_set_manager(rpc);
     }
 
     /*首先检查是否已有physical switch，*/
@@ -11046,7 +11345,7 @@ void do_vtep_transact(struct jsonrpc *rpc)
 
     if (pthread_create(&tid_trasact, NULL, (void *)ovsdb_vtep_transact_thread, args))
     {
-        printf("Error! Create Thread Failed with ovsdb_receive_mac_from_FEI\n");
+        OVSDB_PRINTF_DEBUG_ERROR("Error! Create Thread Failed with ovsdb_receive_mac_from_FEI\n");
         return;
     }
 
@@ -11168,8 +11467,6 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     }
 #endif
 
-    ovsdb_set_manager(rpc_transact);
-    
     daemon_save_fd(STDOUT_FILENO);
     daemonize_start(false);
     if (get_detach()) {
@@ -11341,6 +11638,7 @@ static const struct ovsdb_client_command all_commands[] = {
     { "monitor",            NEED_DATABASE, 1, INT_MAX, do_monitor },
     { "dump",               NEED_DATABASE, 0, INT_MAX, do_dump },
     { "vtep",               NEED_DATABASE, 1, 2,       do_vtep },
+    { "save-key",           NEED_NONE,     0, 1,       do_vtep_savekey },
 
     { "help",               NEED_NONE,     0, INT_MAX, do_help },
 

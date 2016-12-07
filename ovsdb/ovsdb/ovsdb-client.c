@@ -257,8 +257,13 @@ int ovsdb_client_init_cfg(void)
     int     i;
     char    acTmp[512]      = {0};
     char    *pcHead, *pcEnd;
+<<<<<<< HEAD
 
     fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg", "rb");
+=======
+    
+    fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg","rb");
+>>>>>>> parent of d5399c2... 修改ovsdb_client_init_cfg函数中的ovsdb-client.cfg路径
     if (NULL == fpCfg) {
         printf("\r\n[ERROR]Open ovsdb-client.cfg failed.");
         return -1;

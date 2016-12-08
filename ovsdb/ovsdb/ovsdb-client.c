@@ -11181,8 +11181,6 @@ do_vtep_savekey(struct jsonrpc *rpc OVS_UNUSED, const char *database OVS_UNUSED,
         printf("Please input yes/no:");
     }
 
-    printf("Please input netconf user name and password.\r\n");
-
     if (0 != ovsdb_client_init_cfg()) {
         return;
     }
@@ -11190,6 +11188,8 @@ do_vtep_savekey(struct jsonrpc *rpc OVS_UNUSED, const char *database OVS_UNUSED,
     if (0 != do_vtep_save_private_key(private_keyfile)) {
         return;
     }
+
+    printf("Please input netconf user name and password.\r\n");
 
     gst_nc_sess[0].tid = gettid();
     gst_nc_sess[0].init = true;

@@ -4406,7 +4406,7 @@ void ovsdb_mcast_macs_remote_process_delete(struct jsonrpc *rpc, struct uuid * u
 
     pstPLS = ovsdb_table_physical_locator_set_query(&pstMMR->locator_set);
     if (NULL == pstPLS) {
-        OVSDB_PRINTF_DEBUG_ERROR("Can not find physical_locator_set, uuid: "UUID_FMT,
+        OVSDB_PRINTF_DEBUG_WARN("Can not find physical_locator_set, uuid: "UUID_FMT,
             UUID_ARGS(&pstMMR->locator_set));
         return;
     }
@@ -4461,7 +4461,7 @@ void ovsdb_physical_locator_set_process_add(struct uuid * uuidPLS)
     return;
 }
 
-int ovsdb_physical_locator_set_process_delete_proc(void * input, void * output OVS_UNUSED, void * entry)
+int ovsdb_physical_locator_set_process_delete_proc(void * input, void * output, void * entry)
 {
     struct uuid * uuid_PLS = (struct uuid *)input;
     struct ovsdb_vtep_table_mcast_macs_remote * pstMMR =

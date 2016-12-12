@@ -1,19 +1,33 @@
 #!/bin/bash
+#
+### BEGIN INIT INFO
+# Provides:          ovsdb
+# Required-Start:    $local_fs $remote_fs $syslog
+# Required-Stop:     $local_fs $remote_fs $syslog
+# Should-Start:      $network $time
+# Should-Stop:       $network $time
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start and stop the ovsdb daemon
+# Description:       Start and stop the ovsdb daemon
+### END INIT INFO
+#
 
-host=192.168.10.1  #控制器IP
-manage=192.168.0.1 #主机IP
+controller=192.168.10.100
+netconf=192.168.0.1
+log_file=/usr/local/var/log/openvswitch/ovsdb-init.log
 
 init_ovsdb()
 {
-    ovsdb-server --bootstrap-ca-cert=/etc/openvswitch/vswitchd3.cacert -p /etc/openvswitch/vtep-privkey.pem -c /etc/openvswitch/vtep-cert.pem /usr/local/etc/openvswitch/conf.db -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --remote=punix:/usr/local/var/run/openvswitch/db.sock --remote=db:hardware_vtep,Global,managers --no-chdir --log-file=/usr/local/var/log/openvswitch/ovsdb-server.log --pidfile=/usr/local/var/run/openvswitch/ovsdb-server.pid --detach --monitor --remote=ptcp:8111
-    ssh-keygen -f "/root/.ssh/known_hosts" -R $manage
-    echo `date +'%Y-%m-%d %H:%M:%S'` start server OK >> /var/log/ovsdb-init.log
+    ovsdb-server --bootstrap-ca-cert=/etc/openvswitch/vswitchd3.cacert -p /etc/openvswitch/private_key -c /etc/openvswitch/vtep-cert.pem /usr/local/etc/openvswitch/conf.db -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --remote=punix:/usr/local/var/run/openvswitch/db.sock --remote=db:hardware_vtep,Global,managers --no-chdir --log-file=/usr/local/var/log/openvswitch/ovsdb-server.log --pidfile=/usr/local/var/run/openvswitch/ovsdb-server.pid --detach --monitor --remote=ptcp:8111
+    ssh-keygen -R $netconf &>/dev/null
+    echo `date +'%Y-%m-%d %H:%M:%S'` start server OK >> $log_file
     #ovsdb-client vtep monitor &
     ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-monitor.log vtep monitor &
-    echo `date +'%Y-%m-%d %H:%M:%S'` start monitor OK >> /var/log/ovsdb-init.log
+    echo `date +'%Y-%m-%d %H:%M:%S'` start monitor OK >> $log_file
     #ovsdb-client vtep transact &
-    ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-transact.log vtep transact &
-    echo `date +'%Y-%m-%d %H:%M:%S'` start transact OK >> /var/log/ovsdb-init.log
+    #ovsdb-client -vANY:CONSOLE:EMER -vANY:SYSLOG:ERR -vANY:FILE:INFO --log-file=/usr/local/var/log/openvswitch/ovsdb-client-transact.log vtep transact &
+    #echo `date +'%Y-%m-%d %H:%M:%S'` start transact OK >> $log_file
 
     return
 }
@@ -21,44 +35,67 @@ init_ovsdb()
 ping_fun()
 {
     count=1
-    echo `date +'%Y-%m-%d %H:%M:%S'` start >> /var/log/ovsdb-init.log
-    for ((num=1;num<=10;num++));do
-        ping -c $count $host &>/dev/null
+    echo `date +'%Y-%m-%d %H:%M:%S'` start >> $log_file
+    for ((num=1;num<=16;num++));do
+        ping -c $count $controller &>/dev/null
         if [ $? = 0 ];then
-            echo `date +'%Y-%m-%d %H:%M:%S'` ping OK >> /var/log/ovsdb-init.log
+            echo `date +'%Y-%m-%d %H:%M:%S'` ping OK >> $log_file
             sleep 3
 
             return 0
         else
-            echo `date +'%Y-%m-%d %H:%M:%S'` ping failed >> /var/log/ovsdb-init.log
+            echo `date +'%Y-%m-%d %H:%M:%S'` ping failed >> $log_file
             sleep 3
         fi
     done
-    
+
     return 1
+}
+
+get_configure()
+{
+    conf_file="/etc/openvswitch/ovsdb-client.cfg"
+    if [ ! -f "$conf_file" ] ; then
+        echo `date +'%Y-%m-%d %H:%M:%S'` ovsdb-client.cfg is not existed. >> $log_file
+        return 1
+    fi
+
+    controller=`cat /etc/openvswitch/ovsdb-client.cfg | grep "Controller IP:" | awk -F ":" '{print $2}' | awk '{print $1}'`
+    #echo `date +'%Y-%m-%d %H:%M:%S'` controller ip = $controller >> $log_file
+    netconf=`cat /etc/openvswitch/ovsdb-client.cfg | grep "Netconf IP:" | awk -F ":" '{print $2}' | awk '{print $1}'`
+    #echo `date +'%Y-%m-%d %H:%M:%S'` netconf ip = $netconf >> $log_file
+
+    return 0
 }
 
 start_ovsdb()
 {
+    get_configure
+
+    if [ $? = 1 ] ; then
+        return
+    fi
+
     ping_fun
-    
+
     if [ $? = 0 ] ; then
         init_ovsdb
     fi
-    
+
     return
 }
 
 stop_ovsdb()
 {
     ovsdb_pid=`ps -ef | grep "ovsdb-server\: monitoring pid" | grep -v grep | awk '{print $11}'`
-    kill $ovsdb_pid 2>/dev/null
-    echo `date +'%Y-%m-%d %H:%M:%S'` stop ovsdb OK >> /var/log/ovsdb-init.log
+    #kill $ovsdb_pid 2>/dev/null
+    ovs-appctl -t /usr/local/var/run/openvswitch/ovsdb-server.$ovsdb_pid.ctl exit
+    echo `date +'%Y-%m-%d %H:%M:%S'` stop ovsdb OK >> $log_file
 
     return
 }
 
-touch /var/log/ovsdb-init.log
+touch $log_file
 case "$1" in
     start)
         start_ovsdb

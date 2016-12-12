@@ -1103,14 +1103,108 @@ stream_ssl_set_certificate_file(const char *file_name)
  * This function avoids both problems by, whenever either the certificate or
  * the private key file changes, re-reading both of them, in the correct order.
  */
+#include <openssl/rand.h>
+#include "huaweiswitch-crypto-pub.h"
+#define OVSDB_PRIVATE_KEYLENGTH      2048
+#define OVSDB_PRIVATE_TEMP_LEN       64
+#define OVSDB_PRIVATE_TEMP_FILE      "/etc/openvswitch/%x.pem"
+#define OVSDB_PRIVATE_ENCRYPTO_FILE  "/etc/openvswitch/private_key"
+
+static char * stream_ssl_resume_key(const char *private_key_file)
+{
+    int ret;
+    char * private_key_temp = NULL;
+    FILE* pstFile;
+    unsigned char * in = NULL;
+    unsigned int in_len = 0;
+    unsigned char * out = NULL;
+    unsigned int out_len = 0;
+
+    pstFile = fopen(private_key_file, "r");
+    if (NULL == pstFile) {
+        VLOG_ERR("Error: Open %s failed.", private_key_file);
+        return NULL;
+    }
+
+    in = (unsigned char *)malloc(OVSDB_PRIVATE_KEYLENGTH);
+    if (in == NULL) {
+        VLOG_ERR("Error: Malloc input failed.");
+        fclose(pstFile);
+        return NULL;
+    }
+
+    while (in_len < OVSDB_PRIVATE_KEYLENGTH) {
+        ret = fgetc(pstFile);
+        if (ret == EOF) {
+            break;
+        }
+
+        in[in_len] = (unsigned char)ret;
+        in_len++;
+    }
+    (void)fclose(pstFile);
+
+    ret = Decrypto(in, in_len, &out, &out_len);
+    if (ret != 0) {
+        VLOG_ERR("Error: Decrypto failed, ret = %d.", ret);
+        free(in);
+        return NULL;
+    }
+
+    free(in);
+
+    private_key_temp = (char *)malloc(OVSDB_PRIVATE_TEMP_LEN);
+    if (NULL == private_key_temp) {
+        VLOG_ERR("Error: Create temp name failed.");
+        free(out);
+        return NULL;
+    }
+
+    memset(private_key_temp, 0, OVSDB_PRIVATE_TEMP_LEN);
+
+    snprintf(private_key_temp, OVSDB_PRIVATE_TEMP_LEN, OVSDB_PRIVATE_TEMP_FILE, private_key_temp);
+
+    pstFile = fopen(private_key_temp, "w+");
+    if (NULL == pstFile) {
+        VLOG_ERR("Error: Open temp file failed.");
+        free(out);
+        free(private_key_temp);
+        return NULL;
+    }
+
+    for(in_len = 0; in_len < out_len; in_len++) {
+        (void)fputc(out[in_len], pstFile);
+    }
+
+    fclose(pstFile);
+    free(out);
+
+    return private_key_temp;
+}
+
 void
 stream_ssl_set_key_and_cert(const char *private_key_file,
                             const char *certificate_file)
 {
     if (update_ssl_config(&private_key, private_key_file)
         || update_ssl_config(&certificate, certificate_file)) {
+
         stream_ssl_set_certificate_file__(certificate_file);
-        stream_ssl_set_private_key_file__(private_key_file);
+        if (0 != strcmp(private_key_file, OVSDB_PRIVATE_ENCRYPTO_FILE)) {
+            stream_ssl_set_private_key_file__(private_key_file);
+        }
+        else {
+            char * temp;
+            temp = stream_ssl_resume_key(private_key_file);
+            if (temp == NULL) {
+                VLOG_ERR("Resume private key error.");
+            }
+            else {
+                stream_ssl_set_private_key_file__(temp);
+                unlink(temp);
+                free(temp);
+            }
+        }
     }
 }
 

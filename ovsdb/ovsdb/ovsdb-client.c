@@ -24,6 +24,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/syscall.h>
+#ifndef gettid
+#define gettid() syscall(__NR_gettid)
+#endif
 
 #include "command-line.h"
 #include "column.h"
@@ -253,8 +257,8 @@ int ovsdb_client_init_cfg(void)
     int     i;
     char    acTmp[512]      = {0};
     char    *pcHead, *pcEnd;
-    
-    fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg","rb");
+
+    fpCfg = fopen("/etc/openvswitch/ovsdb-client.cfg", "rb");
     if (NULL == fpCfg) {
         printf("\r\n[ERROR]Open ovsdb-client.cfg failed.");
         return -1;
@@ -279,7 +283,7 @@ int ovsdb_client_init_cfg(void)
                 pcHead++;
         
             if ((pcHead >= pcEnd) ||
-                (sizeof(gast_ovsdb_client_cfg_map[i].acAttribute) <= (pcEnd - pcHead))) {
+                (OVSDB_CLIENT_CFG_STRINGLEN <= (pcEnd - pcHead))) {
                 continue;
             }
         
@@ -343,8 +347,25 @@ int ovsdb_bfd_dstIPtoName(struct ovsdb_vtep_table_tunnel * entry)
 
 #if OVSDB_DESC("netconf")
 /*netconf session id*/
-struct nc_session* gst_netconf_session = NULL;
-struct nc_cpblts*  gst_cpblts          = NULL;
+struct ovsdb_nc_sess {
+    pid_t tid;
+    struct nc_session * pst_netconf_session;
+    struct nc_cpblts  * pst_cpblts;
+    bool init;
+};
+struct ovsdb_nc_sess gst_nc_sess[2] = {0};
+
+#define NETCONF_GET_MY_TID_SESSION(session) \
+do { \
+    pid_t my_tid = gettid(); \ 
+    int i; \
+    for (i = 0; i < 2; i++) { \
+        if (gst_nc_sess[i].tid == my_tid) { \
+            session = gst_nc_sess + i; \
+            break; \
+        } \
+    } \
+}while(0)
 
 int netconf_msg_list_config_bd(unsigned int uiVniId);
 int netconf_msg_list_undo_config_bd(unsigned int uiVniId);
@@ -357,6 +378,7 @@ int netconf_msg_list_undo_config_vxlan_tunnel_static_mac(char* paStaticMac, char
 
 unsigned int netconf_ce_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
 
+#if OVSDB_DEBUG
 char * netconf_ce_config_password(const char * username, const char * hostname)
 {
     char * pcPW = xmalloc(256);
@@ -368,6 +390,7 @@ char * netconf_ce_config_password(const char * username, const char * hostname)
     
     return pcPW;
 }
+#endif
 
 int netconf_ce_ssh_hostkey_check_default (const char* hostname, ssh_session session)
 {
@@ -437,9 +460,155 @@ fail:
     return -1;
 }
 
-int netconf_ce_config_init(void)
+#include "huaweiswitch-crypto-pub.h"
+#define NETCONF_STRING_FILE "/etc/openvswitch/netconf_key"
+#define NETCONF_STRING_LEN 256
+char * netconf_pw = NULL;
+
+char * netconf_ce_config_password(const char * username, const char * hostname)
 {
+    char * pcPW = xmalloc(NETCONF_STRING_LEN);
+    
+    if (NULL == pcPW)
+        return NULL;
+    
+    strncpy(pcPW, netconf_pw, NETCONF_STRING_LEN);
+    
+    return pcPW;
+}
+
+int netconf_ce_config_save(const char * username, const char * password)
+{
+    int ret;
+    int length = strlen(username) + strlen(password) + 3;
+    unsigned char * msg;
+    unsigned char * out;
+    unsigned int out_len;
+    unsigned int i = 0;
+    FILE* pstFile;
+
+    unlink(NETCONF_STRING_FILE);
+
+    msg = (unsigned char *)malloc(length);
+    if (msg == NULL) {
+        return -1;
+    }
+
+    (void)memset(msg, 0, length);
+
+    length = snprintf(msg, length, "%s\r\n%s", username, password);
+
+    ret = Encrypto(msg, length, &out, &out_len);
+    if (ret != 0) {
+        return -1;
+    }
+
+    pstFile = fopen(NETCONF_STRING_FILE, "w+");
+    if (NULL == pstFile) {
+        return -1;
+    }
+
+    while(i < out_len){
+        fputc(out[i], pstFile);
+        i++;
+    }
+
+    fclose(pstFile);
+
+    return 0;    
+}
+
+int netconf_ce_config_input_username
+(
+    char * username,
+    unsigned int usernamelen,
+    char * password,
+    unsigned int passwordlen
+)
+{
+    unsigned int length = 0;
+
+    unlink(NETCONF_STRING_FILE);
+
+    //不存在
+    printf("Netconf user: ");
+    fgets(username, usernamelen, stdin);
+    while (length < usernamelen) {
+        if (username[length] == '\n') {
+            username[length] = '\0';
+            break;
+        }
+        length++;
+    }
+
+    length = passwordlen;
+    printf("Password: ");
+    Getpassword(password, &length);
+
+    return 0;    
+}
+
+int netconf_ce_config_read_username
+(
+    char * username,
+    unsigned int usernamelen,
+    char * password,
+    unsigned int passwordlen
+)
+{
+    FILE* pstFile = fopen(NETCONF_STRING_FILE, "r");
+    unsigned char temp[1024] = {0};
+    int len = 0;
+    int ret;
+    unsigned char * out;
+    unsigned char * out_cur;
+    unsigned int out_len;
+
+    if (NULL == pstFile) {
+        printf("Error: Please save netconf password first.\r\n");
+        return -1;
+    }
+
+    while (len < 1024) {
+        ret = fgetc(pstFile);
+        if (ret == EOF) {
+            break;
+        }
+
+        temp[len] = (unsigned char)ret;
+        len++;
+    }
+    (void)fclose(pstFile);
+
+    ret = Decrypto(temp, len, &out, &out_len);
+    if (ret != 0) {
+        printf("Error: Please save netconf password first.\r\n");
+        return -1;
+    }
+
+    out_cur = out;
+    for (len = 0; len < out_len; len++) {
+        if ((*out_cur == '\r') && (*(out_cur + 1) == '\n'))
+            break;
+        out_cur++;
+    }
+
+    (void)memcpy(username, out, len);
+    username[len + 1] = '\0';
+
+    (void)memcpy(password, out + len + 2, out_len - (len + 2));
+    password[out_len - (len + 2) + 1] = '\0';
+
+    OVSDB_FREE(out);
+
+    return 0;    
+}
+
+int netconf_ce_config_init(struct ovsdb_nc_sess * pst_nc_sess)
+{
+    int ret;
     int port = 0;
+    char username[NETCONF_STRING_LEN] = {0};
 
     port = atoi(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFPORT));
     
@@ -448,63 +617,96 @@ int netconf_ce_config_init(void)
         return -1;
     }
     
-    gst_cpblts = nc_cpblts_new(NULL);
-    if (gst_cpblts == NULL)
+    pst_nc_sess->pst_cpblts = nc_cpblts_new(NULL);
+    if (pst_nc_sess->pst_cpblts == NULL)
     {
         return -1;
     }
 
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:base:1.0");
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:writable-running:1.0");
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:candidate:1.0");
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:confirmed-commit:1.0");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/discard-commit/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:base:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:writable-running:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:candidate:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:confirmed-commit:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/discard-commit/1.0");
 
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:startup:1.0");
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:rollback-on-error:1.0");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/sync/1.1");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/sync/1.0");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/exchange/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:startup:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:rollback-on-error:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/sync/1.1");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/sync/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/exchange/1.0");
 
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/active/1.0");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/action/1.0");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/execute-cli/1.0");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/update/1.0");
-    nc_cpblts_add(gst_cpblts, "http://www.huawei.com/netconf/capability/commit-description/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/active/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/action/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/execute-cli/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/update/1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "http://www.huawei.com/netconf/capability/commit-description/1.0");
 
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:notification:1.0");
-    nc_cpblts_add(gst_cpblts, "urn:ietf:params:netconf:capability:interleave:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:notification:1.0");
+    nc_cpblts_add(pst_nc_sess->pst_cpblts, "urn:ietf:params:netconf:capability:interleave:1.0");
+
+    netconf_pw = (char *)malloc(NETCONF_STRING_LEN);
+    if (NULL == netconf_pw) {
+        nc_cpblts_free(pst_nc_sess->pst_cpblts);
+        return -1;
+    }
+    (void)memset(netconf_pw, 0, NETCONF_STRING_LEN);
+
+    if (pst_nc_sess->init == true) {
+        ret = netconf_ce_config_input_username(username, NETCONF_STRING_LEN,
+                                     netconf_pw, NETCONF_STRING_LEN);
+    }
+    else {
+        ret = netconf_ce_config_read_username(username, NETCONF_STRING_LEN,
+                                         netconf_pw, NETCONF_STRING_LEN);
+    }
+    if (ret != 0) {
+        nc_cpblts_free(pst_nc_sess->pst_cpblts);
+        OVSDB_FREE(netconf_pw);
+        return -1;
+    }
 
     nc_callback_ssh_host_authenticity_check(netconf_ce_ssh_hostkey_check_default);
     nc_callback_sshauth_password(netconf_ce_config_password);
-    
-    gst_netconf_session = nc_session_connect(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFIP),
+
+    pst_nc_sess->pst_netconf_session = nc_session_connect(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFIP),
                                              (unsigned short)port,
-                                             OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_NETCONFUSER),
-                                             gst_cpblts);
-    if (NULL == gst_netconf_session)
+                                             username,
+                                             pst_nc_sess->pst_cpblts);
+    if (NULL == pst_nc_sess->pst_netconf_session)
     {
-        nc_cpblts_free(gst_cpblts);
-        gst_cpblts = NULL;
-        printf("\r\n[ERROR]Session connect failed when trying to connect to netconf.");
+        printf("[ERROR]Session connect failed when trying to connect to netconf.\r\n");
+        nc_cpblts_free(pst_nc_sess->pst_cpblts);
+        pst_nc_sess->pst_cpblts = NULL;
+        OVSDB_FREE(netconf_pw);
         return -1;
     }
 
+    if (pst_nc_sess->init == true) {
+        ret = netconf_ce_config_save(username, netconf_pw);
+        if (ret != 0) {
+            printf("[ERROR]Save netconf failed.\r\n");
+            netconf_ce_config_destory(pst_nc_sess);
+            OVSDB_FREE(netconf_pw);
+            return -1;
+        }
+    }
+    
+    OVSDB_FREE(netconf_pw);
     return 0;
 }
 
-void netconf_ce_config_destory(void)
+void netconf_ce_config_destory(struct ovsdb_nc_sess * pst_nc_sess)
 {
-    if (NULL != gst_netconf_session)
+    if (NULL != pst_nc_sess->pst_netconf_session)
     {
-        nc_session_free(gst_netconf_session);
-        gst_netconf_session = NULL;
+        nc_session_free(pst_nc_sess->pst_netconf_session);
+        pst_nc_sess->pst_netconf_session = NULL;
     }
 
-    if (NULL != gst_cpblts)
+    if (NULL != pst_nc_sess->pst_cpblts)
     {
-        nc_cpblts_free(gst_cpblts);
-        gst_cpblts = NULL;
+        nc_cpblts_free(pst_nc_sess->pst_cpblts);
+        pst_nc_sess->pst_cpblts = NULL;
     }
 
     return;
@@ -547,6 +749,13 @@ unsigned int netconf_ce_set_config(char* send_data)
 
     OVSDB_NULL_RETURN(send_data);
 
+    struct ovsdb_nc_sess * pst_session = NULL;
+    NETCONF_GET_MY_TID_SESSION(pst_session);
+    if (NULL == pst_session) {
+        OVSDB_PRINTF_DEBUG_ERROR("Can't find netconf session, my tid = %d.", gettid());
+        return OVSDB_ERR;
+    }
+
 RETRY:
     rpc = nc_rpc_generic(send_data);
 
@@ -556,7 +765,7 @@ RETRY:
     }
 
     /* netconf下发配置*/
-    sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
+    sessionRet = nc_session_send_recv(pst_session->pst_netconf_session, rpc, &reply);
 
     nc_rpc_free(rpc);
     rpc = NULL;
@@ -569,8 +778,8 @@ RETRY:
             return OVSDB_ERR;
         }
         // 链接断开重连
-        netconf_ce_config_destory();
-        (void)netconf_ce_config_init();
+        netconf_ce_config_destory(pst_session);
+        (void)netconf_ce_config_init(pst_session);
         uiTry++;
         goto RETRY;
     }
@@ -597,6 +806,13 @@ unsigned int netconf_ce_query_config_data(char* send_data, char ** ppcReplyData)
 
     OVSDB_NULL_RETURN(send_data);
 
+    struct ovsdb_nc_sess * pst_session = NULL;
+    NETCONF_GET_MY_TID_SESSION(pst_session);
+    if (NULL == pst_session) {
+        OVSDB_PRINTF_DEBUG_ERROR("Can't find netconf session, my tid = %d.", gettid());
+        return OVSDB_ERR;
+    }
+
 RETRY:
     rpc = nc_rpc_generic(send_data);
 
@@ -606,7 +822,7 @@ RETRY:
     }
 
     /* netconf下发配置*/
-    sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
+    sessionRet = nc_session_send_recv(pst_session->pst_netconf_session, rpc, &reply);
 
     nc_rpc_free(rpc);
     rpc = NULL;
@@ -619,8 +835,8 @@ RETRY:
             return OVSDB_ERR;
         }
         // 链接断开重连
-        netconf_ce_config_destory();
-        (void)netconf_ce_config_init();
+        netconf_ce_config_destory(pst_session);
+        (void)netconf_ce_config_init(pst_session);
         uiTry++;
         goto RETRY;
     }
@@ -656,6 +872,13 @@ unsigned int netconf_ce_query_config_all(char* send_data, char ** ppcReplyData)
 
     OVSDB_NULL_RETURN(send_data);
 
+    struct ovsdb_nc_sess * pst_session = NULL;
+    NETCONF_GET_MY_TID_SESSION(pst_session);
+    if (NULL == pst_session) {
+        OVSDB_PRINTF_DEBUG_ERROR("Can't find netconf session, my tid = %d.", gettid());
+        return OVSDB_ERR;
+    }
+
 RETRY:
     rpc = nc_rpc_generic(send_data);
 
@@ -665,7 +888,7 @@ RETRY:
     }
 
     /* netconf下发配置*/
-    sessionRet = nc_session_send_recv(gst_netconf_session, rpc, &reply);
+    sessionRet = nc_session_send_recv(pst_session->pst_netconf_session, rpc, &reply);
 
     nc_rpc_free(rpc);
     rpc = NULL;
@@ -678,8 +901,8 @@ RETRY:
             return OVSDB_ERR;
         }
         // 链接断开重连
-        netconf_ce_config_destory();
-        (void)netconf_ce_config_init();
+        netconf_ce_config_destory(pst_session);
+        (void)netconf_ce_config_init(pst_session);
         uiTry++;
         goto RETRY;
     }
@@ -4183,7 +4406,7 @@ void ovsdb_mcast_macs_remote_process_delete(struct jsonrpc *rpc, struct uuid * u
 
     pstPLS = ovsdb_table_physical_locator_set_query(&pstMMR->locator_set);
     if (NULL == pstPLS) {
-        OVSDB_PRINTF_DEBUG_ERROR("Can not find physical_locator_set, uuid: "UUID_FMT,
+        OVSDB_PRINTF_DEBUG_WARN("Can not find physical_locator_set, uuid: "UUID_FMT,
             UUID_ARGS(&pstMMR->locator_set));
         return;
     }
@@ -4238,7 +4461,7 @@ void ovsdb_physical_locator_set_process_add(struct uuid * uuidPLS)
     return;
 }
 
-int ovsdb_physical_locator_set_process_delete_proc(void * input, void * output OVS_UNUSED, void * entry)
+int ovsdb_physical_locator_set_process_delete_proc(void * input, void * output, void * entry)
 {
     struct uuid * uuid_PLS = (struct uuid *)input;
     struct ovsdb_vtep_table_mcast_macs_remote * pstMMR =
@@ -4341,7 +4564,8 @@ static void parse_options(int argc, char *argv[]);
 static struct jsonrpc *open_jsonrpc(const char *server);
 static void fetch_dbs(struct jsonrpc *, struct svec *dbs);
 
-struct jsonrpc * g_rpc_transact = NULL;
+struct jsonrpc * g_rpc_transact1 = NULL;
+struct jsonrpc * g_rpc_transact2 = NULL;
 
 int
 main(int argc, char *argv[])
@@ -4375,12 +4599,14 @@ main(int argc, char *argv[])
             && (isalpha((unsigned char) argv[optind][0])
                 && strchr(argv[optind], ':'))) {
             rpc = open_jsonrpc(argv[optind]);
-            g_rpc_transact = open_jsonrpc(argv[optind]);
+            g_rpc_transact1 = open_jsonrpc(argv[optind]);
+            g_rpc_transact2 = open_jsonrpc(argv[optind]);
             optind++;
         } else {
             char *sock = xasprintf("unix:%s/db.sock", ovs_rundir());
             rpc = open_jsonrpc(sock);
-            g_rpc_transact = open_jsonrpc(sock);
+            g_rpc_transact1 = open_jsonrpc(sock);
+            g_rpc_transact2 = open_jsonrpc(sock);
             free(sock);
         }
     } else {
@@ -4417,7 +4643,8 @@ main(int argc, char *argv[])
     command->handler(rpc, database, argc - optind, argv + optind);
 
     jsonrpc_close(rpc);
-    jsonrpc_close(g_rpc_transact);
+    jsonrpc_close(g_rpc_transact1);
+    jsonrpc_close(g_rpc_transact2);
 
     if (ferror(stdout)) {
         VLOG_FATAL("write to stdout failed");
@@ -4526,6 +4753,10 @@ usage(void)
            "    in DATBASE on SERVER.\n"
            "\n  dump [SERVER] [DATABASE] [TABLE [COLUMN]...]\n"
            "    dump contents of DATABASE on SERVER to stdout\n"
+           "\n  vtep monitor\n"
+           "    CloudEngine switch ovsdb agent process.\n"
+           "\n  save-key\n"
+           "    save private key and netconf user infomation.\n"
            "\nThe default SERVER is unix:%s/db.sock.\n"
            "The default DATABASE is Open_vSwitch.\n",
            program_name, program_name, ovs_rundir());
@@ -9962,23 +10193,13 @@ void ovsdb_delete_mac(char *mac, char *bd, char *interface, int mac_type)
     return;
 }
 
-void ovsdb_query_port_and_mac(void *args)
+void ovsdb_query_port_and_mac(void)
 {
-    g_args_local = xmalloc(sizeof(struct ovsdb_write_mcast_local_args));
-
-    if (NULL == g_args_local)
-        return;
-
-    memcpy(g_args_local, args, sizeof(struct ovsdb_write_mcast_local_args));
-
     /* 查找端口表 */
     (void)netconf_ce_query_interface();
 
     /* 查找MAC表 */
     (void)netconf_ce_query_db_mac();
-
-    free(g_args_local);
-    g_args_local = NULL;
 
     return;
 }
@@ -10115,36 +10336,13 @@ ovsdb_query_port_initial(struct jsonrpc *rpc)
 
     return;
 }
+#endif
 
-void ovsdb_write_mcast_local(void *args)
+void ovsdb_write_mcast_local(struct jsonrpc *rpc, char *tunnel_ip)
 {
-    char *tunnel_ip;
-    struct jsonrpc *rpc;
-    struct ovsdb_write_mcast_local_args * args_local;
-
+    int i=0;
     int ls_num=0;
     struct logical_switch_uuid_and_vni *ls_info;
-    int i=0;
-    int j=0;
-    int k=0;
-    int l=0;
-    int time=8;
-
-    args_local = (struct ovsdb_write_mcast_local_args *)args;
-    tunnel_ip = args_local->tunnel_ip;
-    rpc = args_local->rpc;
-
-    if(!rpc)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("rpc is NULL.");
-        return;
-    }
-
-    if(!tunnel_ip)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("tunnel_ip is NULL.");
-        return;
-    }
 
     ls_info = (struct logical_switch_uuid_and_vni*)malloc(TABLE_LOGICAL_SWITCH_NUM * sizeof(struct logical_switch_uuid_and_vni));
     if(!ls_info)
@@ -10152,113 +10350,97 @@ void ovsdb_write_mcast_local(void *args)
         OVSDB_PRINTF_DEBUG_ERROR("Error, malloc memorf failed.");
         return;
     }
+    memset(ls_info, 0, TABLE_LOGICAL_SWITCH_NUM * sizeof(struct logical_switch_uuid_and_vni));
 
-    for(;;) /*一直在循环*/
+    do_transact_temp_query_logical_switch(rpc, &ls_num, ls_info);
+
+    /*
+    添加、删除mcast local mac表的逻辑如下:
+    定时遍历logical switch表(仅包含有tunnel key的ls)，查询下面两个信息
+    (1)该logical switch是否有对应的mcast local表项(unknow-dst)。
+    (2)ucast remote表中是否有该logical switch对应的表项
+    如果(1)中没有，(2)中有，则需要新增一条mcast local记录
+    如果(1)中有，(2)中没有，则需要删除对应的mcast local记录
+    */
+
+    for(i=0; i<ls_num; i++)
     {
-        if (time >= 10){
-            ovsdb_query_port_and_mac(args);
-            (void)netconf_ce_query_bfd_status(rpc);
-            time = 0;
-        }
-        time++;
+        int ls_has_mcast_local_record = 0;
+        int ls_has_ucast_remote_record = 0;
+        struct uuid uuid_mac;
 
-        /*a short delay*/
-        sleep(1);
-
-        ls_num = 0;
-        memset(ls_info, 0, TABLE_LOGICAL_SWITCH_NUM * sizeof(struct logical_switch_uuid_and_vni));
-        do_transact_temp_query_logical_switch(rpc, &ls_num, ls_info);
-
-        /*
-        添加、删除mcast local mac表的逻辑如下:
-        定时遍历logical switch表(仅包含有tunnel key的ls)，查询下面两个信息
-        (1)该logical switch是否有对应的mcast local表项(unknow-dst)。
-        (2)ucast remote表中是否有该logical switch对应的表项
-        如果(1)中没有，(2)中有，则需要新增一条mcast local记录
-        如果(1)中有，(2)中没有，则需要删除对应的mcast local记录
-        */
-
-        for(i=0; i<ls_num; i++)
+        /* 首选获取ls_has_mcast_local_record的值 */
+        do_transact_temp_query_logical_switch_has_mcast_local_record(rpc, &ls_info[i].uuid_ls, &ls_has_mcast_local_record, &uuid_mac);
+        
+        /* 然后获取ls_has_ucast_remote_record的值 */
+        do_transact_temp_query_logical_switch_has_ucast_remote_record(rpc, &ls_info[i].uuid_ls, &ls_has_ucast_remote_record);
+        
+        /* 新增一条mcast local表 */
+        if((!ls_has_mcast_local_record)&&(ls_has_ucast_remote_record))
         {
-            int ls_has_mcast_local_record = 0;
-            int ls_has_ucast_remote_record = 0;
-            struct uuid uuid_mac;
-
-            /* 首选获取ls_has_mcast_local_record的值 */
-            do_transact_temp_query_logical_switch_has_mcast_local_record(rpc, &ls_info[i].uuid_ls, &ls_has_mcast_local_record, &uuid_mac);
             
-            /* 然后获取ls_has_ucast_remote_record的值 */
-            do_transact_temp_query_logical_switch_has_ucast_remote_record(rpc, &ls_info[i].uuid_ls, &ls_has_ucast_remote_record);
+            struct uuid phyical_locator_uuid;
             
-            /* 新增一条mcast local表 */
-            if((!ls_has_mcast_local_record)&&(ls_has_ucast_remote_record))
+            do_transact_temp_query_locator_uuid(rpc, tunnel_ip, &phyical_locator_uuid);
+            
+            /* 没有nve ip对应的locator */
+            if(uuid_is_zero(&phyical_locator_uuid))
             {
-                
-                struct uuid phyical_locator_uuid;
-                
-                do_transact_temp_query_locator_uuid(rpc, tunnel_ip, &phyical_locator_uuid);
-                
-                /* 没有nve ip对应的locator */
-                if(uuid_is_zero(&phyical_locator_uuid))
-                {
-                    char json_insert_mcast_local[2000]={0};
-                    (void)snprintf(json_insert_mcast_local, 2000,
-                            "[\"hardware_vtep\","\
-                            "{\"row\":{\"locators\":[\"named-uuid\",\"locator_uuid\"]},"\
-                            "\"table\":\"Physical_Locator_Set\","\
-                            "\"uuid-name\":\"locator_set_uuid\","\
-                            "\"op\":\"insert\"},"\
-                            "{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"\
-                            "\"locator_set\":[\"named-uuid\",\"locator_set_uuid\"],"\
-                            "\"MAC\":\"unknown-dst\"},"\
-                            "\"table\":\"Mcast_Macs_Local\","\
-                            "\"uuid-name\":\"macst_local_uuid\","\
-                            "\"op\":\"insert\"},"\
-                            "{\"row\":{\"dst_ip\":\"%s\","\
-                            "\"encapsulation_type\":\"vxlan_over_ipv4\"},"\
-                            "\"table\":\"Physical_Locator\","\
-                            "\"uuid-name\":\"locator_uuid\","\
-                            "\"op\":\"insert\"}]",
-                    UUID_ARGS(&ls_info[i].uuid_ls),tunnel_ip);
+                char json_insert_mcast_local[2000]={0};
+                (void)snprintf(json_insert_mcast_local, 2000,
+                        "[\"hardware_vtep\","\
+                        "{\"row\":{\"locators\":[\"named-uuid\",\"locator_uuid\"]},"\
+                        "\"table\":\"Physical_Locator_Set\","\
+                        "\"uuid-name\":\"locator_set_uuid\","\
+                        "\"op\":\"insert\"},"\
+                        "{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"\
+                        "\"locator_set\":[\"named-uuid\",\"locator_set_uuid\"],"\
+                        "\"MAC\":\"unknown-dst\"},"\
+                        "\"table\":\"Mcast_Macs_Local\","\
+                        "\"uuid-name\":\"macst_local_uuid\","\
+                        "\"op\":\"insert\"},"\
+                        "{\"row\":{\"dst_ip\":\"%s\","\
+                        "\"encapsulation_type\":\"vxlan_over_ipv4\"},"\
+                        "\"table\":\"Physical_Locator\","\
+                        "\"uuid-name\":\"locator_uuid\","\
+                        "\"op\":\"insert\"}]",
+                UUID_ARGS(&ls_info[i].uuid_ls),tunnel_ip);
                 do_transact_temp(rpc, json_insert_mcast_local);
 
                 OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is without locator before");
-                }
-                /* 有nve ip对应的locator */
-                else
-                {
-                    char json_insert_mcast_local[2000]={0};
-                    (void)snprintf(json_insert_mcast_local, 2000,
-                            "[\"hardware_vtep\",{\"row\":{\"locators\":[\"uuid\",\""UUID_FMT"\"]},\"table\":\"Physical_Locator_Set\","
-                            "\"uuid-name\":\"aa\",\"op\":\"insert\"},{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
-                            "\"locator_set\":[\"named-uuid\",\"aa\"],\"MAC\":\"unknown-dst\"},\"table\":\"Mcast_Macs_Local\","
-                            "\"uuid-name\":\"mcast_local_name\",\"op\":\"insert\"}]",
-                            UUID_ARGS(&phyical_locator_uuid), UUID_ARGS(&ls_info[i].uuid_ls));
-                    do_transact_temp(rpc, json_insert_mcast_local);
-
-                    OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is with locator before.");
-                }
             }
-            
-            /* 删除一条mcast local表 */
-            if((ls_has_mcast_local_record)&&(!ls_has_ucast_remote_record))
+            /* 有nve ip对应的locator */
+            else
             {
-                char json_delete_mcast_local[1000] = {0};
-                (void)snprintf(json_delete_mcast_local, 1000,
-                        "[\"hardware_vtep\",{\"table\":\"Mcast_Macs_Local\","
-                        "\"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"delete\"}]",
-                        UUID_ARGS(&uuid_mac));
-                do_transact_temp(rpc, json_delete_mcast_local);
-                OVSDB_PRINTF_DEBUG_TRACE("delete a mcast local entry.");
+                char json_insert_mcast_local[2000]={0};
+                (void)snprintf(json_insert_mcast_local, 2000,
+                        "[\"hardware_vtep\",{\"row\":{\"locators\":[\"uuid\",\""UUID_FMT"\"]},\"table\":\"Physical_Locator_Set\","
+                        "\"uuid-name\":\"aa\",\"op\":\"insert\"},{\"row\":{\"logical_switch\":[\"uuid\",\""UUID_FMT"\"],"
+                        "\"locator_set\":[\"named-uuid\",\"aa\"],\"MAC\":\"unknown-dst\"},\"table\":\"Mcast_Macs_Local\","
+                        "\"uuid-name\":\"mcast_local_name\",\"op\":\"insert\"}]",
+                        UUID_ARGS(&phyical_locator_uuid), UUID_ARGS(&ls_info[i].uuid_ls));
+                do_transact_temp(rpc, json_insert_mcast_local);
+
+                OVSDB_PRINTF_DEBUG_TRACE("write a new mcast local entry. nve ip is with locator before.");
             }
+        }
+        
+        /* 删除一条mcast local表 */
+        if((ls_has_mcast_local_record)&&(!ls_has_ucast_remote_record))
+        {
+            char json_delete_mcast_local[1000] = {0};
+            (void)snprintf(json_delete_mcast_local, 1000,
+                    "[\"hardware_vtep\",{\"table\":\"Mcast_Macs_Local\","
+                    "\"where\":[[\"_uuid\",\"==\",[\"uuid\",\""UUID_FMT"\"]]],\"op\":\"delete\"}]",
+                    UUID_ARGS(&uuid_mac));
+            do_transact_temp(rpc, json_delete_mcast_local);
+            OVSDB_PRINTF_DEBUG_TRACE("delete a mcast local entry.");
         }
     }
 
-    free(ls_info);
-    ls_info = NULL;
-
+    OVSDB_FREE(ls_info);
+    return;
 }
-#endif
 
 #if OVSDB_DESC("netconf packet download")
 
@@ -10876,43 +11058,215 @@ do_vtep(struct jsonrpc *rpc, const char *database,
     if (0 != ovsdb_client_init_cfg())
         return;
 
-    /* create netconf connection*/
-    ret = netconf_ce_config_init();
-    if (0 != ret)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("Netconf session connects failed.");
-        return;
-    }
-
-    ret = ovsdb_client_init_system_mac();
-    if (0 != ret)
-    {
-        OVSDB_PRINTF_DEBUG_ERROR("Get system mac failed.");
-        return;
-    }
-
     if(!strcmp(argv[0], "monitor"))
     {
+        /* create netconf connection*/
+        gst_nc_sess[0].tid = gettid();
+        gst_nc_sess[0].init = false;
+        ret = netconf_ce_config_init(&gst_nc_sess[0]);
+        if (0 != ret)
+        {
+            OVSDB_PRINTF_DEBUG_ERROR("Netconf session connects failed.");
+            return;
+        }
+
+        ret = ovsdb_client_init_system_mac();
+        if (0 != ret)
+        {
+            OVSDB_PRINTF_DEBUG_ERROR("Get system mac failed.");
+            return;
+        }
+
+        OVSDB_PRINTF_DEBUG_TRACE("ovsdb-client transact.");
+        do_vtep_transact(g_rpc_transact2);
+
         OVSDB_PRINTF_DEBUG_TRACE("ovsdb-client monitor.");
         do_vtep_monitor(rpc, database, argc, argv);
-    }
-    else if(!strcmp(argv[0], "transact"))
-    {
-        OVSDB_PRINTF_DEBUG_TRACE("ovsdb-client transact.");
-        do_vtep_transact(rpc, database, argc, argv);
-    }
 
-    netconf_ce_config_destory();
+        netconf_ce_config_destory(&gst_nc_sess[0]);
+        gst_nc_sess[0].tid = 0;
+    }
 
     return;
 }
 
-void do_vtep_transact(struct jsonrpc *rpc, const char *database,
+#define OVSDB_PRIVATE_KEYLENGTH      2048
+#define OVSDB_PRIVATE_FILE           "/etc/openvswitch/vtep-privkey.pem"
+#define OVSDB_PRIVATE_ENCRYPTO_FILE  "/etc/openvswitch/private_key"
+
+int do_vtep_save_private_key(char * private_keyfile)
+{
+    int ret;
+    FILE* pstFile;
+
+    pstFile = fopen(private_keyfile, "r");
+    if (NULL == pstFile) {
+        printf("Error: Open privkey.pem failed.\r\n");
+        return -1;
+    }
+
+    char * private_key = NULL;
+    unsigned int length = 0;
+    private_key = (char *)malloc(OVSDB_PRIVATE_KEYLENGTH);
+    if (NULL == private_key) {
+        printf("Error: Malloc key failed.\r\n");
+        fclose(pstFile);
+        return -1;
+    }
+    (void)memset(private_key, 0, OVSDB_PRIVATE_KEYLENGTH);
+
+    while (!feof(pstFile)) {
+        if (length >= OVSDB_PRIVATE_KEYLENGTH - 1) {
+            printf("Error: Key is too length.\r\n");
+            fclose(pstFile);
+            OVSDB_FREE(private_key);
+            return -1;
+        }
+        private_key[length] = fgetc(pstFile);
+        length++;
+    }
+    fclose(pstFile);
+
+    unsigned char * out = NULL;
+    unsigned int out_len = 0;
+    ret = Encrypto(private_key, length, &out, &out_len);
+    if (ret != 0) {
+        printf("Error: Encrypto key failed.\r\n");
+        OVSDB_FREE(private_key);
+        return -1;
+    }
+
+    OVSDB_FREE(private_key);
+
+    unlink(OVSDB_PRIVATE_ENCRYPTO_FILE);
+
+    pstFile = fopen(OVSDB_PRIVATE_ENCRYPTO_FILE, "w+");
+    if (NULL == pstFile) {
+        printf("Error: Create encrypto file failed.\r\n");
+        return -1;
+    }
+
+    for(length = 0; length < out_len; length++) {
+        (void)fputc(out[length], pstFile);
+    }
+
+    fclose(pstFile);
+    OVSDB_FREE(private_key);
+
+    return 0;
+}
+
+void
+do_vtep_savekey(struct jsonrpc *rpc OVS_UNUSED, const char *database OVS_UNUSED,
         int argc , char *argv[] )
 {
-    //pthread_t tid_socketFEI;
+    char * private_keyfile = OVSDB_PRIVATE_FILE;
+    char input[64] = {0};
+
+    if (argc >= 1) {
+        private_keyfile = argv[0];
+    }
+
+    printf("Are your sure save netconf user and ssl private key, it will delete private key file(yes/no):");
+    while(1) {
+        fgets(input, 64, stdin);
+
+        if (0 == strcmp(input, "yes\n")) {
+            break;
+        }
+        else if (0 == strcmp(input, "no\n")) {
+            return;
+        }
+        (void)memset(input, 0, 64);
+        printf("Please input yes/no:");
+    }
+
+    if (0 != ovsdb_client_init_cfg()) {
+        return;
+    }
+
+    if (0 != do_vtep_save_private_key(private_keyfile)) {
+        return;
+    }
+
+    printf("Please input netconf user name and password.\r\n");
+
+    gst_nc_sess[0].tid = gettid();
+    gst_nc_sess[0].init = true;
+    if (0 != netconf_ce_config_init(&gst_nc_sess[0])) {
+        unlink(OVSDB_PRIVATE_ENCRYPTO_FILE);
+        return;
+    }
+
+    printf("Save successfully.\r\n");
+    unlink(private_keyfile);
+    
+    netconf_ce_config_destory(&gst_nc_sess[0]);
+    gst_nc_sess[0].tid = 0;
+
+    return;
+}
+
+void ovsdb_vtep_transact_thread(void *args)
+{
+    char *tunnel_ip;
+    struct jsonrpc *rpc;
+    int time=8;
+    int ret;
+
+    g_args_local = (struct ovsdb_write_mcast_local_args *)args;
+    tunnel_ip = g_args_local->tunnel_ip;
+    rpc = g_args_local->rpc;
+
+    if(!rpc)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("rpc is NULL.");
+        return;
+    }
+
+    if(!tunnel_ip)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("tunnel_ip is NULL.");
+        return;
+    }
+
+    gst_nc_sess[1].tid = gettid();
+    gst_nc_sess[1].init = false;
+    ret = netconf_ce_config_init(&gst_nc_sess[1]);
+    if (0 != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("Netconf session 1 connects failed.");
+        return;
+    }
+
+    for(;;) /*一直在循环*/
+    {
+        /*a short delay*/
+        sleep(1);
+
+        if (time >= 10){
+            ovsdb_query_port_and_mac();
+            (void)netconf_ce_query_bfd_status(rpc);
+            time = 0;
+        }
+        time++;
+
+        ovsdb_write_mcast_local(rpc, tunnel_ip);
+    }
+
+    netconf_ce_config_destory(&gst_nc_sess[1]);
+    gst_nc_sess[1].tid = 0;
+
+    OVSDB_FREE(g_args_local);
+
+    return;
+}
+
+void do_vtep_transact(struct jsonrpc *rpc)
+{
+    pthread_t tid_trasact;
     //pthread_t tid_socket_mcast_local;
-    struct ovsdb_write_mcast_local_args args;
+    struct ovsdb_write_mcast_local_args * args;
     struct uuid uuid_global;
 
     /*1.检测到Global 有数据，将physical_switch Physical_Port信息写入OVSDB*/
@@ -10927,7 +11281,6 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
     char json_insert_ps[1000]={0};
     //char json_insert_port[1000]={0};
 
-
     uuid_zero(&uuid_global);
     for(;;)
     {
@@ -10939,9 +11292,9 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
         do_transact_temp_query_global(rpc, &global_uuid_num, &uuid_global);
         if(global_uuid_num)
         {
-            OVSDB_PRINTF_DEBUG_TRACE("Global Table is present.");
             break;
         }
+        ovsdb_set_manager(rpc);
     }
 
     /*首先检查是否已有physical switch，*/
@@ -10980,16 +11333,23 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
         netconf_ce_undo_config_drop_conflict_packet();
     }
 
-    args.rpc = rpc;
-    args.tunnel_ip = OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP);
-    (void)memcpy(&(args.uuid_global), &uuid_global, sizeof(uuid_global));
-
-#if 0   /*暂时注释掉*/
-    if (pthread_create(&tid_socketFEI, NULL, (void *)ovsdb_query_port_and_mac, &args))
-    {
-        printf("Error! Create Thread Failed with ovsdb_receive_mac_from_FEI\n");
+    args = (struct ovsdb_write_mcast_local_args *)malloc(sizeof(struct ovsdb_write_mcast_local_args));
+    if (NULL == args) {
+        OVSDB_PRINTF_DEBUG_ERROR("Malloc args failed.");
+        return;
     }
 
+    args->rpc = rpc;
+    args->tunnel_ip = NULL;
+    OVSDB_SET_STR(args->tunnel_ip, OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERIP));
+
+    if (pthread_create(&tid_trasact, NULL, (void *)ovsdb_vtep_transact_thread, args))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("Error! Create Thread Failed with ovsdb_receive_mac_from_FEI\n");
+        return;
+    }
+
+#if 0   /*暂时注释掉*/
     /*一直检测Logical_Switch，当创建了新的ls后，写入一条mcast-local表*/
     if (pthread_create(&tid_socket_mcast_local, NULL, (void *)ovsdb_write_mcast_local, &args))
     {
@@ -11001,9 +11361,8 @@ void do_vtep_transact(struct jsonrpc *rpc, const char *database,
         sleep(1);
     }while(1);
 
+    ovsdb_vtep_transact_thread(&args);
 #endif
-
-    ovsdb_write_mcast_local(&args);
 }
 
 
@@ -11100,7 +11459,7 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     netconf_msg_list_init(&g_netconf_msg_list);
 
 #if OVSDB_DESC("Apply transact rpc")
-    struct jsonrpc *rpc_transact = g_rpc_transact;
+    struct jsonrpc *rpc_transact = g_rpc_transact1;
 
     if (NULL == rpc_transact) {
         OVSDB_PRINTF_DEBUG_ERROR("transact rpc is NULL.");
@@ -11108,8 +11467,6 @@ void do_vtep_monitor(struct jsonrpc *rpc, const char *database,
     }
 #endif
 
-    ovsdb_set_manager(rpc_transact);
-    
     daemon_save_fd(STDOUT_FILENO);
     daemonize_start(false);
     if (get_detach()) {
@@ -11281,6 +11638,7 @@ static const struct ovsdb_client_command all_commands[] = {
     { "monitor",            NEED_DATABASE, 1, INT_MAX, do_monitor },
     { "dump",               NEED_DATABASE, 0, INT_MAX, do_dump },
     { "vtep",               NEED_DATABASE, 1, 2,       do_vtep },
+    { "save-key",           NEED_NONE,     0, 1,       do_vtep_savekey },
 
     { "help",               NEED_NONE,     0, INT_MAX, do_help },
 

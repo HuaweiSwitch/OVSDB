@@ -261,14 +261,15 @@ enum OVSDB_CLIENT_CFG_TYPE
     OVSDB_CLIENT_CFG_TUNNERBFDENABLE,
     OVSDB_CLIENT_CFG_NETCONFIP,
     OVSDB_CLIENT_CFG_NETCONFPORT,
-    OVSDB_CLIENT_CFG_NETCONFUSER,
-    OVSDB_CLIENT_CFG_NETCONFPW,
+    //OVSDB_CLIENT_CFG_NETCONFUSER,
+    //OVSDB_CLIENT_CFG_NETCONFPW,
     OVSDB_CLIENT_CFG_MAX,
 };
 
+#define OVSDB_CLIENT_CFG_STRINGLEN 256
 struct ovsdb_client_cfg_map {
     char acType[32];
-    char acAttribute[256];
+    char acAttribute[OVSDB_CLIENT_CFG_STRINGLEN];
     int (*pfnCheck)(void);
 };
 
@@ -742,14 +743,13 @@ void  ovsdb_physical_locator_process_service_node_ip(struct jsonrpc * rpc, struc
 void ovsdb_physical_locator_process_config_vxlan_tunnel(int tunnel_key, char * pl_dst_ip, enum HW_VTEP_VXLAN_TUNNEL_TYPE type);
 void ovsdb_mcast_local_update_locator_set_process(struct json *new, struct json *old, char* node_name);
 
-void ovsdb_query_port_and_mac(void *args);
-void ovsdb_write_mcast_local(void *args);
+void ovsdb_query_port_and_mac(void);
+void ovsdb_write_mcast_local(struct jsonrpc *rpc, char *tunnel_ip);
 
 struct ovsdb_write_mcast_local_args
 {
     char *tunnel_ip;
     struct jsonrpc *rpc;
-    struct uuid uuid_global;
 };
 
 //struct ovsdb_receive_mac_local_args
@@ -785,8 +785,9 @@ void do_transact_temp_query_tunnel_uuid(struct jsonrpc * rpc, struct uuid * remo
 void do_transact_temp_query_tunnel_bfd_params_enable(struct jsonrpc *rpc, char *json_char, struct uuid *tunnel_self_uuid, bool *enable);
 
 void do_vtep(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );
-void do_vtep_transact(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );
+void do_vtep_transact(struct jsonrpc *rpc);
 void do_vtep_monitor(struct jsonrpc *rpc, const char *database, int argc , char *argv[] );
+void do_vtep_savekey(struct jsonrpc * rpc, const char * database, int argc, char * argv []);
 
 
 /*below is socket related*/

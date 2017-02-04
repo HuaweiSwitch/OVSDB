@@ -371,6 +371,8 @@ int netconf_msg_list_config_bd(unsigned int uiVniId);
 int netconf_msg_list_undo_config_bd(unsigned int uiVniId);
 int netconf_msg_list_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
 int netconf_msg_list_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp);
+int netconf_msg_list_config_vxlan_flood_tunnel(unsigned int uiVni, char * paDstIp);
+int netconf_msg_list_undo_config_vxlan_flood_tunnel(unsigned int uiVni, char * paDstIp);
 int netconf_msg_list_config_port(unsigned int uiVlanId, unsigned int uiVniId, char* paIfname);
 int netconf_msg_list_undo_config_port(unsigned int uiVlanId, char* paIfname);
 int netconf_msg_list_config_vxlan_tunnel_static_mac(char* paStaticMac, char* paSourceIp, char* paDstIp, unsigned int uiVniId);
@@ -4110,6 +4112,7 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel
 {
     int ret = 0;
     struct hw_vtep_vxlan_tunnel * pstHW_vxlan_tunnel;
+    int used_bit;
 
     if(tunnel_key < MIN_VNI_ID) {
         OVSDB_PRINTF_DEBUG_ERROR("tunnel_key %d invalid.", tunnel_key);
@@ -4117,12 +4120,30 @@ void ovsdb_physical_locator_process_config_vxlan_tunnel
     }
 
     pstHW_vxlan_tunnel = hw_vtep_vxlan_tunnel_query(tunnel_key, pl_dst_ip);
-    if (NULL == pstHW_vxlan_tunnel) {
-        ret = netconf_msg_list_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
-        if (OVSDB_OK != ret) {
-            OVSDB_PRINTF_DEBUG_ERROR("Failed to config vxlan tunnel, vni %d, dstip %s, type = %d.",
+
+    used_bit = (NULL == pstHW_vxlan_tunnel) ? 0 : pstHW_vxlan_tunnel->used_bit;
+
+    if (0 == HW_BIT_GET(used_bit, type)) {
+        if (HW_VTEP_VXLAN_TUNNEL_HYPERVISOR == type) {
+            ret = netconf_msg_list_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+            if (OVSDB_OK != ret) {
+                OVSDB_PRINTF_DEBUG_ERROR("Failed to config vxlan tunnel, vni %d, dstip %s, type = %d.",
+                    tunnel_key, pl_dst_ip, type);
+                //return;
+            }
+        }
+        else if (HW_VTEP_VXLAN_TUNNEL_SERVICENODE == type) {
+            ret = netconf_msg_list_config_vxlan_flood_tunnel(tunnel_key, pl_dst_ip);
+            if (OVSDB_OK != ret) {
+                OVSDB_PRINTF_DEBUG_ERROR("Failed to config vxlan flood tunnel, vni %d, dstip %s, type = %d.",
+                    tunnel_key, pl_dst_ip, type);
+                //return;
+            }
+        }
+        else {
+            OVSDB_PRINTF_DEBUG_ERROR("Failed to config vxlan tunnel, type is illegal, vni %d, dstip %s, type = %d.",
                 tunnel_key, pl_dst_ip, type);
-            //return;
+            return;
         }
     }
 
@@ -4145,6 +4166,7 @@ void ovsdb_physical_locator_process_undo_config_vxlan_tunnel
 {
     int ret = 0;
     struct hw_vtep_vxlan_tunnel * pstHW_vxlan_tunnel;
+    int used_bit = 0;
 
     if(tunnel_key < MIN_VNI_ID) {
         OVSDB_PRINTF_DEBUG_ERROR("tunnel_key %d invalid.", tunnel_key);
@@ -4156,6 +4178,8 @@ void ovsdb_physical_locator_process_undo_config_vxlan_tunnel
         return;
     }
 
+    used_bit = pstHW_vxlan_tunnel->used_bit;
+
     ret = hw_vtep_vxlan_tunnel_delete(tunnel_key, pl_dst_ip, type);
     if (ret != OVSDB_OK) {
         OVSDB_PRINTF_DEBUG_ERROR("Failed to delete vxlan tunnel table. ret %#x, vni %d, dstip %s, type = %d.",
@@ -4163,12 +4187,26 @@ void ovsdb_physical_locator_process_undo_config_vxlan_tunnel
         return;
     }
 
-    if (0 == pstHW_vxlan_tunnel->used_bit) {
-        ret = netconf_msg_list_undo_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
-        if (OVSDB_OK != ret) {
-            OVSDB_PRINTF_DEBUG_ERROR("Failed to undo config vxlan tunnel, vni %d, dstip %s, type = %d.",
+    if (0 == HW_BIT_GET(used_bit, type)) {
+        if (HW_VTEP_VXLAN_TUNNEL_HYPERVISOR == type) {
+            ret = netconf_msg_list_undo_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
+            if (OVSDB_OK != ret) {
+                OVSDB_PRINTF_DEBUG_ERROR("Failed to undo config vxlan tunnel, vni %d, dstip %s, type = %d.",
+                    tunnel_key, pl_dst_ip, type);
+                //return;
+            }
+        }
+        else if (HW_VTEP_VXLAN_TUNNEL_SERVICENODE == type) {
+            ret = netconf_msg_list_undo_config_vxlan_flood_tunnel(tunnel_key, pl_dst_ip);
+            if (OVSDB_OK != ret) {
+                OVSDB_PRINTF_DEBUG_ERROR("Failed to undo config vxlan flood tunnel, vni %d, dstip %s, type = %d.",
+                    tunnel_key, pl_dst_ip, type);
+                //return;
+            }
+        }
+        else {
+            OVSDB_PRINTF_DEBUG_ERROR("Failed to undo config vxlan flood tunnel, type is illegal, vni %d, dstip %s, type = %d.",
                 tunnel_key, pl_dst_ip, type);
-            //return;
         }
     }
 
@@ -9454,8 +9492,11 @@ void ovsdb_refresh_bfd_status(struct jsonrpc *rpc, char * dst_ip, char * sess_st
         i++;
     }
 
-    forwarding = (0 == strcmp(state, "up")) ? "true" : "false";
-    remote_state = (0 == strcmp(state, "up")) ? "up" : "down";
+    //根据CE BFD设计，在admin down时不会通知集中复制隧道切换
+    //forwarding = (0 == strcmp(state, "up")) ? "true" : "false";
+    //remote_state = (0 == strcmp(state, "up")) ? "up" : "down";
+    forwarding = (0 == strcmp(state, "up") || 0 == strcmp(state, "admin_down")) ? "true" : "false";
+    remote_state = (0 == strcmp(state, "up") || 0 == strcmp(state, "admin_down")) ? "up" : "down";
 
     if (true == ovsdb_refresh_bfd_status_check(rpc, dst_ip, diagnostic, forwarding, remote_state, state))
         return;
@@ -10784,6 +10825,104 @@ int netconf_msg_list_undo_config_vxlan_tunnel(unsigned int uiVni, char * paDstIp
             OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo vni %d head-end peer-list %s].", uiVni, paDstIp);
         else
             OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo vni %d]", uiVni);
+    }
+
+    return ret;
+}
+
+int netconf_msg_list_config_vxlan_flood_tunnel(unsigned int uiVni, char * paDstIp)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+
+    /* 1.判断VNI是否合法 */
+    if((uiVni > MAX_VNI_ID)||(uiVni < MIN_VNI_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is not valid.", uiVni);
+        return OVSDB_ERR;
+    }
+
+    /* 2.判断dst_ip是否为空 */
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Dst_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    /* 4.配置vni uiVni head-end peer-list paDstIp */
+    snprintf(send_data, sizeof(send_data),
+          "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"
+            "<nvo3Nves>"
+              "<nvo3Nve>"
+                "<ifName>Nve1</ifName>"
+                "<vniMembers>"
+                  "<vniMember>"
+                    "<vniId>%d</vniId>"
+                    "<nvo3FloodVteps>"
+                      "<nvo3FloodVtep operation=\"merge\">"
+                      "<floodVtep>%s</floodVtep>"
+                      "</nvo3FloodVtep>"
+                    "</nvo3FloodVteps>"
+                  "</vniMember>"
+                "</vniMembers>"
+              "</nvo3Nve>"
+            "</nvo3Nves>"
+            "</nvo3>", uiVni, paDstIp);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [vni %d flood %s]", uiVni, paDstIp);
+        return OVSDB_ERR;
+    }
+
+    return OVSDB_OK;
+}
+
+int netconf_msg_list_undo_config_vxlan_flood_tunnel(unsigned int uiVni, char * paDstIp)
+{
+    int    ret                             = 0;
+    char   send_data[NETCONF_MSG_DATA_LEN] = {0};
+
+    /* 1.判断VNI是否合法 */
+    if((uiVni > MAX_VNI_ID)||(uiVni < MIN_VNI_ID))
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Vni %d is not valid.", uiVni);
+        return OVSDB_ERR;
+    }
+
+    /* 2.判断dst_ip是否为空 */
+    if(!paDstIp)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Dst_ip is NULL.");
+        return OVSDB_ERR;
+    }
+
+    /* 4.删除vxlan隧道 */
+    /* 4.1.先删除头端复制列表*/
+    snprintf(send_data, sizeof(send_data),
+          "<nvo3 xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"
+            "<nvo3Nves>"
+              "<nvo3Nve>"
+                "<ifName>Nve1</ifName>"
+                "<vniMembers>"
+                  "<vniMember>"
+                    "<vniId>%d</vniId>"
+                    "<nvo3FloodVteps>"
+                      "<nvo3FloodVtep operation=\"delete\">"
+                      "<floodVtep>%s</floodVtep>"
+                      "</nvo3FloodVtep>"
+                    "</nvo3FloodVteps>"
+                  "</vniMember>"
+                "</vniMembers>"
+              "</nvo3Nve>"
+            "</nvo3Nves>"
+            "</nvo3>", uiVni, paDstIp);
+
+    ret = netconf_msg_list_add_node(send_data);
+    if (OVSDB_OK != ret)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to config [undo vni %d flood %s].", uiVni, paDstIp);
     }
 
     return ret;

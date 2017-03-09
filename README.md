@@ -1,62 +1,24 @@
-Overview
+## Overview
 
-Open vSwitch is an open-source software switch designed to be used as a vswitch (virtual switch) in virtualized server environments.  A vswitch forwards traffic between different virtual machines (VMs) on the same physical host and also forwards traffic between VMs and the physical network.  Open vSwitch is open to programmatic extension and control using OpenFlow and the OVSDB (Open vSwitch Database) management protocol. It was designed to support distribution across multiple physical servers.
+Huawei CloudEngine series data center switches use Huawei's next-generation Versatile Routing Platform (VRP) operating system to provide full openness in addition to stable, reliable, and secure high-performance switching services.
 
-The main components of this distribution are:
- - ovs-vswitchd - a daemon that implements the switch, along with a companion Linux kernel module for flow-based switching.
- - ovsdb-server - a lightweight database server that ovs-vswitchd queries to obtain its configuration.
- - ovs-dpctl - a tool for configuring the switch kernel module.
- - Scripts and specs for building RPMs for Citrix XenServer and Red Hat Enterprise Linux. The XenServer RPMs allow Open vSwitch to be installed on a Citrix XenServer host as a drop-in replacement for its switch, with additional functionality.
- - ovs-vsctl - a utility for querying and updating the configuration of ovs-vswitchd.
- - ovs-appctl - a utility that sends commands to running Open vSwitch daemons. 
-Provided tools are:
- - ovs-ofctl - a utility for querying and controlling OpenFlow switches and controllers.
- - ovs-pki - a utility for creating and managing the public-key infrastructure for OpenFlow switches.
- - A patch to tcpdump that enables it to parse OpenFlow messages.
+The switches support Linux containers (LXC) technology, which enables the Open vSwitch Database Management Protocol (OVSDB) plugin to be easily installed on the switches for seamless connection with the VMware NSX network virtualization platform. The NSX platform creates a visual model of the entire network and enables customers to create and deploy any network topology in seconds. With the NSX platform, virtual networks can be deployed and managed through software programming, making customer networks open and flexible. The NSX platform can be used with Huawei CloudEngine switches to construct elastic, virtualized, and efficient cloud computing networks. 
+
+Huawei CloudEngine switches support the standard Virtual Extensible LAN (VXLAN) protocol and can act as VXLAN gateways for traditional servers, connecting them to the VMware VXLAN network. Based on the vSphere 6 platform, VMware NSX uses the OVSDB protocol to deliver OpenFlow tables to Huawei CloudEngine data center switches and centrally controls hardware and software virtual tunnel end points (VTEPs). Collaboration of Huawei CloudEngine switches and VMware NSX enables efficient communication between traditional servers and VXLAN servers. This solution combines the high performance of hardware equipment and flexibility of software, while providing high scalability. 
+
+The code is ported from [Open vSwitch 2.5.0](https://github.com/openvswitch/ovs)
+
+##The main components of this distribution are:
+
+- ovsdb-server - a OVSDB server to save the configuration from NSX controller.
+- ovsdb-client - a OVSDB client to communicate between NSX controller and Huawei switches.
+- ovs-pki - a utility for creating and managing the public-key infrastructure for NSX controller communication.
+- vtep-ctl - a tool to show the OVSDB data.
+- huaweiswitch-key - a key management tools to encrypt user key.
  
-Installation
+##Implement guide:
 
-Circumstance instruction:
-
-This software runs in lxc environment which installed Debian operation system contained by CE switch.
-
-Main steps:
- - Install CE switch with firmware which included lxc environment.
- - Pre-configure CE switch.
- - Install ovsdb in lxc.
- - Start ovsdb server.
- - Start ovsdb client.
- - Invoke configuration command.
- - 
-Example usage
-
-Start ovsdb-server before starting ovs-vswitchd itself:
-
-$ ovsdb-server --remote=punix:/usr/local/var/run/openvswitch/db.sock 
-               --remote=db:Open_vSwitch,Open_vSwitch,manager_options 
-               --private-key=db:Open_vSwitch,SSL,private_key 
-               --certificate=db:Open_vSwitch,SSL,certificate 
-               --bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert 
-               --pidfile --detach
-If you built Open vSwitch without SSL support, then omit --private-key, --certificate, and --bootstrap-ca-cert.
-
-Start client monitoring:
-$ ovsdb-client vtep monitor
-
-Start client transacting:
-$ ovsdb-client vtep transact
-
-Connect to ssl with specified port:
-$ vtep-ctl set-manager ssl:IP address:port
-
-Configure the IP address of tunnel:
-$ vtep-ctl set physical_switch swich_name tunnel_ips=tunnel IP address
-
-References
-
-[1] Open vSwitch:
-    < http://openvswitch.org >
-
-[2] Bugs report:
-    < bugs@openvswitch.org >
+Refer to [CloudEngine Hardware Gateway Integration with VMware NSX-V 6.2.4 — Implementation Guide](http://e.huawei.com/en/marketing-material/global/products/enterprise_network/ce_switches/cloudengine%20switches/20161209085719)
+ 
+##References
 

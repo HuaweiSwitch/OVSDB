@@ -22,3 +22,4 @@ Refer to [CloudEngine Hardware Gateway Integration with VMware NSX-V 6.2.4 — I
  
 ##References
 
+* [VMware Knowleadge Base](https://kb.vmware.com/selfservice/microsites/search.do?cmd=displayKC&docType=kc&externalId=2148611&sliceId=1&docTypeID=DT_KB_1_1&dialogID=409793307&stateId=0%200%20409801236)

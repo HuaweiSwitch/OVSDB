@@ -4187,7 +4187,7 @@ void ovsdb_physical_locator_process_undo_config_vxlan_tunnel
         return;
     }
 
-    if (0 == HW_BIT_GET(used_bit, type)) {
+    if (HW_BIT_GET(used_bit, type)) {
         if (HW_VTEP_VXLAN_TUNNEL_HYPERVISOR == type) {
             ret = netconf_msg_list_undo_config_vxlan_tunnel(tunnel_key, pl_dst_ip);
             if (OVSDB_OK != ret) {

@@ -930,6 +930,75 @@ RETRY:
     return OVSDB_OK;
 }
 
+unsigned int netconf_ce_query_config_all_process
+(
+    char * send_data,
+    void * input,
+    unsigned int (*pfc_process)(void *input, char *paData)
+)
+{
+    unsigned int    uiRet                             = 0;
+    unsigned int    uiLoop                            = 0;
+    char            *pReplyData                       = NULL;
+    char            *paReplySeg                       = NULL;
+    char            aSetId[MAX_SET_ID_LEN]            = {0};
+
+    uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+    if (OVSDB_OK != uiRet)
+    {
+        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query config.");
+        return OVSDB_ERR;
+    }
+
+    while(NULL != pReplyData)
+    {
+        /* 解析reply消息中的interface */
+        uiRet = pfc_process(input, pReplyData);
+        if (uiRet != OVSDB_OK)
+        {
+            free(pReplyData);
+            pReplyData = NULL;
+            return OVSDB_ERR;
+        }
+
+        /* 判断reply消息是否分片 */
+        paReplySeg = strstr(pReplyData, "set-id");
+        if (NULL == paReplySeg)
+        {
+            free(pReplyData);
+            pReplyData = NULL;
+            break;
+        }
+
+        /* 获取set-id以查询下一个回复消息分片 */
+        paReplySeg = paReplySeg + strlen("set-id") + 2;
+        while ('"' != *paReplySeg)
+        {
+            aSetId[uiLoop++] = *paReplySeg;
+            paReplySeg++;
+        }
+        aSetId[uiLoop] = '\0';
+
+        snprintf(send_data, sizeof(send_data),
+            "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
+            "</get-next>", aSetId);
+
+        free(pReplyData);
+        pReplyData = NULL;
+
+        uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+        if (OVSDB_OK != uiRet)
+        {
+            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query next configure.");
+            return OVSDB_ERR;
+        }
+
+        uiLoop = 0;
+    }
+
+    return OVSDB_OK;
+}
+
 unsigned int netconf_ce_config_bd(unsigned int uiVniId)
 {
     OVSDB_PRINTF_DEBUG_TRACE("********************netconf_ce_config_bd********************");
@@ -1885,7 +1954,6 @@ unsigned int netconf_ce_query_global_bfd_enabled(bool * pbEnable)
     unsigned int uiRet = 0;
     char send_data[NETCONF_SEND_DATA_LEN] = {0};
     char * paReplyData = NULL;
-    char * paReplyDataValue = NULL;
     char aBfdEnableLeft[] = "<bfdEnable>";
     char aBfdEnableRight[] = "</bfdEnable>";
     char aBfdEnableStatus[BFD_ENABLE_STATUS] = {0};
@@ -1912,11 +1980,16 @@ unsigned int netconf_ce_query_global_bfd_enabled(bool * pbEnable)
         return OVSDB_ERR;
     }
 
-    paReplyDataValue = paReplyData;
-    OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aBfdEnableStatus, BFD_ENABLE_STATUS, aBfdEnableLeft, aBfdEnableRight, paReplyDataValue);
+    uiRet = OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aBfdEnableStatus, BFD_ENABLE_STATUS,
+                    aBfdEnableLeft, aBfdEnableRight, paReplyData, paReplyData + strlen(paReplyData));
 
     free(paReplyData);
     paReplyData = NULL;
+
+    if (OVSDB_OK != uiRet)
+    {
+        return OVSDB_ERR;
+    }
 
     if (0 != strcmp("false", aBfdEnableStatus))
     {
@@ -2194,44 +2267,60 @@ unsigned int netconf_ce_query_ethernet_mac(char * pcMAC)
     if (NULL == pEthernetPosition)
     {
         OVSDB_PRINTF_DEBUG_ERROR("Failed to get ethernet interface.");
+        OVSDB_FREE(pReplyData);
         return OVSDB_ERR;
     }
 
-    OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(pcMAC, MAX_CE_MAC_LEN, aEthernetLeft, aEthernetRight, pEthernetPosition);
+    uiRet = OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(pcMAC, MAX_CE_MAC_LEN,
+        aEthernetLeft, aEthernetRight, pEthernetPosition, pEthernetPosition + strlen(pEthernetPosition));
 
     OVSDB_FREE(pReplyData);
 
-    return OVSDB_OK;
+    return uiRet;
 }
 
-unsigned int ovsdb_get_interface(char *paData)
+unsigned int ovsdb_get_interface(void *input OVS_UNUSED, char *paData)
 {
+    char         aInterfaceLeft[]        = "<interface>";
+    char         aInterfaceRight[]       = "</interface>";
     char         aIfNameLeft[]           = "<ifName>";
     char         aIfNameRight[]          = "</ifName>";
     char         aIfName[MAX_IFNAME_LEN] = {0};
-    char         *pStart                 = paData;
+    char         *pStart                 = NULL;
+    char         *pEnd                   = NULL;
 
     if (NULL == paData)
     {
         return OVSDB_ERR;
     }
 
-    while (NULL != strstr(pStart, aIfNameLeft))
+    pStart = strstr(paData, aInterfaceLeft);
+    while (NULL != pStart)
     {
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aIfName, MAX_IFNAME_LEN, aIfNameLeft, aIfNameRight, pStart);
-        if (NULL == pStart)
+        pEnd = strstr(pStart, aInterfaceRight);
+        if (NULL == pEnd)
+        {
+            return OVSDB_OK;
+        }
+
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aIfName, MAX_IFNAME_LEN, aIfNameLeft, aIfNameRight, pStart, pEnd))
             return OVSDB_ERR;
 
         /* 添加interface至软表 */
         (void)ovsdb_sub_table_interface_add(aIfName);
+
+        pStart = strstr(pEnd, aInterfaceLeft);
     }
 
     return OVSDB_OK;
-
 }
 
-unsigned int ovsdb_get_db_mac(char *paData)
+unsigned int ovsdb_get_db_mac(void *input OVS_UNUSED, char *paData)
 {
+    char         abdFdbLeft[]               = "<bdFdb>";
+    char         abdFdbRight[]              = "</bdFdb>";
     char         aMacAdrLeft[]              = "<macAddress>";
     char         aMacAdrRight[]             = "</macAddress>";
     char         aMacTypeLeft[]             = "<macType>";
@@ -2245,7 +2334,8 @@ unsigned int ovsdb_get_db_mac(char *paData)
     char         aBdId[MAX_BDID_LEN]        = {0};
     char         aMacType[MAX_MAC_TYPE_LEN] = {0};
     unsigned int uiMacType                  = 0;
-    char         *pStart                    = paData;
+    char         *pStart                    = NULL;
+    char         *pEnd                      = NULL;
 
     if (NULL == paData)
     {
@@ -2253,16 +2343,25 @@ unsigned int ovsdb_get_db_mac(char *paData)
         return OVSDB_ERR;
     }
 
-    while (NULL != strstr(pStart, aMacAdrLeft))
+    pStart = strstr(paData, abdFdbLeft);
+    while (NULL != pStart)
     {
+        pEnd = strstr(pStart, abdFdbRight);
+        if (NULL == pEnd)
+        {
+            return OVSDB_OK;
+        }
+
         /* 获取macAddress */
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aMac, MAX_CE_MAC_LEN, aMacAdrLeft, aMacAdrRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aMac, MAX_CE_MAC_LEN, aMacAdrLeft, aMacAdrRight, pStart, pEnd))
             return OVSDB_ERR;
 
         /* 获取macType */
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aMacType, MAX_MAC_TYPE_LEN, aMacTypeLeft, aMacTypeRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aMacType, MAX_MAC_TYPE_LEN, aMacTypeLeft, aMacTypeRight, pStart, pEnd))
             return OVSDB_ERR;
 
         if (0 == strcmp(aMacType, "dynamic"))
@@ -2275,31 +2374,30 @@ unsigned int ovsdb_get_db_mac(char *paData)
         }
 
         /* 获取bdId */
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aBdId, MAX_BDID_LEN, aBdIdLeft, aBdIdRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aBdId, MAX_BDID_LEN, aBdIdLeft, aBdIdRight, pStart, pEnd))
             return OVSDB_ERR;
 
         /* 获取outIfName */
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aOutIfName, MAX_IFNAME_LEN, aOutIfnameLeft, aOutIfnameRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aOutIfName, MAX_IFNAME_LEN, aOutIfnameLeft, aOutIfnameRight, pStart, pEnd))
             return OVSDB_ERR;
 
         /* 添加mac至软表 */
         (void)ovsdb_sub_table_mac_add(aMac, aBdId, aOutIfName, (int)uiMacType);
+
+        pStart = strstr(pEnd, abdFdbLeft);
     }
 
     return OVSDB_OK;
-
 }
 
 unsigned int netconf_ce_query_interface(void)
 {
     unsigned int    uiRet                             = 0;
-    unsigned int    uiLoop                            = 0;
     char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
-    char            *pReplyData                       = NULL;
-    char            *paReplySeg                       = NULL;
-    char            aSetId[MAX_SET_ID_LEN]            = {0};
 
     snprintf(send_data, sizeof(send_data),
         "<get>"\
@@ -2315,60 +2413,11 @@ unsigned int netconf_ce_query_interface(void)
           "</filter>"\
         "</get>");
 
-    uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+    uiRet = netconf_ce_query_config_all_process(send_data, NULL, ovsdb_get_interface);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query interface");
-        return OVSDB_ERR;
-    }
-
-    while(NULL != pReplyData)
-    {
-        /* 解析reply消息中的interface */
-        uiRet = ovsdb_get_interface(pReplyData);
-
-        if (uiRet != OVSDB_OK)
-        {
-            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to get interface from reply message");
-            free(pReplyData);
-            pReplyData = NULL;
-            return OVSDB_ERR;
-        }
-
-        /* 判断reply消息是否分片 */
-        paReplySeg = strstr(pReplyData, "set-id");
-
-        if (NULL == paReplySeg)
-        {
-            free(pReplyData);
-            pReplyData = NULL;
-            break;
-        }
-
-        /* 获取set-id以查询下一个回复消息分片 */
-        paReplySeg = paReplySeg + strlen("set-id") + 2;
-        while ('"' != *paReplySeg)
-        {
-            aSetId[uiLoop++] = *paReplySeg;
-            paReplySeg++;
-        }
-        aSetId[uiLoop] = '\0';
-
-        snprintf(send_data, sizeof(send_data),
-            "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
-            "</get-next>", aSetId);
-
-        free(pReplyData);
-        pReplyData = NULL;
-
-        uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
-        if (OVSDB_OK != uiRet)
-        {
-            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query next interface");
-            return OVSDB_ERR;
-        }
-
-        uiLoop = 0;
+        OVSDB_PRINTF_DEBUG_ERROR("Failed to query interface.");
+        return uiRet;
     }
 
     (void)ovsdb_sub_table_interface_delete();
@@ -2376,15 +2425,10 @@ unsigned int netconf_ce_query_interface(void)
     return OVSDB_OK;
 }
 
-
 unsigned int netconf_ce_query_db_mac(void)
 {
     unsigned int    uiRet                             = 0;
-    unsigned int    uiLoop                            = 0;
     char            send_data[NETCONF_SEND_DATA_LEN]  = {0};
-    char            *pReplyData                       = NULL;
-    char            *paReplySeg                       = NULL;
-    char            aSetId[MAX_SET_ID_LEN]            = {0};
 
     snprintf(send_data, sizeof(send_data),
         "<get>"\
@@ -2406,76 +2450,11 @@ unsigned int netconf_ce_query_db_mac(void)
           "</filter>"\
         "</get>");
 
-    /*sprintf(send_data,
-        "<get>"\
-          "<filter type=\"subtree\">"\
-            "<mac xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<vlanFdbs>"\
-                "<vlanFdb>"\
-                  "<macAddress></macAddress>"\
-                  "<vlanId></vlanId>"\
-                  "<slotId>0</slotId>"\
-                  "<macType></macType>"\
-                  "<outIfName></outIfName>"\
-                "</vlanFdb>"\
-              "</vlanFdbs>"\
-            "</mac>"\
-          "</filter>"\
-        "</get>");*/
-
-    uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+    uiRet = netconf_ce_query_config_all_process(send_data, NULL, ovsdb_get_db_mac);
     if (OVSDB_OK != uiRet)
     {
-        OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query db mac");
-        return OVSDB_ERR;
-    }
-
-    while(NULL != pReplyData)
-    {
-        /* 解析reply消息中的db mac */
-        uiRet = ovsdb_get_db_mac(pReplyData);
-
-        if (uiRet != OVSDB_OK)
-        {
-            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to get db mac from reply message");
-            free(pReplyData);
-            pReplyData = NULL;
-            return OVSDB_ERR;
-        }
-
-        /* 判断reply消息是否分片 */
-        paReplySeg = strstr(pReplyData, "set-id");
-
-        if (NULL == paReplySeg)
-        {
-            free(pReplyData);
-            pReplyData = NULL;
-            break;
-        }
-
-        /* 获取set-id以查询下一个回复消息分片 */
-        paReplySeg = paReplySeg + strlen("set-id") + 2;
-        while ('"' != *paReplySeg)
-        {
-            aSetId[uiLoop++] = *paReplySeg;
-            paReplySeg++;
-        }
-        aSetId[uiLoop] = '\0';
-
-        snprintf(send_data, sizeof(send_data),
-            "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
-            "</get-next>", aSetId);
-
-        free(pReplyData);
-        pReplyData = NULL;
-
-        uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
-        if (OVSDB_OK != uiRet)
-        {
-            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query next db mac");
-            return OVSDB_ERR;
-        }
-        uiLoop = 0;
+        OVSDB_PRINTF_DEBUG_ERROR("Failed to query db mac.");
+        return uiRet;
     }
 
     (void)ovsdb_sub_table_mac_delete();
@@ -9514,8 +9493,11 @@ void ovsdb_refresh_bfd_status(struct jsonrpc *rpc, char * dst_ip, char * sess_st
     return;
 }
 
-unsigned int ovsdb_get_bfd_status(struct jsonrpc *rpc, char *paData)
+unsigned int ovsdb_get_bfd_status(void *input, char *paData)
 {
+    struct jsonrpc *rpc = (struct jsonrpc *)input;
+    char aAllSessLeft[] = "<bfdAllSession>";
+    char aAllSessRight[] = "</bfdAllSession>";
     char aSessNameLeft[] = "<sessName>";
     char aSessNameRight[] = "</sessName>";
     char aDestAddrLeft[] = "<destAddr>";
@@ -9528,40 +9510,53 @@ unsigned int ovsdb_get_bfd_status(struct jsonrpc *rpc, char *paData)
     char aSessState[BFD_SESSION_RUN_STATE_LEN] = {0};
     char aSess[BFD_SESSION_NAME_LEN] = {0};
     char alocalDiag[BFD_SESSION_DIAGNOSTIC_LEN] = {0};
-    char *pStart = paData;
+    char *pStart = NULL;
+    char *pEnd = NULL;
     unsigned int uiRet = OVSDB_OK;
 
-    if (NULL == paData)
+    if ((NULL == paData) || (NULL == rpc))
     {
-        OVSDB_PRINTF_DEBUG_ERROR("paData is NULL");
-        return OVSDB_ERR;
+        OVSDB_PRINTF_DEBUG_ERROR("Input is NULL.");
+        return OVSDB_ERR_INPUT_PARAM;
     }
 
-    while (NULL != strstr(pStart, aSessNameLeft))
+    pStart = strstr(paData, aAllSessLeft);
+    while (NULL != pStart)
     {
+        pEnd = strstr(pStart, aAllSessRight);
+        if (NULL == pEnd)
+        {
+            return OVSDB_OK;
+        }
+
         /* 获取sessName */
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aSess, BFD_SESSION_NAME_LEN, aSessNameLeft, aSessNameRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aSess, BFD_SESSION_NAME_LEN, aSessNameLeft, aSessNameRight, pStart, pEnd))
             return OVSDB_ERR;
 
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aDestAddr, BFD_SESSION_DEST_ADD_LEN, aDestAddrLeft, aDestAddrRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aDestAddr, BFD_SESSION_DEST_ADD_LEN, aDestAddrLeft, aDestAddrRight, pStart, pEnd))
             return OVSDB_ERR;
 
         uiRet = ovsdb_parsing_bfd_name(aSess, aDestAddr);
         if (uiRet != OVSDB_OK)
             continue;
 
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(aSessState, BFD_SESSION_RUN_STATE_LEN, aSessStateLeft, aSessStateRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (aSessState, BFD_SESSION_RUN_STATE_LEN, aSessStateLeft, aSessStateRight, pStart, pEnd))
             return OVSDB_ERR;
 
-        OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(alocalDiag, BFD_SESSION_DIAGNOSTIC_LEN, alocalDiagLeft, alocalDiagRight, pStart);
-        if (NULL == pStart)
+        if (OVSDB_OK != 
+                OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+                (alocalDiag, BFD_SESSION_DIAGNOSTIC_LEN, alocalDiagLeft, alocalDiagRight, pStart, pEnd))
             return OVSDB_ERR;
 
         ovsdb_refresh_bfd_status(rpc, aDestAddr, aSessState, alocalDiag);
 
+        pStart = strstr(pEnd, aAllSessLeft);
     }
 
     return OVSDB_OK;
@@ -9580,40 +9575,6 @@ unsigned int netconf_ce_query_bfd_status(struct jsonrpc *rpc)
     if (0 != strcmp(OVSDB_CLIENT_CFG_GET_STRING(OVSDB_CLIENT_CFG_TUNNERBFDENABLE), "true"))
         return;
 
-    /*snprintf(send_data, sizeof(send_data),
-        "<get>"\
-          "<filtertype=\"subtree\">"\
-            "<bfd xmlns=\"http://www.huawei.com/netconf/vrp\" content-version=\"1.0\" format-version=\"1.0\">"\
-              "<bfdCfgSessions>"\
-                "<bfdCfgSession>"\
-                  "<sessName>%s</sessName>"\
-                  "<destAddr/>"\
-                  "<srcAddr/>"\
-                  "<bfdSessRunning>"\
-                    "<sessState/>"\
-                    "<udpDstPort/>"\
-                    "<detectMode/>"\
-                    "<actTxInt/>"\
-                    "<actRxInt/>"\
-                    "<actMulti/>"\
-                    "<detectTime/>"\
-                    "<ttl/>"\
-                    "<txTmrID/>"\
-                    "<detectTmrID/>"\
-                    "<initTmrID/>"\
-                    "<wtrTmrID/>"\
-                    "<notUpReason/>"\
-                    "<localDiag/>"\
-                    "<localDiscr/>"\
-                    "<remoteDiscr/>"\
-                    "<minTxInt/>"\
-                    "<minRxInt/>"\
-                  "</bfdSessRunning>"\
-                "</bfdCfgSession>"\
-              "</bfdCfgSessions>"\
-            "</bfd>"\
-          "</filter>"\
-        "</get>", aSess);*/
     snprintf(send_data, sizeof(send_data),
         "<get>"\
           "<filter type=\"subtree\">"\
@@ -9633,54 +9594,11 @@ unsigned int netconf_ce_query_bfd_status(struct jsonrpc *rpc)
           "</filter>"\
         "</get>");
 
-    uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
+    uiRet = netconf_ce_query_config_all_process(send_data, (void *)rpc, ovsdb_get_bfd_status);
     if (OVSDB_OK != uiRet)
     {
         OVSDB_PRINTF_DEBUG_ERROR("Failed to query BFD status.");
-        return OVSDB_ERR;
-    }
-
-    while (NULL != pReplyData)
-    {
-        uiRet = ovsdb_get_bfd_status(rpc, pReplyData);
-        if (uiRet != OVSDB_OK)
-        {
-            OVSDB_PRINTF_DEBUG_ERROR("Failed to get BFD status.");
-        }
-
-        /* 判断reply消息是否分片 */
-        paReplySeg = strstr(pReplyData, "set-id");
-
-        if (NULL == paReplySeg)
-        {
-            free(pReplyData);
-            pReplyData = NULL;
-            break;
-        }
-
-        /* 获取set-id以查询下一个回复消息分片 */
-        paReplySeg = paReplySeg + strlen("set-id") + 2;
-        while ('"' != *paReplySeg)
-        {
-            aSetId[uiLoop++] = *paReplySeg;
-            paReplySeg++;
-        }
-        aSetId[uiLoop] = '\0';
-
-        snprintf(send_data, sizeof(send_data),
-            "<get-next xmlns=\"http://www.huawei.com/netconf/capability/base/1.0\" set-id=\"%s\">"\
-            "</get-next>", aSetId);
-
-        free(pReplyData);
-        pReplyData = NULL;
-
-        uiRet = netconf_ce_query_config_all(send_data, &pReplyData);
-        if (OVSDB_OK != uiRet)
-        {
-            OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Failed to query next db mac");
-            return OVSDB_ERR;
-        }
-        uiLoop = 0;
+        return uiRet;
     }
 
     return OVSDB_OK;

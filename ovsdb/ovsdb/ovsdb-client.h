@@ -127,35 +127,40 @@ do{\
     }\
 }while(0)
 
+static inline unsigned int OVSDB_CLIENT_GET_STRING_FROM_NCREPLY
+(
+    char * str, 
+    unsigned int str_len,
+    char * left,
+    char * right,
+    char * start,
+    char * end
+)
+{
+    char * pLeft  = NULL;
+    char * pRight = NULL;
+    int i = 0;
+    pLeft = strstr(start, left);
+    if ((NULL == pLeft) || (pLeft >= end))
+    {
+        return OVSDB_ERR_NOT_EXISTED;
+    }
+    pLeft = pLeft + strlen(left);
+    pRight = strstr(pLeft, right);
+    if ((NULL == pRight) || (pRight >= end))
+    {
+        return OVSDB_ERR_INPUT_PARAM;
+    }
+    while ((pLeft != pRight) && (i < str_len - 1))
+    {
+        str[i] = *pLeft;
+        pLeft++;
+        i++;
+    }
+    str[i] = '\0';
 
-#define OVSDB_CLIENT_GET_STRING_FROM_NCREPLY(str, str_len, left, right, start)  \
-do{                                                                             \
-    char * pLeft  = NULL;                                                       \
-    char * pRight = NULL;                                                       \
-    int i = 0;                                                                  \
-    (void)memset(str, 0, str_len);                                              \
-    pLeft = strstr(start, left);                                                \
-    if (NULL == pLeft)                                                          \
-    {                                                                           \
-        start = NULL;                                                           \
-        break;                                                                  \
-    }                                                                           \
-    pLeft = pLeft + strlen(left);                                               \
-    pRight = strstr(pLeft, right);                                              \
-    if (NULL == pLeft)                                                          \
-    {                                                                           \
-        start = NULL;                                                           \
-        break;                                                                  \
-    }                                                                           \
-    while ((pLeft != pRight) && (i < str_len - 1))                              \
-    {                                                                           \
-        str[i] = *pLeft;                                                        \
-        pLeft++;                                                                \
-        i++;                                                                    \
-    }                                                                           \
-    str[i] = '\0';                                                              \
-    start = pRight + strlen(right);                                             \
-}while (0)
+    return OVSDB_OK;
+}
 
 #define OVSDB_CLIENT_GET_TUNNELS_FROM_PHYSICAL_SWITCH(strLeft, num, left, right, start)\
 do{                                                                                    \
@@ -171,7 +176,7 @@ do{                                                                             
     pLeft = pLeft + strlen(left);                                                      \
     strLeft = pLeft;                                                                   \
     pRight = strstr(pLeft, right);                                                     \
-    if (NULL == pLeft)                                                                 \
+    if (NULL == pRight)                                                                 \
     {                                                                                  \
         start = NULL;                                                                  \
         break;                                                                         \

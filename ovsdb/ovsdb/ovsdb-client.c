@@ -1433,7 +1433,7 @@ unsigned int netconf_ce_config_port(unsigned int uiVlanId, unsigned int uiVniId,
     if(!paIfname)
     {
         OVSDB_PRINTF_DEBUG_ERROR("[ERROR]Port ifname name %s is NULL", paIfname);
-        return;
+        return OVSDB_ERR;
     }
 
     OVSDB_PRINTF_DEBUG_TRACE("[Info]Vlan id = %d, Vni = %d", uiVlanId, uiVniId );
